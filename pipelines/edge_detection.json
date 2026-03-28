@@ -1,0 +1,28 @@
+{
+    "id": "edge_detection",
+    "name": "Canny Edge Detection",
+    "description": "Grayscale conversion followed by Canny edge detection",
+    "version": "1.0.0",
+    "steps": [
+        {
+            "operation": "cvtColor",
+            "params": {
+                "code": "COLOR_BGR2GRAY"
+            }
+        },
+        {
+            "operation": "GaussianBlur",
+            "params": {
+                "ksize": [5, 5],
+                "sigmaX": 1.4
+            }
+        },
+        {
+            "operation": "Canny",
+            "params": {
+                "threshold1": 50,
+                "threshold2": 150
+            }
+        }
+    ]
+}

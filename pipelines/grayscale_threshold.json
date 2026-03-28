@@ -1,0 +1,22 @@
+{
+    "id": "grayscale_threshold",
+    "name": "Grayscale + Threshold",
+    "description": "Convert to grayscale and apply binary threshold",
+    "version": "1.0.0",
+    "steps": [
+        {
+            "operation": "cvtColor",
+            "params": {
+                "code": "COLOR_BGR2GRAY"
+            }
+        },
+        {
+            "operation": "threshold",
+            "params": {
+                "thresh": 127,
+                "maxval": 255,
+                "type": "THRESH_BINARY"
+            }
+        }
+    ]
+}
