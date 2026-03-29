@@ -1,0 +1,42 @@
+{
+    "device_name": "openSMT-Alpha-1",
+    "units": {
+        "board_loader": {
+            "driver_ref": "grbl_main"
+        },
+        "xy_table": {
+            "driver_ref": "grbl_main",
+            "size_mm": [300.0, 200.0],
+            "resolution_mm_step": [0.0125, 0.0125]
+        },
+        "placement_head": {
+            "camera_ref": "top_cam",
+            "nozzles": [
+                {
+                    "id": 1,
+                    "driver_ref": "nozzle_controller",
+                    "min_z_limit": -50.0
+                }
+            ]
+        }
+    },
+    "drivers": {
+        "gcode": [
+            {
+                "name": "grbl_main",
+                "port": "/dev/cu.usbserial-1410",
+                "baudrate": 115200
+            }
+        ],
+        "camera": [
+            {
+                "name": "top_cam",
+                "index": 0,
+                "dpi_settings": [
+                    {"height": 0.0, "dpi": 96.0},
+                    {"height": -100.0, "dpi": 210.0}
+                ]
+            }
+        ]
+    }
+}

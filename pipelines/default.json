@@ -1,7 +1,0 @@
-{
-    "id": "default",
-    "name": "Default Pipeline",
-    "description": "Passthrough pipeline with no processing",
-    "version": "1.0.0",
-    "steps": []
-}
