@@ -13,14 +13,10 @@ class CameraWorker(QObject):
     image_ready = Signal(np.ndarray)
 
     def __init__(self, camera_index, name, dpi_map):
-        """
-        dpi_map: List of dicts [{"height": 0, "dpi": 100}, {"height": -50, "dpi": 150}]
-        """
         super().__init__()
         self.camera_index = camera_index
         self.name = name
-        self.dpi_map = sorted(dpi_map, key=lambda x: x['height'])
-        self.cap = None
+        self.dpi_map = dpi_map # Use this later for interpolation
         self.keep_running = True
 
     def get_dots_per_mm(self, current_height):
