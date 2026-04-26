@@ -1,0 +1,6 @@
+{
+  "$include": [
+    "broker.json",
+    "modules.json"
+  ]
+}

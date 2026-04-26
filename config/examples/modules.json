@@ -1,0 +1,26 @@
+{
+  "modules": {
+    "GCODE": {
+      "type": "serial_gcode",
+      "speed_factor": 100.0,
+      "axis_velocity": {
+        "X": 25000.0,
+        "Y": 25000.0,
+        "Z1": 5000.0,
+        "Z2": 5000.0,
+        "Z3": 5000.0,
+        "Z4": 5000.0,
+        "R1": 100000.0,
+        "R2": 100000.0,
+        "R3": 100000.0,
+        "R4": 100000.0
+      },
+      "$include": "serial_ports_main.json"
+    },
+    "COORD": {
+      "type": "coordinate_system",
+      "default_target": "GCODE",
+      "axes": ["X", "Y", "Z1", "Z2", "Z3", "Z4", "R1", "R2", "R3", "R4"]
+    }
+  }
+}

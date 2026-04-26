@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opensmt"
+version = "0.1.0"
+description = "Modular communication framework for SMT placement automation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PySide6>=6.7.0",
+  "pyserial>=3.5",
+  "pyserial-asyncio>=0.6",
+]
+
+[project.scripts]
+opensmt = "opensmt.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
