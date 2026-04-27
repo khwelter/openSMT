@@ -104,12 +104,17 @@ class SerialGCodeModule(ModuleBase):
         self._ports: dict[str, SerialPortState] = {}
         self._axis_owner: dict[str, str] = {}
         self._axis_velocity: dict[str, float] = {}
+        self._homing_velocity: dict[str, float] = {}
         self._speed_factor = float(config.get("speed_factor", 100.0))
 
         default_velocity = float(config.get("default_velocity", 25000.0))
         configured_axis_velocity = {
             str(axis).upper(): float(speed)
             for axis, speed in config.get("axis_velocity", {}).items()
+        }
+        configured_homing_velocity = {
+            str(axis).upper(): float(speed)
+            for axis, speed in config.get("homing_velocity", {}).items()
         }
 
         for item in config.get("serial_ports", []):
@@ -139,10 +144,15 @@ class SerialGCodeModule(ModuleBase):
                     )
                 self._axis_owner[axis] = port_cfg.name
                 self._axis_velocity[axis] = configured_axis_velocity.get(axis, default_velocity)
+                self._homing_velocity[axis] = configured_homing_velocity.get(axis, self._axis_velocity[axis])
 
         for axis, speed in configured_axis_velocity.items():
             if axis not in self._axis_velocity:
                 self._axis_velocity[axis] = speed
+
+        for axis, speed in configured_homing_velocity.items():
+            if axis not in self._homing_velocity:
+                self._homing_velocity[axis] = speed
 
         self._port_order: list[str] = list(self._ports.keys())
         self._do_state: dict[int, int] = {}
@@ -605,10 +615,23 @@ class SerialGCodeModule(ModuleBase):
             return
 
         async with state.command_lock:
+            # Build M210 command with homing velocities for the axes being homed
+            m210_parts = []
+            for logical, gcode in axis_pairs:
+                homing_vel = self._homing_velocity.get(logical)
+                if homing_vel is not None:
+                    m210_parts.append(f"{gcode}{_fmt_num(homing_vel)}")
+            
+            await self.node.send_working(command, target=target)
+            
+            # Send M210 to set homing velocities (if any axes have defined homing velocities)
+            if m210_parts:
+                m210_gcode = f"M210 {' '.join(m210_parts)}"
+                await self._write_line(state, m210_gcode)
+            
+            # Send G28 to perform homing
             gcode_axes = " ".join(gcode for _, gcode in axis_pairs)
             gcode = f"G28 {gcode_axes}"
-
-            await self.node.send_working(command, target=target)
             await self._write_line(state, gcode)
 
             coords = await self._wait_for_coords(state, command, target)

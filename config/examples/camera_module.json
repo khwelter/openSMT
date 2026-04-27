@@ -1,28 +1,39 @@
 {
   "type": "camera_vision",
   "name": "CAMERA",
+  "web_host": "0.0.0.0",
   "web_port": 8080,
 
   "cameras": [
     {
-      "name": "TOP",
-      "device": 0,
+      "name": "BOTTOM",
+      "device": "/dev/video0",
       "fps": 10,
+      "resolution_dpcm_x": 95.0,
+      "resolution_dpcm_y": 95.0,
+      "flip_horizontal": false,
+      "flip_vertical": false,
+      "rotation_deg": 0,
       "lights": {
-        "standard": ":GCODE:ANOUT:2 64",
-        "spec1":    ":GCODE:ANOUT:3 128",
+        "standard": ":GCODE:ANOUT:2 2",
+        "spec1":    ":GCODE:ANOUT:16 128",
         "spec2":    ":GCODE:ANOUT:4 48"
       },
       "pipelines": ["DETECT_FIDUCIAL", "MEASURE_COMPONENT"]
     },
     {
-      "name": "SIDE",
-      "device": 1,
+      "name": "TOP",
+      "device": "/dev/video2",
       "fps": 5,
+      "resolution_dpcm_x": 238.0,
+      "resolution_dpcm_y": 238.0,
+      "flip_horizontal": false,
+      "flip_vertical": false,
+      "rotation_deg": 89.5,
       "lights": {
-        "standard": ":GCODE:ANOUT:5 48",
-        "spec1":    ":GCODE:ANOUT:6 64",
-        "spec2":    ":GCODE:ANOUT:7 32"
+        "standard": ":GCODE:ANOUT:16 2",
+        "spec1":    ":GCODE:ANOUT:17 64",
+        "spec2":    ":GCODE:ANOUT:18 32"
       },
       "pipelines": ["PASSTHROUGH"]
     }
