@@ -30,21 +30,39 @@ Werte duerfen Integer, Fliesskomma oder Strings in Anfuehrungszeichen sein.
 
    export PYTHONPATH=src
 
-2. Broker starten
+2. Konfiguration pruefen und an Hardware anpassen
+
+   - Datei: config/examples/system.json
+   - Wichtig: boards.*.device auf die realen seriellen Geraete setzen
+   - Optional: camera.web_host / camera.web_port und locations anpassen
+
+3. System starten
+
+   python3 -m opensmt run --config config/examples/system.json
+
+4. Web-Dashboard oeffnen
+
+   http://127.0.0.1:8080
+
+Hinweis:
+Die neue Laufzeit startet HardwareDriver + PositionStore + LocationStore + CameraVision direkt aus system.json.
+Ein separater Broker ist dafuer nicht noetig.
+
+### Legacy Tools (optional)
+
+Die folgenden CLI-Tools sind weiterhin verfuegbar, aber nicht Teil des neuen Standard-Startablaufs:
+
+1. Broker starten
 
    python3 -m opensmt broker --host 127.0.0.1 --port 8765
 
-3. Terminal-Monitor starten
+2. Terminal-Monitor starten
 
    python3 -m opensmt monitor --host 127.0.0.1 --port 8765 --name MON1
 
-4. Qt-Monitor starten
+3. Qt-Monitor starten
 
    python3 -m opensmt monitor-gui --host 127.0.0.1 --port 8765 --name MON_GUI
-
-5. Module aus Konfiguration starten
-
-   python3 -m opensmt run --config config/examples/system.json
 
 ## Debian Pakete
 
@@ -194,6 +212,46 @@ These responses are consumed by the COORD module to keep its position cache curr
 
 ---
 
+### HEAD module (head)
+
+The HEAD module manages one or more nozzles and maps them to GCODE Z-axes.
+Each nozzle has relative offsets `xr`/`yr` (referenced to the primary camera),
+an assigned Z axis (`Z1..Z4`), and a configurable HOME Z position.
+
+Default setup:
+- Primary camera: `TOP`
+- Home position: `50.0 mm`
+- Nozzles: `N1..N4` mapped to `Z1..Z4`
+
+#### Queries answered by HEAD
+
+| Command | Response | Description |
+|---------|----------|-------------|
+| `:HEAD:NOZZLES?` | JSON payload | Full head configuration + live nozzle Z states |
+| `:HEAD:POS:<nozzle>?` | `<z>` | Current Z position for nozzle |
+
+#### SET commands to HEAD
+
+| Command | Value | Description |
+|---------|-------|-------------|
+| `:HEAD:ABS:<nozzle>` | `<z>` | Move nozzle to absolute Z position (via mapped `:GCODE:POS:Zx`) |
+| `:HEAD:REL:<nozzle>` | `<delta_z>` | Move nozzle by relative Z delta |
+
+#### ACTION commands to HEAD
+
+| Command | Description |
+|---------|-------------|
+| `:HEAD:PARK:<nozzle>` | Move nozzle to HOME Z position |
+| `:HEAD:PARK` | Park all nozzles to HOME Z position |
+
+#### Outbound commands from HEAD (to GCODE)
+
+| Command | Target | Description |
+|---------|--------|-------------|
+| `:GCODE:POS:<Z1..Z4>` | GCODE | Underlying Z-axis move for nozzle command |
+
+---
+
 ### CAMERA module (camera_vision)
 
 The CAMERA module provides the web dashboard, MJPEG camera streams, and light/pipeline control.
@@ -216,7 +274,7 @@ The CAMERA module provides the web dashboard, MJPEG camera streams, and light/pi
 
 When a light is set, CAMERA forwards the value to the appropriate GCODE ANOUT channel.
 
-#### Outbound commands from CAMERA (to GCODE / COORD)
+#### Outbound commands from CAMERA (to GCODE / COORD / HEAD)
 
 | Command | Target | Description |
 |---------|--------|-------------|
@@ -232,6 +290,8 @@ When a light is set, CAMERA forwards the value to the appropriate GCODE ANOUT ch
 | `:COORD:NOZZLECHANGE` | COORD | Move to Nozzle Change (web button) |
 | `:COORD:CALIBRATIONSPOT` | COORD | Move to Calibration Spot (web button) |
 | `:COORD:ABS:<axis>?` | COORD | Periodic coordinate polling (WebSocket) |
+| `:HEAD:REL:<nozzle>` | HEAD | Nozzle up/down move from dashboard card |
+| `:HEAD:PARK:<nozzle>` | HEAD | Park nozzle to HOME position from dashboard card |
 
 ---
 

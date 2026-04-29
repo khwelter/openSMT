@@ -544,6 +544,16 @@ class SerialGCodeModule(ModuleBase):
             "XY": ["X", "Y"],
             "Z1R1": ["Z1", "R1"],
             "Z2R2": ["Z2", "R2"],
+            "Z3R3": ["Z3", "R3"],
+            "Z4R4": ["Z4", "R4"],
+            "Z1": ["Z1"],
+            "Z2": ["Z2"],
+            "Z3": ["Z3"],
+            "Z4": ["Z4"],
+            "R1": ["R1"],
+            "R2": ["R2"],
+            "R3": ["R3"],
+            "R4": ["R4"],
         }
 
         logical_axes = pair_axes.get(axis.upper(), [axis.upper()])

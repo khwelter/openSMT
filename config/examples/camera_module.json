@@ -3,6 +3,21 @@
   "name": "CAMERA",
   "web_host": "0.0.0.0",
   "web_port": 8080,
+  "gcode_target": "GCODE",
+  "head_target": "HEAD",
+  "head_nozzles": ["N1", "N2", "N3", "N4"],
+  "nozzle_z_axis_map": {
+    "N1": "Z1",
+    "N2": "Z2",
+    "N3": "Z3",
+    "N4": "Z4"
+  },
+  "nozzle_limits": {
+    "N1": {"min_z": -50.0, "max_z": 0.0},
+    "N2": {"min_z": -50.0, "max_z": 0.0},
+    "N3": {"min_z": -50.0, "max_z": 0.0},
+    "N4": {"min_z": -50.0, "max_z": 0.0}
+  },
 
   "cameras": [
     {

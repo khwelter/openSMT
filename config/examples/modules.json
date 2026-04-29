@@ -29,12 +29,25 @@
       "type": "coordinate_system",
       "default_target": "GCODE",
       "axes": ["X", "Y", "Z1", "Z2", "Z3", "Z4", "R1", "R2", "R3", "R4"],
-      "park_position": {"x": 350.0, "y": 350.0},
+      "park_position": {"x": 250.0, "y": 250.0},
       "dispose_position": {"x": 150.0, "y": 150.0},
       "homing_fiducial_main_position": {"x": 262.4, "y": 120.50},
       "secondary_fiducial_position": {"x": 300.0, "y": 180.0},
       "nozzle_change_position": {"x": 250.0, "y": 50.0},
       "calibration_spot_position": {"x": 374.70, "y": 120.80}
+    },
+    "HEAD": {
+      "type": "head",
+      "target": "GCODE",
+      "home_position": 0.0,
+      "primary_camera": "TOP",
+      "camera_refs": ["TOP"],
+      "nozzles": [
+        {"name": "N1", "xr": 0.0, "yr": 0.0, "z_axis": "Z1"},
+        {"name": "N2", "xr": 8.0, "yr": 0.0, "z_axis": "Z2"},
+        {"name": "N3", "xr": 16.0, "yr": 0.0, "z_axis": "Z3"},
+        {"name": "N4", "xr": 24.0, "yr": 0.0, "z_axis": "Z4"}
+      ]
     },
     "CAMERA": {
       "$include": "camera_module.json"

@@ -5,16 +5,21 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 from aiohttp import web
 
-from opensmt.messaging import BusNode, SCPIMessage
 from opensmt.vision import PassthroughPipeline, VisionPipelineBase
 
-from .base import ModuleBase
+from opensmt.hardware.driver import HardwareDriver
+from opensmt.runtime.command_runner import CommandRunner
+from opensmt.store.location_store import LocationStore
+from opensmt.store.nozzle_config import NozzleConfigStore
+from opensmt.store.position_store import PositionStore
+from opensmt.store.valve_store import ValveStore
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +32,8 @@ _PIPELINE_REGISTRY: dict[str, type[VisionPipelineBase]] = {
 }
 
 _COORD_AXES = ["X", "Y", "Z1", "R1", "Z2", "R2", "Z3", "R3", "Z4", "R4"]
+_LIGHT_MIN = 0
+_LIGHT_MAX = 3
 
 
 def register_pipeline(type_name: str):
@@ -45,7 +52,8 @@ def register_pipeline(type_name: str):
 
 @dataclass(slots=True)
 class LightConfig:
-    bus_command: str  # SCPI SET path, e.g. ":GCODE:ANOUT:2"
+    board_id: str     # target board, e.g. "XY"
+    index: int        # board-local analog output index
     on_value: int     # brightness used for the "ON" shorthand
 
 
@@ -81,29 +89,73 @@ class CameraState:
     current_rotation_deg: int = field(default_factory=lambda: 0)
 
 
+@dataclass(slots=True)
+class RuntimeNozzleConfig:
+    """Runtime nozzle state: Z-axis limits and rotation axis."""
+    name: str
+    z_axis: str
+    r_axis: str
+    min_z: float     # Minimum Z position (default -50.0)
+    max_z: float     # Maximum Z position (default 0.0)
+
+
 # ---------------------------------------------------------------------------
 # Module
 # ---------------------------------------------------------------------------
 
-class CameraVisionModule(ModuleBase):
+class CameraVisionModule:
     """OpenCV camera module with per-camera lights, vision pipelines and
     an embedded aiohttp web dashboard (Bootstrap 5)."""
 
-    def __init__(self, name: str, config: dict[str, Any], node: BusNode) -> None:
-        super().__init__(name, config, node)
+    def __init__(
+        self,
+        name: str,
+        config: dict[str, Any],
+        driver: HardwareDriver,
+        position_store: PositionStore,
+        location_store: LocationStore,
+        nozzle_config_store: NozzleConfigStore | None = None,
+        valve_store: ValveStore | None = None,
+    ) -> None:
+        self.name = name
+        self.config = config
+        self._driver = driver
+        self._position_store = position_store
+        self._location_store = location_store
+        self._nozzle_config_store = nozzle_config_store
+        self._valve_store = valve_store
         self._cameras: dict[str, CameraState] = {}
         self._pipelines: dict[str, VisionPipelineBase] = {
             "PASSTHROUGH": PassthroughPipeline("PASSTHROUGH", {}),
         }
         self._web_host = str(config.get("web_host", "0.0.0.0"))
         self._web_port = int(config.get("web_port", 8080))
-        self._coord_target = str(config.get("coord_target", "COORD")).upper()
-        self._coord_positions: dict[str, float | None] = {axis: None for axis in _COORD_AXES}
-        self._coord_waiters: dict[str, list[asyncio.Future[float]]] = {axis: [] for axis in _COORD_AXES}
+        self._icons_dir = Path(__file__).resolve().parents[3] / "assets" / "icons" / "opensmt-ui" / "128"
+
+        # Build nozzle runtime config table (limits only; current position lives in PositionStore)
+        self._nozzles: dict[str, RuntimeNozzleConfig] = {}
+        for item in config.get("nozzles", []):
+            n_name = str(item["name"]).upper()
+            z_axis = str(item["z_axis"]).upper()
+            if z_axis.startswith("Z") and len(z_axis) > 1:
+                r_axis = f"R{z_axis[1:]}"
+            else:
+                r_axis = "R1"
+            min_z = float(item.get("min_z", -50.0))
+            max_z = float(item.get("max_z", 0.0))
+            self._nozzles[n_name] = RuntimeNozzleConfig(
+                name=n_name,
+                z_axis=z_axis,
+                r_axis=r_axis,
+                min_z=min_z,
+                max_z=max_z,
+            )
+        log.debug("Nozzle configs: %s", {n: (c.z_axis, c.r_axis, c.min_z, c.max_z) for n, c in self._nozzles.items()})
+
         self._coord_ws_clients: set[web.WebSocketResponse] = set()
-        self._coord_ws_task: asyncio.Task[None] | None = None
         self._last_coord_broadcast: dict[str, float | None] | None = None
         self._runner: web.AppRunner | None = None
+        self._commands = CommandRunner(max_history=500)
 
         # Build named pipeline pool
         for pipe_cfg in config.get("pipelines", []):
@@ -124,17 +176,18 @@ class CameraVisionModule(ModuleBase):
             lights: dict[str, LightConfig] = {}
             for light_key, light_val in cam_cfg.get("lights", {}).items():
                 key = light_key.lower()
-                if isinstance(light_val, str):
-                    # "  :GCODE:ANOUT:2 64  " → command + on_value
-                    parts = light_val.strip().split()
-                    bus_cmd = parts[0]
-                    on_val = int(parts[1]) if len(parts) > 1 else 1
-                elif isinstance(light_val, dict):
-                    bus_cmd = str(light_val["command"])
-                    on_val = int(light_val.get("on_value", 1))
-                else:
+                if not isinstance(light_val, dict):
+                    log.warning("Skipping light %s/%s: expected dict with board/index/on_value", cam_cfg["name"], light_key)
                     continue
-                lights[key] = LightConfig(bus_command=bus_cmd, on_value=on_val)
+                try:
+                    board_id = str(light_val["board"]).upper()
+                    index = int(light_val["index"])
+                    on_val = int(light_val.get("on_value", 1))
+                    on_val = min(max(on_val, _LIGHT_MIN), _LIGHT_MAX)
+                except (KeyError, ValueError, TypeError):
+                    log.warning("Invalid light config for %s/%s: %s", cam_cfg["name"], light_key, light_val)
+                    continue
+                lights[key] = LightConfig(board_id=board_id, index=index, on_value=on_val)
 
             pipe_names = [str(p).upper() for p in cam_cfg.get("pipelines", [])]
 
@@ -158,29 +211,39 @@ class CameraVisionModule(ModuleBase):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
-        self.node.on_query("*", self._handle_query)
-        self.node.on_set("*", self._handle_set)
-        self.node.on_response("*", self._handle_response)
+    def _cancel_latest_active_domain_job(self, domain: str) -> str | None:
+        prefix = f"{domain}_"
+        for job in self._commands.recent(limit=200):
+            name = str(job.get("name", ""))
+            state = str(job.get("state", ""))
+            if not name.startswith(prefix):
+                continue
+            if state in {"succeeded", "failed", "canceled"}:
+                continue
+            job_id = str(job.get("job_id", ""))
+            result = self._commands.cancel(job_id)
+            if result == "cancel_requested":
+                return job_id
+            return None
+        return None
 
+    def _submit_domain_command(
+        self,
+        domain: str,
+        name: str,
+        command: callable,
+    ) -> tuple[str, str | None]:
+        canceled_job_id = self._cancel_latest_active_domain_job(domain)
+        return self._commands.submit(name, command), canceled_job_id
+
+    async def start(self) -> None:
+        self._position_store.subscribe(self._on_position_update)
         for state in self._cameras.values():
             await self._open_camera(state)
-
         await self._start_web()
-        self._coord_ws_task = asyncio.create_task(
-            self._coord_ws_loop(),
-            name=f"coord-ws-loop-{self.name}",
-        )
 
     async def stop(self) -> None:
-        if self._coord_ws_task:
-            self._coord_ws_task.cancel()
-            try:
-                await self._coord_ws_task
-            except asyncio.CancelledError:
-                pass
-            self._coord_ws_task = None
-
+        self._position_store.unsubscribe(self._on_position_update)
         for ws in list(self._coord_ws_clients):
             await ws.close()
         self._coord_ws_clients.clear()
@@ -348,147 +411,16 @@ class CameraVisionModule(ModuleBase):
         return out
 
     # ------------------------------------------------------------------
-    # Bus handlers
-    # ------------------------------------------------------------------
-
-    async def _handle_query(self, packet: dict[str, Any], msg: SCPIMessage) -> None:
-        if packet.get("source") == self.node.name:
-            return
-        parts = msg.command.strip(":").split(":")
-        if not parts or parts[0] != self.name:
-            return
-
-        target = packet.get("source")
-
-        # :CAMERA:STATUS?  →  dict of all camera statuses
-        if len(parts) == 2 and parts[1] == "STATUS":
-            statuses = {
-                n: ("online" if s.cap is not None else "offline")
-                for n, s in self._cameras.items()
-            }
-            await self.node.send_response(msg.command, json.dumps(statuses), target=target)
-            return
-
-        if len(parts) < 3:
-            return
-        cam_name = parts[1]
-        state = self._cameras.get(cam_name)
-        if not state:
-            return
-
-        verb = parts[2]
-
-        if verb == "STATUS" and len(parts) == 3:
-            status = "online" if state.cap is not None else "offline"
-            await self.node.send_response(msg.command, status, target=target)
-
-        elif verb == "LIGHT" and len(parts) == 4:
-            light = parts[3].lower()
-            val = state.light_values.get(light, 0)
-            await self.node.send_response(msg.command, val, target=target)
-
-        elif verb == "PIPELINE" and len(parts) == 3:
-            await self.node.send_response(
-                msg.command, state.active_pipeline or "", target=target
-            )
-
-    async def _handle_set(self, packet: dict[str, Any], msg: SCPIMessage) -> None:
-        if packet.get("source") == self.node.name:
-            return
-        parts = msg.command.strip(":").split(":")
-        if len(parts) < 4 or parts[0] != self.name:
-            return
-
-        target = packet.get("source")
-        cam_name = parts[1]
-        state = self._cameras.get(cam_name)
-        if not state:
-            return
-
-        verb = parts[2]
-
-        # :CAMERA:<name>:LIGHT:<light> <value|ON|OFF>
-        if verb == "LIGHT" and len(parts) == 4:
-            light = parts[3].lower()
-            light_cfg = state.config.lights.get(light)
-            if not light_cfg:
-                await self.node.send_response(
-                    msg.command, f"UNKNOWN_LIGHT:{light}", target=target
-                )
-                return
-
-            raw = str(msg.value).strip().upper()
-            if raw == "ON":
-                value = light_cfg.on_value
-            elif raw == "OFF":
-                value = 0
-            else:
-                try:
-                    value = int(float(raw))
-                except ValueError:
-                    await self.node.send_response(msg.command, "INVALID_VALUE", target=target)
-                    return
-
-            if not (0 <= value <= 65535):
-                await self.node.send_response(msg.command, "VALUE_OUT_OF_RANGE", target=target)
-                return
-
-            await self.node.send_set(light_cfg.bus_command, value)
-            state.light_values[light] = value
-            await self.node.send_response(msg.command, value, target=target)
-
-        # :CAMERA:<name>:PIPELINE:<pipe_name> [json_params]
-        elif verb == "PIPELINE" and len(parts) == 4:
-            pipe_name = parts[3].upper()
-            if pipe_name not in self._pipelines:
-                await self.node.send_response(
-                    msg.command, f"UNKNOWN_PIPELINE:{pipe_name}", target=target
-                )
-                return
-
-            raw_params = str(msg.value).strip() if msg.value else ""
-            if raw_params:
-                try:
-                    params: dict[str, Any] = json.loads(raw_params)
-                    if not isinstance(params, dict):
-                        raise ValueError
-                except (json.JSONDecodeError, ValueError):
-                    await self.node.send_response(msg.command, "INVALID_PARAMS_JSON", target=target)
-                    return
-            else:
-                params = {}
-
-            state.active_pipeline = pipe_name
-            state.pipeline_params = params
-            await self.node.send_response(msg.command, pipe_name, target=target)
-
-    async def _handle_response(self, packet: dict[str, Any], msg: SCPIMessage) -> None:
-        parts = msg.command.strip(":").split(":")
-        if len(parts) != 3:
-            return
-
-        scope = parts[1].upper()
-        axis = parts[2].upper()
-        if scope not in {"ABS", "POS"} or axis not in self._coord_positions:
-            return
-
-        value = self._parse_numeric(msg.value)
-        if value is None:
-            return
-
-        self._coord_positions[axis] = value
-        for fut in self._coord_waiters[axis]:
-            if not fut.done():
-                fut.set_result(value)
-        self._coord_waiters[axis].clear()
-        await self._broadcast_coord_positions(force=False)
-
     # ------------------------------------------------------------------
     # Web server
     # ------------------------------------------------------------------
 
     async def _start_web(self) -> None:
         app = web.Application()
+        if self._icons_dir.is_dir():
+            app.router.add_static("/assets/icons", path=str(self._icons_dir), show_index=False)
+        else:
+            log.warning("Icon directory not found: %s", self._icons_dir)
         app.router.add_get("/", self._web_main)
         app.router.add_get("/ws/coord", self._ws_coord)
         app.router.add_get("/camera/{name}", self._web_camera)
@@ -501,6 +433,10 @@ class CameraVisionModule(ModuleBase):
         app.router.add_post("/api/coord/jog", self._api_coord_jog)
         app.router.add_post("/api/coord/home", self._api_coord_home)
         app.router.add_post("/api/coord/home-xy", self._api_coord_home_xy)
+        app.router.add_post("/api/head/nozzle/{name}/move", self._api_head_move)
+        app.router.add_post("/api/head/nozzle/{name}/rotate", self._api_head_rotate)
+        app.router.add_post("/api/head/nozzle/{name}/home", self._api_head_home)
+        app.router.add_post("/api/head/nozzle/{name}/park", self._api_head_park)
         app.router.add_post("/api/coord/park", self._api_coord_park)
         app.router.add_post("/api/coord/dispose", self._api_coord_dispose)
         app.router.add_post("/api/coord/homing-fiducial-main", self._api_coord_homing_fiducial_main)
@@ -508,6 +444,16 @@ class CameraVisionModule(ModuleBase):
         app.router.add_post("/api/coord/nozzle-change", self._api_coord_nozzle_change)
         app.router.add_post("/api/coord/calibration-spot", self._api_coord_calibration_spot)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
+        app.router.add_post("/api/nozzle/{name}/move-to-camera", self._api_nozzle_move_to_camera)
+        app.router.add_post("/api/nozzle/{name}/move-to-bottom-camera", self._api_nozzle_move_to_bottom_camera)
+        app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
+        app.router.add_post("/api/nozzle/{name}/vacuum", self._api_nozzle_vacuum)
+        app.router.add_post("/api/nozzle/{name}/air", self._api_nozzle_air)
+        app.router.add_get("/api/status", self._api_status)
+        app.router.add_get("/api/jobs", self._api_jobs)
+        app.router.add_get("/api/jobs/{job_id}", self._api_job)
+        app.router.add_post("/api/jobs/{job_id}/cancel", self._api_job_cancel)
+        app.router.add_post("/api/jobs/cancel-latest/{domain}", self._api_jobs_cancel_latest)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -527,9 +473,9 @@ class CameraVisionModule(ModuleBase):
             <div class="col-sm-6 col-xl-4">
               <div class="card h-100 shadow-sm">
                 <div class="card-img-top overflow-hidden bg-dark text-center" style="height:180px">
-                  <img id="thumb-{cam_name}" src="/thumb/{cam_name}"
+                  <img src="/stream/{cam_name}"
                        class="h-100" style="object-fit:cover;width:100%"
-                       onerror="this.style.opacity='0'" />
+                       onerror="this.style.opacity='0.2'" />
                 </div>
                 <div class="card-body d-flex flex-column">
                   <h5 class="card-title d-flex justify-content-between align-items-center">
@@ -553,65 +499,8 @@ class CameraVisionModule(ModuleBase):
               </div>
             </div>"""
 
-        html = f"""\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>openSMT Vision</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
-</head>
-<body class="bg-light">
-  <nav class="navbar navbar-dark bg-dark shadow-sm">
-    <div class="container-fluid">
-      <span class="navbar-brand fw-bold">&#128247; openSMT Vision</span>
-    </div>
-  </nav>
-  <div class="container py-4">
-    <h4 class="mb-3 text-secondary">Camera Dashboard</h4>
-        <div class="row g-4">{cards}</div>
-
-        <div class="row g-4 mt-1">
-            <div class="col-12 col-xl-6">
-                <div class="card shadow-sm">
-                    <div class="card-header fw-semibold">XY Positioning</div>
-                    <div class="card-body">
-                        <div class="mb-3">
-                            <label for="step-range" class="form-label small text-muted mb-1">Step Size (mm)</label>
-                            <input type="range" class="form-range" min="0" max="8" step="1" id="step-range" value="3" oninput="updateStepLabel()">
-                            <div class="d-flex justify-content-between small text-muted">
-                                <span>0.01</span><span>0.1</span><span>0.5</span><span>1.0</span><span>5.0</span><span>10.0</span><span>25.0</span><span>50.0</span><span>100</span>
-                            </div>
-                            <div class="small mt-2">Selected: <span class="badge bg-primary" id="step-label">1.0 mm</span></div>
-                        </div>
-
-                        <div class="mb-2 d-flex justify-content-center gap-2">
-                            <button class="btn btn-outline-dark" onclick="goHome()" title="Home All">&#127968;</button>
-                            <button class="btn btn-outline-success" onclick="goHomeXY()" title="Home X & Y (simultaneous)">XY↻</button>
-                            <button class="btn btn-outline-info" onclick="goCalibrationSpot()" title="Calibration Spot">CAL</button>
-                        </div>
-
-                        <div class="d-grid gap-2 justify-content-center" style="grid-template-columns: 64px 64px 64px;">
-                            <button class="btn btn-outline-secondary" onclick="goHomingFiducialMain()" title="Homing Fiducial Main">HM</button>
-                            <button class="btn btn-outline-primary" onclick="jog(0,1)">&#8593;</button>
-                            <button class="btn btn-outline-secondary" onclick="goSecondaryFiducial()" title="Secondary Fiducial">HS</button>
-
-                            <button class="btn btn-outline-primary" onclick="jog(-1,0)">&#8592;</button>
-                            <button class="btn btn-success" onclick="goPark()">P</button>
-                            <button class="btn btn-outline-primary" onclick="jog(1,0)">&#8594;</button>
-
-                            <button class="btn btn-outline-warning" onclick="goNozzleChange()" title="Nozzle Change">N</button>
-                            <button class="btn btn-outline-primary" onclick="jog(0,-1)">&#8595;</button>
-                            <button class="btn btn-danger" onclick="goDispose()">Dispose</button>
-                        </div>
-
-                        <div class="small text-muted mt-3" id="coord-status">Ready</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="col-12 col-xl-6">
+        coord_card = """
+            <div class="col-sm-6 col-xl-4">
                 <div class="card shadow-sm h-100">
                     <div class="card-header fw-semibold">Current Coordinates</div>
                     <div class="card-body">
@@ -658,11 +547,215 @@ class CameraVisionModule(ModuleBase):
                         </div>
                     </div>
                 </div>
+            </div>"""
+
+        nozzle_controls = ""
+        for nozzle in self._nozzles:
+            nozzle_controls += f"""
+            <div class="col-12 col-sm-6 col-lg-4">
+                <div class="border rounded p-2 h-100 bg-light-subtle">
+                    <div class="fw-semibold mb-2 d-flex justify-content-between align-items-center">
+                        <span>{nozzle}</span>
+                        <span class="badge bg-secondary small" id="nozzle-status-{nozzle}">--</span>
+                    </div>
+                    
+                    <!-- Position Display -->
+                    <div class="small mb-2 border-bottom pb-1">
+                        <div class="text-muted">Position (offset from camera):</div>
+                        <div class="font-monospace small">
+                            X: <span id="nozzle-pos-x-{nozzle}">--</span> mm
+                            Y: <span id="nozzle-pos-y-{nozzle}">--</span> mm
+                        </div>
+                    </div>
+                    
+                    <!-- Valve Controls -->
+                    <div class="small mb-2 border-bottom pb-1">
+                        <div class="text-muted mb-1">Valves:</div>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-outline-info flex-grow-1" id="vacuum-btn-{nozzle}" onclick="toggleNozzleVacuum('{nozzle}')">
+                                🔸 Vacuum
+                            </button>
+                            <button class="btn btn-sm btn-outline-info flex-grow-1" id="air-btn-{nozzle}" onclick="toggleNozzleAir('{nozzle}')" style="display:none;">
+                                💨 Air
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Motion Controls -->
+                    <div class="d-grid gap-1 justify-content-center" style="grid-template-columns: 1fr 1fr 1fr; max-width: 210px;">
+                        <button class="icon-btn" style="grid-column:1;grid-row:1" onclick="headHome('{nozzle}')" title="Home axis">
+                            <img src="/assets/icons/home_axis.png" alt="" class="btn-icon"><span class="visually-hidden">Home</span>
+                        </button>
+                        <button class="icon-btn" style="grid-column:2;grid-row:1" onclick="headMove('{nozzle}', 1)" title="Move up">
+                            <img src="/assets/icons/z_up.png" alt="" class="btn-icon"><span class="visually-hidden">Up</span>
+                        </button>
+                        <div style="grid-column:3;grid-row:1"></div>
+                        <div style="grid-column:1;grid-row:2"></div>
+                        <button class="icon-btn" style="grid-column:2;grid-row:2" onclick="headPark('{nozzle}')" title="Park to zero">
+                            <img src="/assets/icons/park_zero.png" alt="" class="btn-icon"><span class="visually-hidden">Park</span>
+                        </button>
+                        <div style="grid-column:3;grid-row:2"></div>
+                        <button class="icon-btn" style="grid-column:1;grid-row:3" onclick="headRotate('{nozzle}', -1)" title="Rotate CCW">
+                            <img src="/assets/icons/rotate_ccw.png" alt="" class="btn-icon"><span class="visually-hidden">CCW</span>
+                        </button>
+                        <button class="icon-btn" style="grid-column:2;grid-row:3" onclick="headMove('{nozzle}', -1)" title="Move down">
+                            <img src="/assets/icons/z_down.png" alt="" class="btn-icon"><span class="visually-hidden">Down</span>
+                        </button>
+                        <button class="icon-btn" style="grid-column:3;grid-row:3" onclick="headRotate('{nozzle}', 1)" title="Rotate CW">
+                            <img src="/assets/icons/rotate_cw.png" alt="" class="btn-icon"><span class="visually-hidden">CW</span>
+                        </button>
+                    </div>
+                    
+                    <!-- Nozzle Sync Buttons -->
+                    <div class="d-grid gap-1 mt-2" style="grid-template-columns: 1fr 1fr;">
+                        <button class="btn btn-sm btn-outline-success" onclick="moveNozzleToCamera('{nozzle}')" title="Align nozzle to camera position">
+                            ↓ Align to Cam
+                        </button>
+                        <button class="btn btn-sm btn-outline-success" onclick="moveCameraToNozzle('{nozzle}')" title="Align camera to nozzle position">
+                            ↑ Cam to Nozzle
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" style="grid-column: 1 / span 2;" onclick="moveNozzleToBottomCamera('{nozzle}')" title="Move nozzle above configured BOTTOM camera position">
+                            ◎ Above Bottom Cam
+                        </button>
+                    </div>
+                </div>
+            </div>"""
+
+        html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>openSMT Vision</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+    <style>
+        .btn-icon {{
+            width: 28px;
+            height: 28px;
+            object-fit: contain;
+            display: inline-block;
+            vertical-align: middle;
+            background: #e9ecef;
+            border-radius: 5px;
+            padding: 3px;
+        }}
+        .icon-btn {{
+            border: 0;
+            background: transparent;
+            padding: 0;
+            line-height: 1;
+        }}
+        .icon-btn:hover .btn-icon {{ background: #dde2e7; }}
+        .icon-btn:focus-visible {{
+            outline: 2px solid #198754;
+            outline-offset: 2px;
+            border-radius: 4px;
+        }}
+    </style>
+</head>
+<body class="bg-light">
+  <nav class="navbar navbar-dark bg-dark shadow-sm">
+    <div class="container-fluid">
+      <span class="navbar-brand fw-bold">&#128247; openSMT Vision</span>
+    </div>
+  </nav>
+  <div class="container py-4">
+    <h4 class="mb-3 text-secondary">Camera Dashboard</h4>
+        <div class="row g-4">{cards}{coord_card}</div>
+
+        <div class="row g-4 mt-1">
+            <div class="col-12 col-xl-6">
+                <div class="card shadow-sm">
+                    <div class="card-header fw-semibold">XY Positioning</div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="step-range" class="form-label small text-muted mb-1">Step Size (mm)</label>
+                            <input type="range" class="form-range" min="0" max="8" step="1" id="step-range" value="3" oninput="updateStepLabel()">
+                            <div class="d-flex justify-content-between small text-muted">
+                                <span>0.01</span><span>0.1</span><span>0.5</span><span>1.0</span><span>5.0</span><span>10.0</span><span>25.0</span><span>50.0</span><span>100</span>
+                            </div>
+                            <div class="small mt-2">Selected: <span class="badge bg-primary" id="step-label">1.0 mm</span></div>
+                        </div>
+
+                        <div class="mb-2 d-flex justify-content-center gap-2">
+                            <button class="icon-btn" onclick="goHome()" title="Home All">
+                                <img src="/assets/icons/home_all.png" alt="" class="btn-icon"><span class="visually-hidden">Home All</span>
+                            </button>
+                            <button class="icon-btn" onclick="goHomeXY()" title="Home X & Y (simultaneous)">
+                                <img src="/assets/icons/home_xy.png" alt="" class="btn-icon"><span class="visually-hidden">Home XY</span>
+                            </button>
+                            <button class="icon-btn" onclick="goCalibrationSpot()" title="Calibration Spot">
+                                <img src="/assets/icons/calibration_spot.png" alt="" class="btn-icon"><span class="visually-hidden">Calibration Spot</span>
+                            </button>
+                        </div>
+
+                        <div class="d-grid gap-2 justify-content-center" style="grid-template-columns: 64px 64px 64px;">
+                            <button class="icon-btn" onclick="goHomingFiducialMain()" title="Homing Fiducial Main">
+                                <img src="/assets/icons/fiducial_main.png" alt="" class="btn-icon"><span class="visually-hidden">Homing Fiducial Main</span>
+                            </button>
+                            <button class="icon-btn" onclick="jog(0,1)" title="Jog up">
+                                <img src="/assets/icons/move_up.png" alt="" class="btn-icon"><span class="visually-hidden">Up</span>
+                            </button>
+                            <button class="icon-btn" onclick="goSecondaryFiducial()" title="Secondary Fiducial">
+                                <img src="/assets/icons/fiducial_secondary.png" alt="" class="btn-icon"><span class="visually-hidden">Secondary Fiducial</span>
+                            </button>
+
+                            <button class="icon-btn" onclick="jog(-1,0)" title="Jog left">
+                                <img src="/assets/icons/move_left.png" alt="" class="btn-icon"><span class="visually-hidden">Left</span>
+                            </button>
+                            <button class="icon-btn" onclick="goPark()" title="Park">
+                                <img src="/assets/icons/park_zero.png" alt="" class="btn-icon"><span class="visually-hidden">Park</span>
+                            </button>
+                            <button class="icon-btn" onclick="jog(1,0)" title="Jog right">
+                                <img src="/assets/icons/move_right.png" alt="" class="btn-icon"><span class="visually-hidden">Right</span>
+                            </button>
+
+                            <button class="icon-btn" onclick="goNozzleChange()" title="Nozzle Change">
+                                <img src="/assets/icons/nozzle_change.png" alt="" class="btn-icon"><span class="visually-hidden">Nozzle Change</span>
+                            </button>
+                            <button class="icon-btn" onclick="jog(0,-1)" title="Jog down">
+                                <img src="/assets/icons/move_down.png" alt="" class="btn-icon"><span class="visually-hidden">Down</span>
+                            </button>
+                            <button class="icon-btn" onclick="goDispose()" title="Dispose">
+                                <img src="/assets/icons/dispose.png" alt="" class="btn-icon"><span class="visually-hidden">Dispose</span>
+                            </button>
+                        </div>
+
+                        <div class="d-flex align-items-center justify-content-between mt-3">
+                            <div class="small text-muted" id="coord-status">Ready</div>
+                            <button class="btn btn-outline-danger btn-sm" onclick="cancelCoordJob()">Stop</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-xl-6">
+                <div class="card shadow-sm">
+                    <div class="card-header fw-semibold">Head Nozzles</div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="nozzle-step-range" class="form-label small text-muted mb-1">Nozzle Step Size (Z mm / Rotation deg)</label>
+                            <input type="range" class="form-range" min="0" max="4" step="1" id="nozzle-step-range" value="2" oninput="updateNozzleStepLabel()">
+                            <div class="d-flex justify-content-between small text-muted">
+                                <span>0.1</span><span>0.5</span><span>1.0</span><span>5.0</span><span>10.0</span>
+                            </div>
+                            <div class="small mt-2">Selected: <span class="badge bg-primary" id="nozzle-step-label">1.0 mm</span></div>
+                        </div>
+
+                        <div class="row g-2">{nozzle_controls}</div>
+                        <div class="d-flex align-items-center justify-content-between mt-3">
+                            <div class="small text-muted" id="head-status">Ready</div>
+                            <button class="btn btn-outline-danger btn-sm" onclick="cancelHeadJob()">Stop</button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
   </div>
   <script>
         var coordSocket = null;
+      var activeCoordJobId = null;
+      var activeHeadJobId = null;
 
         function selectedStep() {{
             var values = [0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0];
@@ -673,6 +766,17 @@ class CameraVisionModule(ModuleBase):
         function updateStepLabel() {{
             var step = selectedStep();
             document.getElementById('step-label').textContent = step.toFixed(2).replace(/[.]00$/, '.0') + ' mm';
+        }}
+
+        function selectedNozzleStep() {{
+            var values = [0.1, 0.5, 1.0, 5.0, 10.0];
+            var idx = parseInt(document.getElementById('nozzle-step-range').value, 10);
+            return values[idx] || 1.0;
+        }}
+
+        function updateNozzleStepLabel() {{
+            var step = selectedNozzleStep();
+            document.getElementById('nozzle-step-label').textContent = step.toFixed(1) + ' mm';
         }}
 
         function fmtCoord(v) {{
@@ -716,118 +820,393 @@ class CameraVisionModule(ModuleBase):
             }};
         }}
 
-        function setCoordStatus(text, isError) {{
+        function setCoordStatus(text, level) {{
             var el = document.getElementById('coord-status');
             el.textContent = text;
-            el.className = 'small mt-3 ' + (isError ? 'text-danger' : 'text-muted');
+            var cls = 'text-muted';
+            if (level === 'error') cls = 'text-danger';
+            if (level === 'warning') cls = 'text-warning';
+            el.className = 'small mt-3 ' + cls;
+        }}
+
+        function setHeadStatus(text, level) {{
+            var el = document.getElementById('head-status');
+            el.textContent = text;
+            var cls = 'text-muted';
+            if (level === 'error') cls = 'text-danger';
+            if (level === 'warning') cls = 'text-warning';
+            el.className = 'small mt-3 ' + cls;
+        }}
+
+        function postJson(url, bodyObj) {{
+            var opts = {{ method: 'POST', headers: {{'Content-Type': 'application/json'}} }};
+            if (bodyObj !== undefined) opts.body = JSON.stringify(bodyObj);
+            return fetch(url, opts)
+                .then(function(r) {{
+                    return r.json()
+                        .then(function(data) {{ return {{ ok: r.ok, status: r.status, data: data }}; }})
+                        .catch(function() {{ return {{ ok: r.ok, status: r.status, data: {{ error: 'invalid_response' }} }}; }});
+                }});
+        }}
+
+        function waitForJob(jobId, setStatusFn, successText, failPrefix) {{
+            var tries = 0;
+            function poll() {{
+                fetch('/api/jobs/' + encodeURIComponent(jobId))
+                    .then(function(r) {{
+                        return r.json()
+                            .then(function(data) {{ return {{ ok: r.ok, data: data }}; }})
+                            .catch(function() {{ return {{ ok: false, data: {{ error: 'invalid_response' }} }}; }});
+                    }})
+                    .then(function(res) {{
+                        var d = res.data || {{}};
+                        if (!res.ok || d.error) {{
+                            setStatusFn(failPrefix + ': ' + (d.error || 'job_lookup_failed'), 'error');
+                            return;
+                        }}
+
+                        if (d.state === 'queued' || d.state === 'running') {{
+                            tries += 1;
+                            if (tries > 300) {{
+                                setStatusFn(failPrefix + ': timeout waiting for job', 'error');
+                                return;
+                            }}
+                            setTimeout(poll, 200);
+                            return;
+                        }}
+
+                        if (d.state === 'succeeded') {{
+                            setStatusFn(successText, 'info');
+                            return;
+                        }}
+
+                        if (d.state === 'canceled') {{
+                            setStatusFn(failPrefix.replace('failed', 'canceled'), 'warning');
+                            return;
+                        }}
+
+                        if (d.state === 'failed') {{
+                            setStatusFn(failPrefix + ': ' + (d.error || 'unknown_error'), 'error');
+                            return;
+                        }}
+
+                        setStatusFn(failPrefix + ': unexpected_state ' + String(d.state), 'error');
+                    }})
+                    .catch(function(e) {{
+                        setStatusFn(failPrefix + ': ' + e.message, 'error');
+                    }});
+            }}
+
+            poll();
+        }}
+
+        function submitTrackedCommand(url, bodyObj, setStatusFn, pendingText, successText, failPrefix) {{
+            setStatusFn(pendingText, 'info');
+            postJson(url, bodyObj)
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{
+                        setStatusFn(failPrefix + ': ' + (d.error || ('HTTP ' + res.status)), 'error');
+                        return;
+                    }}
+                    if (!d.job_id) {{
+                        setStatusFn(failPrefix + ': missing_job_id', 'error');
+                        return;
+                    }}
+
+                    if (d.previous_job_canceled) {{
+                        setStatusFn('Previous command canceled (job ' + d.previous_job_canceled.slice(0, 8) + '), executing latest...', 'warning');
+                    }}
+
+                    if (setStatusFn === setCoordStatus) activeCoordJobId = d.job_id;
+                    if (setStatusFn === setHeadStatus) activeHeadJobId = d.job_id;
+
+                    waitForJob(d.job_id, setStatusFn, successText(d), failPrefix);
+                }})
+                .catch(function(e) {{
+                    setStatusFn(failPrefix + ': ' + e.message, 'error');
+                }});
+        }}
+
+        function cancelCoordJob() {{
+            var url = activeCoordJobId
+                ? '/api/jobs/' + encodeURIComponent(activeCoordJobId) + '/cancel'
+                : '/api/jobs/cancel-latest/coord';
+            postJson(url)
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{ setCoordStatus('Stop failed: ' + (d.error || ('HTTP ' + res.status)), 'error'); return; }}
+                    setCoordStatus('Stop requested', 'warning');
+                }})
+                .catch(function(e) {{ setCoordStatus('Stop failed: ' + e.message, 'error'); }});
+        }}
+
+        function cancelHeadJob() {{
+            var url = activeHeadJobId
+                ? '/api/jobs/' + encodeURIComponent(activeHeadJobId) + '/cancel'
+                : '/api/jobs/cancel-latest/head';
+            postJson(url)
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{ setHeadStatus('Stop failed: ' + (d.error || ('HTTP ' + res.status)), 'error'); return; }}
+                    setHeadStatus('Stop requested', 'warning');
+                }})
+                .catch(function(e) {{ setHeadStatus('Stop failed: ' + e.message, 'error'); }});
+        }}
+
+        function headMove(nozzle, directionSign) {{
+            var step = selectedNozzleStep();
+            var delta = directionSign > 0 ? step : -step;
+            submitTrackedCommand(
+                '/api/head/nozzle/' + encodeURIComponent(nozzle) + '/move',
+                {{delta: delta}},
+                setHeadStatus,
+                'Moving ' + nozzle + '...',
+                function(d) {{ return 'Moved ' + nozzle + ' by ' + d.applied_delta + ' mm (Z=' + d.new_z + ')'; }},
+                'Nozzle move failed'
+            );
+        }}
+
+        function headPark(nozzle) {{
+            submitTrackedCommand(
+                '/api/head/nozzle/' + encodeURIComponent(nozzle) + '/park',
+                undefined,
+                setHeadStatus,
+                'Parking ' + nozzle + '...',
+                function(d) {{ return 'Parked ' + nozzle + ' to Z=' + d.parked_z; }},
+                'Nozzle park failed'
+            );
+        }}
+
+        function headHome(nozzle) {{
+            submitTrackedCommand(
+                '/api/head/nozzle/' + encodeURIComponent(nozzle) + '/home',
+                undefined,
+                setHeadStatus,
+                'Homing ' + nozzle + '...',
+                function(d) {{ return 'Homed ' + nozzle + ' (' + d.z_axis + ')'; }},
+                'Nozzle home failed'
+            );
+        }}
+
+        function headRotate(nozzle, directionSign) {{
+            var step = selectedNozzleStep();
+            var delta = directionSign > 0 ? step : -step;
+            submitTrackedCommand(
+                '/api/head/nozzle/' + encodeURIComponent(nozzle) + '/rotate',
+                {{delta: delta}},
+                setHeadStatus,
+                'Rotating ' + nozzle + '...',
+                function(d) {{ return 'Rotated ' + nozzle + ' by ' + d.applied_delta + ' deg (R=' + d.new_r + ')'; }},
+                'Nozzle rotation failed'
+            );
         }}
 
         function jog(dxSign, dySign) {{
             var step = selectedStep();
-            fetch('/api/coord/jog', {{
-                method: 'POST',
-                headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{dx: dxSign * step, dy: dySign * step}})
-            }})
-            .then(function(r) {{ return r.json(); }})
-            .then(function(d) {{
-                if (d.error) {{ setCoordStatus('Jog failed: ' + d.error, true); return; }}
-                setCoordStatus('Jogged X=' + d.dx + ' mm, Y=' + d.dy + ' mm', false);
-            }})
-            .catch(function(e) {{ setCoordStatus('Jog failed: ' + e.message, true); }});
+            var dx = dxSign * step;
+            var dy = dySign * step;
+            submitTrackedCommand(
+                '/api/coord/jog',
+                {{dx: dx, dy: dy}},
+                setCoordStatus,
+                'Jogging XY...',
+                function(d) {{ return 'Jogged X=' + d.dx + ' mm, Y=' + d.dy + ' mm'; }},
+                'Jog failed'
+            );
         }}
 
         function goPark() {{
-            fetch('/api/coord/park', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Park failed: ' + d.error, true); return; }}
-                    setCoordStatus('Park command sent', false);
-                }})
-                .catch(function(e) {{ setCoordStatus('Park failed: ' + e.message, true); }});
+            submitTrackedCommand('/api/coord/park', undefined, setCoordStatus, 'Moving to Park...', function() {{ return 'Reached Park'; }}, 'Park failed');
         }}
 
         function goHome() {{
-            fetch('/api/coord/home', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Home failed: ' + d.error, true); return; }}
-                    setCoordStatus('Home command sent', false);
-                }})
-                .catch(function(e) {{ setCoordStatus('Home failed: ' + e.message, true); }});
+            submitTrackedCommand('/api/coord/home', undefined, setCoordStatus, 'Homing all axes...', function() {{ return 'Home all completed'; }}, 'Home failed');
         }}
 
         function goHomeXY() {{
-            fetch('/api/coord/home-xy', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Home XY failed: ' + d.error, true); return; }}
-                    setCoordStatus('Home X & Y (simultaneous) command sent', false);
-                }})
-                .catch(function(e) {{ setCoordStatus('Home XY failed: ' + e.message, true); }});
+            submitTrackedCommand('/api/coord/home-xy', undefined, setCoordStatus, 'Homing X and Y...', function() {{ return 'Home X and Y completed'; }}, 'Home XY failed');
         }}
 
         function goDispose() {{
-            fetch('/api/coord/dispose', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Dispose failed: ' + d.error, true); return; }}
-                    setCoordStatus('Dispose command sent', false);
-                }})
-                .catch(function(e) {{ setCoordStatus('Dispose failed: ' + e.message, true); }});
+            submitTrackedCommand('/api/coord/dispose', undefined, setCoordStatus, 'Moving to Dispose...', function() {{ return 'Reached Dispose'; }}, 'Dispose failed');
         }}
 
         function goHomingFiducialMain() {{
-            fetch('/api/coord/homing-fiducial-main', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Homing Fiducial Main failed: ' + d.error, true); return; }}
-                    setCoordStatus('Homing Fiducial Main command sent', false);
-                }})
-                .catch(function(e) {{ setCoordStatus('Homing Fiducial Main failed: ' + e.message, true); }});
+            submitTrackedCommand('/api/coord/homing-fiducial-main', undefined, setCoordStatus, 'Moving to Homing Fiducial Main...', function() {{ return 'Reached Homing Fiducial Main'; }}, 'Homing Fiducial Main failed');
         }}
 
         function goSecondaryFiducial() {{
-            fetch('/api/coord/secondary-fiducial', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Secondary Fiducial failed: ' + d.error, true); return; }}
-                    setCoordStatus('Secondary Fiducial command sent', false);
-                }})
-                .catch(function(e) {{ setCoordStatus('Secondary Fiducial failed: ' + e.message, true); }});
+            submitTrackedCommand('/api/coord/secondary-fiducial', undefined, setCoordStatus, 'Moving to Secondary Fiducial...', function() {{ return 'Reached Secondary Fiducial'; }}, 'Secondary Fiducial failed');
         }}
 
         function goNozzleChange() {{
-            fetch('/api/coord/nozzle-change', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Nozzle Change failed: ' + d.error, true); return; }}
-                    setCoordStatus('Nozzle Change command sent', false);
-                }})
-                .catch(function(e) {{ setCoordStatus('Nozzle Change failed: ' + e.message, true); }});
+            submitTrackedCommand('/api/coord/nozzle-change', undefined, setCoordStatus, 'Moving to Nozzle Change...', function() {{ return 'Reached Nozzle Change'; }}, 'Nozzle Change failed');
         }}
 
         function goCalibrationSpot() {{
-            fetch('/api/coord/calibration-spot', {{method: 'POST'}})
+            submitTrackedCommand('/api/coord/calibration-spot', undefined, setCoordStatus, 'Moving to Calibration Spot...', function() {{ return 'Reached Calibration Spot'; }}, 'Calibration Spot failed');
+        }}
+
+        // ===================================================================
+        // NOZZLE CONTROL FUNCTIONS
+        // ===================================================================
+
+        function moveNozzleToCamera(nozzle) {{
+            submitTrackedCommand(
+                '/api/nozzle/' + encodeURIComponent(nozzle) + '/move-to-camera',
+                undefined,
+                setNozzleStatus,
+                'Aligning ' + nozzle + ' to camera...',
+                function(d) {{ return 'Aligned ' + nozzle + ' to camera position'; }},
+                'Nozzle alignment failed'
+            );
+        }}
+
+        function moveNozzleToBottomCamera(nozzle) {{
+            submitTrackedCommand(
+                '/api/nozzle/' + encodeURIComponent(nozzle) + '/move-to-bottom-camera',
+                undefined,
+                setNozzleStatus,
+                'Moving ' + nozzle + ' above BOTTOM camera...',
+                function() {{ return 'Moved ' + nozzle + ' above BOTTOM camera'; }},
+                'Move to BOTTOM camera failed'
+            );
+        }}
+
+        function moveCameraToNozzle(nozzle) {{
+            submitTrackedCommand(
+                '/api/nozzle/' + encodeURIComponent(nozzle) + '/move-camera-here',
+                undefined,
+                setNozzleStatus,
+                'Moving camera to ' + nozzle + '...',
+                function(d) {{ return 'Camera aligned to ' + nozzle + ' position'; }},
+                'Camera alignment failed'
+            );
+        }}
+
+        function toggleNozzleVacuum(nozzle) {{
+            var btn = document.getElementById('vacuum-btn-' + nozzle);
+            var isOn = btn && btn.classList.contains('active');
+            var newState = !isOn;
+            
+            var url = '/api/nozzle/' + encodeURIComponent(nozzle) + '/vacuum?on=' + (newState ? 'true' : 'false');
+            postJson(url)
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{
+                        console.error('Vacuum toggle failed:', d.error || res.status);
+                        return;
+                    }}
+                    if (btn) {{
+                        if (newState) {{
+                            btn.classList.add('active');
+                            btn.classList.remove('btn-outline-info');
+                            btn.classList.add('btn-info');
+                        }} else {{
+                            btn.classList.remove('active');
+                            btn.classList.add('btn-outline-info');
+                            btn.classList.remove('btn-info');
+                        }}
+                    }}
+                }})
+                .catch(function(e) {{ console.error('Vacuum toggle error:', e.message); }});
+        }}
+
+        function toggleNozzleAir(nozzle) {{
+            var btn = document.getElementById('air-btn-' + nozzle);
+            var isOn = btn && btn.classList.contains('active');
+            var newState = !isOn;
+            
+            var url = '/api/nozzle/' + encodeURIComponent(nozzle) + '/air?on=' + (newState ? 'true' : 'false');
+            postJson(url)
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{
+                        console.error('Air toggle failed:', d.error || res.status);
+                        return;
+                    }}
+                    if (btn) {{
+                        if (newState) {{
+                            btn.classList.add('active');
+                            btn.classList.remove('btn-outline-info');
+                            btn.classList.add('btn-info');
+                        }} else {{
+                            btn.classList.remove('active');
+                            btn.classList.add('btn-outline-info');
+                            btn.classList.remove('btn-info');
+                        }}
+                    }}
+                }})
+                .catch(function(e) {{ console.error('Air toggle error:', e.message); }});
+        }}
+
+        function setNozzleStatus(text, level) {{
+            // Aggregate nozzle status message (optional: display in a modal or log)
+            console.log('[Nozzle] ' + level.toUpperCase() + ': ' + text);
+        }}
+
+        function refreshNozzleStatus() {{
+            fetch('/api/status')
                 .then(function(r) {{ return r.json(); }})
                 .then(function(d) {{
-                    if (d.error) {{ setCoordStatus('Calibration Spot failed: ' + d.error, true); return; }}
-                    setCoordStatus('Calibration Spot command sent', false);
+                    if (!d.nozzles) return;
+                    
+                    d.nozzles.forEach(function(nozzle) {{
+                        var nameId = nozzle.name;
+                        
+                        // Update position displays (showing offset from camera)
+                        var xElem = document.getElementById('nozzle-pos-x-' + nameId);
+                        var yElem = document.getElementById('nozzle-pos-y-' + nameId);
+                        if (xElem) xElem.textContent = (nozzle.offset_x || 0).toFixed(1);
+                        if (yElem) yElem.textContent = (nozzle.offset_y || 0).toFixed(1);
+                        
+                        // Update valve button states
+                        var vacuumBtn = document.getElementById('vacuum-btn-' + nameId);
+                        if (vacuumBtn) {{
+                            if (nozzle.vacuum_on) {{
+                                vacuumBtn.classList.add('active', 'btn-info');
+                                vacuumBtn.classList.remove('btn-outline-info');
+                            }} else {{
+                                vacuumBtn.classList.remove('active', 'btn-info');
+                                vacuumBtn.classList.add('btn-outline-info');
+                            }}
+                        }}
+                        
+                        var airBtn = document.getElementById('air-btn-' + nameId);
+                        if (airBtn) {{
+                            if (nozzle.has_air_valve) {{
+                                airBtn.style.display = 'block';
+                                if (nozzle.air_on) {{
+                                    airBtn.classList.add('active', 'btn-info');
+                                    airBtn.classList.remove('btn-outline-info');
+                                }} else {{
+                                    airBtn.classList.remove('active', 'btn-info');
+                                    airBtn.classList.add('btn-outline-info');
+                                }}
+                            }} else {{
+                                airBtn.style.display = 'none';
+                            }}
+                        }}
+                        
+                        // Update status badge
+                        var statusBadge = document.getElementById('nozzle-status-' + nameId);
+                        if (statusBadge) {{
+                            var statusText = 'Z=' + (nozzle.z_position !== null ? nozzle.z_position.toFixed(1) : '--');
+                            statusBadge.textContent = statusText;
+                        }}
+                    }});
                 }})
-                .catch(function(e) {{ setCoordStatus('Calibration Spot failed: ' + e.message, true); }});
+                .catch(function(e) {{ console.error('Failed to refresh nozzle status:', e); }});
         }}
 
         updateStepLabel();
+        updateNozzleStepLabel();
         connectCoordSocket();
         setInterval(refreshCoords, 1000);
+        setInterval(refreshNozzleStatus, 1500);
 
-    setInterval(function() {{
-      document.querySelectorAll('[id^="thumb-"]').forEach(function(img) {{
-        var base = img.src.split('?')[0];
-        img.src = base + '?t=' + Date.now();
-        img.style.opacity = '1';
-      }});
-    }}, 2000);
+    // Dashboard uses MJPEG streams directly — no polling required.
   </script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
@@ -855,7 +1234,7 @@ class CameraVisionModule(ModuleBase):
                         onclick="setLight('{name}','{light_key}',0)">Off</button>
                 <button class="btn btn-sm btn-outline-warning"
                         onclick="setLight('{name}','{light_key}',{light_cfg.on_value})">On</button>
-                <input type="range" class="form-range flex-grow-1" min="0" max="65535"
+                                <input type="range" class="form-range flex-grow-1" min="0" max="3" step="1"
                        value="{current}" id="rng-{light_key}"
                        oninput="setLight('{name}','{light_key}',this.value)">
                 <span class="badge bg-secondary ms-1" id="lval-{light_key}">{current}</span>
@@ -975,7 +1354,11 @@ class CameraVisionModule(ModuleBase):
 
   <script>
     function setLight(cam, light, value) {{
-      value = parseInt(value);
+            value = parseInt(value, 10);
+            if (Number.isNaN(value)) value = 0;
+            value = Math.max(0, Math.min(3, value));
+            var slider = document.getElementById('rng-' + light);
+            if (slider) slider.value = String(value);
       var badge = document.getElementById('lval-' + light);
       if (badge) badge.textContent = value;
       fetch('/api/camera/' + cam + '/light/' + light, {{
@@ -1140,10 +1523,13 @@ class CameraVisionModule(ModuleBase):
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             return web.json_response({"error": "invalid_body"}, status=400)
 
-        if not (0 <= value <= 65535):
+        if not (_LIGHT_MIN <= value <= _LIGHT_MAX):
             return web.json_response({"error": "value_out_of_range"}, status=422)
 
-        await self.node.send_set(light_cfg.bus_command, value)
+        try:
+            await self._driver.set_analog_out(light_cfg.board_id, light_cfg.index, value)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
         state.light_values[light] = value
         return web.json_response({"light": light, "value": value})
 
@@ -1209,7 +1595,143 @@ class CameraVisionModule(ModuleBase):
 
         return web.json_response({"rotation": state.current_rotation_deg})
 
+    async def _api_head_move(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        try:
+            body = await request.json()
+            delta = float(body.get("delta", 0.0))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        nozzle = raw_name.upper()
+        nozzle_cfg = self._nozzles.get(nozzle)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        current_z = self._position_store.get(nozzle_cfg.z_axis)
+        if current_z is None:
+            current_z = nozzle_cfg.max_z  # HOME position until first move
+        requested_z = current_z + delta
+        new_z = min(max(requested_z, nozzle_cfg.min_z), nozzle_cfg.max_z)
+        applied_delta = new_z - current_z
+
+        job_id, canceled_prev = self._submit_domain_command(
+            "head",
+            f"head_move:{nozzle}:{nozzle_cfg.z_axis}",
+            lambda axis=nozzle_cfg.z_axis, position=new_z: self._driver.move_axis(axis, position),
+        )
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle,
+            "requested_delta": delta,
+            "applied_delta": applied_delta,
+            "clamped": new_z != requested_z,
+            "new_z": new_z,
+        })
+
+    async def _api_head_rotate(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle = raw_name.upper()
+        nozzle_cfg = self._nozzles.get(nozzle)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        try:
+            body = await request.json()
+            delta = float(body.get("delta", 0.0))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        current_raw = self._position_store.get(nozzle_cfg.r_axis)
+        current = float(current_raw if current_raw is not None else 0.0)
+
+        current_norm = current % 360.0
+        target_norm = (current_norm + delta) % 360.0
+
+        # Move via the shortest equivalent path on a 360-degree circle.
+        shortest_delta = ((target_norm - current_norm + 540.0) % 360.0) - 180.0
+        new_r = current + shortest_delta
+
+        job_id, canceled_prev = self._submit_domain_command(
+            "head",
+            f"head_rotate:{nozzle}:{nozzle_cfg.r_axis}",
+            lambda axis=nozzle_cfg.r_axis, position=new_r: self._driver.move_axis(axis, position),
+        )
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle,
+            "r_axis": nozzle_cfg.r_axis,
+            "requested_delta": delta,
+            "applied_delta": shortest_delta,
+            "new_r": new_r,
+            "new_r_norm": target_norm,
+        })
+
+    async def _api_head_park(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle = raw_name.upper()
+        nozzle_cfg = self._nozzles.get(nozzle)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        park_target = min(max(0.0, nozzle_cfg.min_z), nozzle_cfg.max_z)
+
+        job_id, canceled_prev = self._submit_domain_command(
+            "head",
+            f"head_park:{nozzle}:{nozzle_cfg.z_axis}",
+            lambda axis=nozzle_cfg.z_axis, position=park_target: self._driver.move_axis(axis, position),
+        )
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle,
+            "parked_z": park_target,
+        })
+
+    async def _api_head_home(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle = raw_name.upper()
+        nozzle_cfg = self._nozzles.get(nozzle)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        job_id, canceled_prev = self._submit_domain_command(
+            "head",
+            f"head_home:{nozzle}:{nozzle_cfg.z_axis}",
+            lambda axis=nozzle_cfg.z_axis: self._driver.home_axes([axis]),
+        )
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle,
+            "z_axis": nozzle_cfg.z_axis,
+        })
+
     async def _api_coord_jog(self, request: web.Request) -> web.Response:
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response(
+                {"error": "xy_not_homed", "message": "Home X and Y before XY movement"},
+                status=409,
+            )
+
         try:
             body = await request.json()
             dx = float(body.get("dx", 0.0))
@@ -1217,74 +1739,443 @@ class CameraVisionModule(ModuleBase):
         except (json.JSONDecodeError, TypeError, ValueError):
             return web.json_response({"error": "invalid_body"}, status=400)
 
-        if dx != 0.0:
-            await self.node.send_set(f":{self._coord_target}:REL:X", dx, target=self._coord_target)
-        if dy != 0.0:
-            await self.node.send_set(f":{self._coord_target}:REL:Y", dy, target=self._coord_target)
-
-        return web.json_response({"dx": dx, "dy": dy})
+        job_id, canceled_prev = self._submit_domain_command(
+            "coord",
+            "coord_jog_xy",
+            lambda x=dx, y=dy: self._driver.jog_xy(x, y),
+        )
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev, "dx": dx, "dy": dy})
 
     async def _api_coord_home(self, request: web.Request) -> web.Response:
-        await self.node.send_action(f":{self._coord_target}:HOME", target=self._coord_target)
-        return web.json_response({"status": "ok"})
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_home_all", self._driver.home_all)
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_home_xy(self, request: web.Request) -> web.Response:
-        await self.node.send_action(f":{self._coord_target}:HOME:XY", target=self._coord_target)
-        return web.json_response({"status": "ok"})
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_home_xy", lambda: self._driver.home_group("XY"))
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_park(self, request: web.Request) -> web.Response:
-        await self.node.send_action(f":{self._coord_target}:PARK", target=self._coord_target)
-        return web.json_response({"status": "ok"})
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response({"error": "xy_not_homed"}, status=409)
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:park", lambda: self._driver.move_to_location("park"))
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_dispose(self, request: web.Request) -> web.Response:
-        await self.node.send_action(f":{self._coord_target}:DISPOSE", target=self._coord_target)
-        return web.json_response({"status": "ok"})
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response({"error": "xy_not_homed"}, status=409)
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:dispose", lambda: self._driver.move_to_location("dispose"))
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_homing_fiducial_main(self, request: web.Request) -> web.Response:
-        await self.node.send_action(
-            f":{self._coord_target}:HOMINGFIDUCIALMAIN",
-            target=self._coord_target,
-        )
-        return web.json_response({"status": "ok"})
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response({"error": "xy_not_homed"}, status=409)
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:fiducial_main", lambda: self._driver.move_to_location("fiducial_main"))
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_secondary_fiducial(self, request: web.Request) -> web.Response:
-        await self.node.send_action(
-            f":{self._coord_target}:SECONDARYFIDUCIAL",
-            target=self._coord_target,
-        )
-        return web.json_response({"status": "ok"})
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response({"error": "xy_not_homed"}, status=409)
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:fiducial_second", lambda: self._driver.move_to_location("fiducial_second"))
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_nozzle_change(self, request: web.Request) -> web.Response:
-        await self.node.send_action(
-            f":{self._coord_target}:NOZZLECHANGE",
-            target=self._coord_target,
-        )
-        return web.json_response({"status": "ok"})
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response({"error": "xy_not_homed"}, status=409)
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:nozzle_change", lambda: self._driver.move_to_location("nozzle_change"))
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_calibration_spot(self, request: web.Request) -> web.Response:
-        await self.node.send_action(
-            f":{self._coord_target}:CALIBRATIONSPOT",
-            target=self._coord_target,
-        )
-        return web.json_response({"status": "ok"})
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response({"error": "xy_not_homed"}, status=409)
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:calibration_spot", lambda: self._driver.move_to_location("calibration_spot"))
+        return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_positions(self, request: web.Request) -> web.Response:
-        await self._refresh_coord_positions(timeout=0.25)
-        return web.json_response(self._coord_payload())
+        return web.json_response(self._position_store.all())
+
+    async def _api_jobs(self, request: web.Request) -> web.Response:
+        limit_raw = request.query.get("limit", "50")
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            return web.json_response({"error": "invalid_limit"}, status=400)
+        return web.json_response({"jobs": self._commands.recent(limit=limit)})
+
+    async def _api_job(self, request: web.Request) -> web.Response:
+        job_id = request.match_info.get("job_id", "")
+        job = self._commands.get(job_id)
+        if job is None:
+            return web.json_response({"error": "unknown_job"}, status=404)
+        return web.json_response(job)
+
+    async def _api_job_cancel(self, request: web.Request) -> web.Response:
+        job_id = request.match_info.get("job_id", "")
+        result = self._commands.cancel(job_id)
+        if result == "unknown":
+            return web.json_response({"error": "unknown_job"}, status=404)
+        return web.json_response({"job_id": job_id, "result": result})
+
+    async def _api_jobs_cancel_latest(self, request: web.Request) -> web.Response:
+        domain = str(request.match_info.get("domain", "")).lower()
+        if domain not in {"coord", "head", "nozzle"}:
+            return web.json_response({"error": "invalid_domain"}, status=400)
+
+        recent = self._commands.recent(limit=200)
+        for job in recent:
+            name = str(job.get("name", ""))
+            state = str(job.get("state", ""))
+            if state in {"succeeded", "failed", "canceled"}:
+                continue
+
+            if domain == "coord" and name.startswith("coord_"):
+                result = self._commands.cancel(str(job["job_id"]))
+                return web.json_response({"domain": domain, "job_id": job["job_id"], "result": result})
+
+            if domain == "head" and name.startswith("head_"):
+                result = self._commands.cancel(str(job["job_id"]))
+                return web.json_response({"domain": domain, "job_id": job["job_id"], "result": result})
+
+            if domain == "nozzle" and name.startswith("nozzle_"):
+                result = self._commands.cancel(str(job["job_id"]))
+                return web.json_response({"domain": domain, "job_id": job["job_id"], "result": result})
+
+        return web.json_response({"domain": domain, "result": "no_active_job"})
+
+    # =========================================================================
+    # NOZZLE CONTROL (move-to-camera, valve control)
+    # =========================================================================
+
+    def _get_bottom_camera_xy(self) -> tuple[float, float] | None:
+        for cam_cfg in self.config.get("cameras", []):
+            if str(cam_cfg.get("name", "")).upper() != "BOTTOM":
+                continue
+            x = cam_cfg.get("x")
+            y = cam_cfg.get("y")
+            if x is None or y is None:
+                return None
+            try:
+                return float(x), float(y)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def _api_nozzle_move_to_camera(self, request: web.Request) -> web.Response:
+        """Move nozzle XY to align with camera's current position.
+        
+        Path: POST /api/nozzle/{name}/move-to-camera
+        """
+        raw_name = request.match_info.get("name", "")
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle_name = raw_name.upper()
+
+        # Verify nozzle exists in hardware config
+        if not self._nozzle_config_store:
+            return web.json_response({"error": "nozzle_config_not_available"}, status=500)
+
+        nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        # Get current camera position
+        cam_x = self._position_store.get("X")
+        cam_y = self._position_store.get("Y")
+        if cam_x is None or cam_y is None:
+            return web.json_response(
+                {"error": "camera_position_unknown", "message": "Home XY first"},
+                status=409,
+            )
+
+        # Submit movement command through job system with nozzle domain
+        job_id, canceled_prev = self._submit_domain_command(
+            "nozzle",
+            f"nozzle_move_to_camera:{nozzle_name}",
+            lambda: self._driver.jog_nozzle_to_camera_position(
+                nozzle_cfg, (cam_x, cam_y)
+            ),
+        )
+
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle_name,
+            "camera_position": {"x": cam_x, "y": cam_y},
+            "nozzle_offset": {"dx": nozzle_cfg.offset_x, "dy": nozzle_cfg.offset_y},
+            "machine_target": {
+                "x": cam_x - nozzle_cfg.offset_x,
+                "y": cam_y - nozzle_cfg.offset_y,
+            },
+        })
+
+    async def _api_nozzle_move_to_bottom_camera(self, request: web.Request) -> web.Response:
+        """Move nozzle XY to align with configured BOTTOM camera position.
+
+        Path: POST /api/nozzle/{name}/move-to-bottom-camera
+        """
+        raw_name = request.match_info.get("name", "")
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle_name = raw_name.upper()
+
+        # Verify nozzle exists in hardware config
+        if not self._nozzle_config_store:
+            return web.json_response({"error": "nozzle_config_not_available"}, status=500)
+
+        nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        bottom_xy = self._get_bottom_camera_xy()
+        if not bottom_xy:
+            return web.json_response(
+                {
+                    "error": "bottom_camera_position_not_configured",
+                    "message": "Set camera.cameras[BOTTOM].x and .y in config",
+                },
+                status=409,
+            )
+        cam_x, cam_y = bottom_xy
+
+        # Submit movement command through job system with nozzle domain
+        job_id, canceled_prev = self._submit_domain_command(
+            "nozzle",
+            f"nozzle_move_to_bottom_camera:{nozzle_name}",
+            lambda: self._driver.jog_nozzle_to_camera_position(
+                nozzle_cfg, (cam_x, cam_y)
+            ),
+        )
+
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle_name,
+            "bottom_camera_position": {"x": cam_x, "y": cam_y},
+            "nozzle_offset": {"dx": nozzle_cfg.offset_x, "dy": nozzle_cfg.offset_y},
+            "machine_target": {
+                "x": cam_x - nozzle_cfg.offset_x,
+                "y": cam_y - nozzle_cfg.offset_y,
+            },
+        })
+
+    async def _api_nozzle_move_camera_here(self, request: web.Request) -> web.Response:
+        """Move camera (machine) to align with nozzle's current position.
+        
+        Path: POST /api/nozzle/{name}/move-camera-here
+        """
+        raw_name = request.match_info.get("name", "")
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle_name = raw_name.upper()
+
+        # Verify nozzle exists in hardware config
+        if not self._nozzle_config_store:
+            return web.json_response({"error": "nozzle_config_not_available"}, status=500)
+
+        nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        # Get current machine position
+        mach_x = self._position_store.get("X")
+        mach_y = self._position_store.get("Y")
+        if mach_x is None or mach_y is None:
+            return web.json_response(
+                {"error": "machine_position_unknown", "message": "Home XY first"},
+                status=409,
+            )
+
+        # Calculate current nozzle absolute position
+        nozzle_x = mach_x + nozzle_cfg.offset_x
+        nozzle_y = mach_y + nozzle_cfg.offset_y
+
+        # Submit movement command through job system with nozzle domain
+        job_id, canceled_prev = self._submit_domain_command(
+            "nozzle",
+            f"nozzle_move_camera_here:{nozzle_name}",
+            lambda: self._driver.jog_camera_to_nozzle_position(
+                nozzle_cfg, (nozzle_x, nozzle_y)
+            ),
+        )
+
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle_name,
+            "current_machine_position": {"x": mach_x, "y": mach_y},
+            "nozzle_absolute_position": {"x": nozzle_x, "y": nozzle_y},
+            "camera_target": {"x": nozzle_x, "y": nozzle_y},
+        })
+
+    async def _api_nozzle_vacuum(self, request: web.Request) -> web.Response:
+        """Control vacuum valve on a nozzle.
+        
+        Path: POST /api/nozzle/{name}/vacuum?on=true|false
+        """
+        raw_name = request.match_info.get("name", "")
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle_name = raw_name.upper()
+
+        # Parse on/off from query
+        on_str = request.query.get("on", "false").lower()
+        on = on_str in ("true", "1", "yes")
+
+        # Verify nozzle exists in hardware config
+        if not self._nozzle_config_store or not self._valve_store:
+            return web.json_response({"error": "valve_control_not_available"}, status=500)
+
+        nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        if not nozzle_cfg.vacuum_valve:
+            return web.json_response({"error": "nozzle_has_no_vacuum_valve"}, status=400)
+
+        # Submit valve command through job system with nozzle domain
+        job_id, canceled_prev = self._submit_domain_command(
+            "nozzle",
+            f"nozzle_vacuum_{nozzle_name}_{on}",
+            lambda on_val=on: self._driver.set_nozzle_valve(nozzle_cfg, "vacuum", on_val),
+        )
+
+        # Update valve store state
+        await self._valve_store.set_vacuum(nozzle_name, on)
+
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle_name,
+            "valve": "vacuum",
+            "on": on,
+            "valve_config": {
+                "board": nozzle_cfg.vacuum_valve.board,
+                "pin": nozzle_cfg.vacuum_valve.pin,
+                "io_type": nozzle_cfg.vacuum_valve.io_type,
+            },
+        })
+
+    async def _api_nozzle_air(self, request: web.Request) -> web.Response:
+        """Control air valve on a nozzle (if equipped).
+        
+        Path: POST /api/nozzle/{name}/air?on=true|false
+        """
+        raw_name = request.match_info.get("name", "")
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle_name = raw_name.upper()
+
+        # Parse on/off from query
+        on_str = request.query.get("on", "false").lower()
+        on = on_str in ("true", "1", "yes")
+
+        # Verify nozzle exists in hardware config
+        if not self._nozzle_config_store or not self._valve_store:
+            return web.json_response({"error": "valve_control_not_available"}, status=500)
+
+        nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        if not nozzle_cfg.air_valve:
+            return web.json_response({"error": "nozzle_has_no_air_valve"}, status=400)
+
+        # Submit valve command through job system with nozzle domain
+        job_id, canceled_prev = self._submit_domain_command(
+            "nozzle",
+            f"nozzle_air_{nozzle_name}_{on}",
+            lambda on_val=on: self._driver.set_nozzle_valve(nozzle_cfg, "air", on_val),
+        )
+
+        # Update valve store state
+        await self._valve_store.set_air(nozzle_name, on)
+
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle_name,
+            "valve": "air",
+            "on": on,
+            "valve_config": {
+                "board": nozzle_cfg.air_valve.board,
+                "pin": nozzle_cfg.air_valve.pin,
+                "io_type": nozzle_cfg.air_valve.io_type,
+            },
+        })
+
+    async def _api_status(self, request: web.Request) -> web.Response:
+        """Get comprehensive system status including positions, nozzles, and valve states.
+        
+        Path: GET /api/status
+        """
+        positions = self._position_store.all()
+        nozzle_data = []
+
+        if self._nozzle_config_store and self._valve_store:
+            cam_x = positions.get("X", 0.0)
+            cam_y = positions.get("Y", 0.0)
+
+            for nozzle_name in self._nozzle_config_store.names():
+                nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
+                valve_state = self._valve_store.get(nozzle_name)
+
+                z_pos = positions.get(nozzle_cfg.z_axis)
+                
+                # Derive r_axis from z_axis (same logic as RuntimeNozzleConfig)
+                z_axis = nozzle_cfg.z_axis
+                if z_axis.startswith("Z") and len(z_axis) > 1:
+                    r_axis = f"R{z_axis[1:]}"
+                else:
+                    r_axis = "R1"
+                
+                r_pos = positions.get(r_axis)
+
+                # Calculate nozzle absolute position
+                nozzle_abs_x = cam_x + nozzle_cfg.offset_x
+                nozzle_abs_y = cam_y + nozzle_cfg.offset_y
+
+                nozzle_data.append({
+                    "name": nozzle_name,
+                    "z_axis": nozzle_cfg.z_axis,
+                    "r_axis": r_axis,
+                    "z_position": z_pos,
+                    "r_position": r_pos,
+                    "offset_x": nozzle_cfg.offset_x,
+                    "offset_y": nozzle_cfg.offset_y,
+                    "absolute_x": nozzle_abs_x,
+                    "absolute_y": nozzle_abs_y,
+                    "vacuum_on": valve_state.vacuum_on if valve_state else False,
+                    "air_on": valve_state.air_on if valve_state else False,
+                    "has_air_valve": nozzle_cfg.air_valve is not None,
+                })
+
+        return web.json_response({
+            "positions": positions,
+            "nozzles": nozzle_data,
+            "camera_position": {"x": positions.get("X"), "y": positions.get("Y")},
+        })
 
     async def _ws_coord(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20.0)
         await ws.prepare(request)
         self._coord_ws_clients.add(ws)
 
-        await self._refresh_coord_positions(timeout=0.25)
-        await ws.send_json({"type": "coord", "positions": self._coord_payload()})
+        # Send current state immediately on connect
+        await ws.send_json({"type": "coord", "positions": self._position_store.all()})
 
         try:
             async for msg in ws:
                 if msg.type == web.WSMsgType.TEXT and msg.data == "refresh":
-                    await self._refresh_coord_positions(timeout=0.25)
-                    await ws.send_json({"type": "coord", "positions": self._coord_payload()})
+                    await ws.send_json({"type": "coord", "positions": self._position_store.all()})
                 elif msg.type in {web.WSMsgType.CLOSE, web.WSMsgType.ERROR}:
                     break
         finally:
@@ -1292,37 +2183,17 @@ class CameraVisionModule(ModuleBase):
 
         return ws
 
-    async def _coord_ws_loop(self) -> None:
-        while True:
-            await self._refresh_coord_positions(timeout=0.25)
-            await self._broadcast_coord_positions(force=True)
-            await asyncio.sleep(1.0)
+    async def _on_position_update(self, axis: str, value: float) -> None:
+        """Called by PositionStore whenever any axis position changes."""
+        await self._broadcast_coord_positions()
 
-    async def _refresh_coord_positions(self, timeout: float) -> None:
-        loop = asyncio.get_running_loop()
-        futures: dict[str, asyncio.Future[float]] = {}
-        for axis in _COORD_AXES:
-            fut: asyncio.Future[float] = loop.create_future()
-            self._coord_waiters[axis].append(fut)
-            futures[axis] = fut
-            await self.node.send_query(f":{self._coord_target}:ABS:{axis}", target=self._coord_target)
-
-        for axis, fut in futures.items():
-            try:
-                await asyncio.wait_for(fut, timeout=timeout)
-            except asyncio.TimeoutError:
-                if fut in self._coord_waiters[axis]:
-                    self._coord_waiters[axis].remove(fut)
-
-    def _coord_payload(self) -> dict[str, float | None]:
-        return {axis: self._coord_positions[axis] for axis in _COORD_AXES}
-
-    async def _broadcast_coord_positions(self, force: bool) -> None:
+    async def _broadcast_coord_positions(self) -> None:
+        """Push the current position snapshot to all connected WebSocket clients."""
         if not self._coord_ws_clients:
             return
 
-        payload = self._coord_payload()
-        if not force and payload == self._last_coord_broadcast:
+        payload = self._position_store.all()
+        if payload == self._last_coord_broadcast:
             return
         self._last_coord_broadcast = dict(payload)
 
@@ -1338,10 +2209,3 @@ class CameraVisionModule(ModuleBase):
 
         for ws in stale:
             self._coord_ws_clients.discard(ws)
-
-    @staticmethod
-    def _parse_numeric(value: Any) -> float | None:
-        try:
-            return float(str(value).strip())
-        except (TypeError, ValueError):
-            return None
