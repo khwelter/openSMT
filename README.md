@@ -11,6 +11,10 @@ Modulares Python-Projekt fuer den Aufbau eines Kommunikationssystems fuer einen 
 - Einfacher Qt-Monitor fuer Mehrfachinstanzen
 - Serial/G-Code Modul mit beliebig vielen individuell konfigurierbaren Schnittstellen
 - JSON-Konfiguration mit verschachtelten Includes ueber $include
+- Einheitliche `system.json`-Laufzeit fuer Boards, Achsen, Kameras, Nozzles und Feeder
+- Native Qt-Control-GUI fuer Maschinenbedienung ueber HTTP ohne Browser
+- Kamera-Thumbs, XY-Jogging, Nozzle-Jogging, Offset-Kalibrierung und Vakuumsteuerung in der Qt-Control-GUI
+- Externe Feeder-Konfiguration mit gemeinsamer Basiskonfiguration und feeder-typspezifischen Tabs in der GUI
 
 ## SCPI Nachrichten
 
@@ -34,19 +38,21 @@ Werte duerfen Integer, Fliesskomma oder Strings in Anfuehrungszeichen sein.
 
    - Datei: config/examples/system.json
    - Wichtig: boards.*.device auf die realen seriellen Geraete setzen
-   - Optional: camera.web_host / camera.web_port und locations anpassen
+   - Optional: camera.web_host / camera.web_port, locations und feeder include anpassen
+   - Feeder sind im Beispiel extern definiert ueber: config/examples/feeders.json
 
 3. System starten
 
    python3 -m opensmt run --config config/examples/system.json
 
-4. Web-Dashboard oeffnen
+4. Qt-Control-GUI starten
 
-   http://127.0.0.1:8080
+   python3 -m opensmt control-gui --host 127.0.0.1 --port 8080
 
 Hinweis:
 Die neue Laufzeit startet HardwareDriver + PositionStore + LocationStore + CameraVision direkt aus system.json.
-Ein separater Broker ist dafuer nicht noetig.
+Ein separater Broker ist dafuer nicht noetig. Die fruehere Browser-Oberflaeche wird nicht mehr verwendet; `opensmt run`
+stellt die HTTP-API und Kamera-Thumb-Endpunkte fuer die Qt-Control-GUI bereit.
 
 ### Legacy Tools (optional)
 
@@ -67,6 +73,14 @@ Die folgenden CLI-Tools sind weiterhin verfuegbar, aber nicht Teil des neuen Sta
 4. Qt Control GUI starten (Fernbedienung ohne Browser)
 
    python3 -m opensmt control-gui --host MACHINE_IP --port 8080
+
+## Aktueller Status
+
+- Primare Bedienoberflaeche ist die native Qt-Control-GUI.
+- `opensmt run` liefert dafuer die HTTP-API auf `camera.web_host:camera.web_port` sowie Kamera-Thumbnails ueber `/thumb/<NAME>`.
+- Die GUI enthaelt aktuell Kamerapane, General-Purpose-Pane mit Tabs, XY-Jogging, Nozzle-Karten und Feeders-Verwaltung.
+- Nozzle-Vakuum wird ueber Board `XY` geschaltet, Indizes `2..5`, Werte `0` oder `255`.
+- Feeder werden extern in `config/examples/feeders.json` konfiguriert und ueber `$include` in `system.json` eingebunden.
 
 ## Qt Control GUI (Remote Operation)
 
@@ -120,6 +134,14 @@ opensmt control-gui --host MACHINE_FLOOR_IP --port 8080
 The GUI polls `/api/status` every 800 ms and sends all commands through the existing REST
 API, so control latency on a wired LAN is negligible.
 
+Current Qt-Control-GUI surfaces:
+
+- Cameras pane with live thumbnail refresh from `/thumb/<camera>`
+- XY jogging pane with step selection, homing and machine-position shortcuts
+- Nozzle pane with per-nozzle home, Z up/down, rotation, park, standard-down, offset calibration and vacuum on/off
+- General Purpose pane with tabs for Setup & Configuration, Production, Feeders and Diagnostics Log
+- Feeders tab with overall feeder list plus per-type detail tabs for tray, auto, push/pull, vibration, label and tube feeders
+
 ### Updating after code changes
 
 ```bash
@@ -155,6 +177,27 @@ so the HTTP API is reachable from the network:
   ...
 }
 ```
+
+### Feeder configuration
+
+Feeders are defined outside the main machine config and merged in via `$include`.
+
+Example in `config/examples/system.json`:
+
+```json
+{
+   "$include": "feeders.json",
+   ...
+}
+```
+
+Each feeder currently shares these common fields:
+
+- `feeder_id`: unique hexadecimal identifier with at least 16 digits
+- `pick_location`: object with `x` / `y`
+- `pick_height`: Z value used for pickup
+- `manufacturer_part_number`: currently stored as the loaded part reference
+- `feeder_type`: one of `tray_feeder`, `auto_feeder`, `push_pull_feeder`, `vibration_feeder`, `label_feeder`, `tube_feeder`
 
 ---
 
@@ -272,8 +315,8 @@ Axis–port–GCode mapping (configurable, default):
 | `:GCODE:POS:Z2R2` | `<z> <r>` | `G0 Y<z> B<r> F<velo>` then `M400` | Move Z2 and R2 together (AB port) |
 | `:GCODE:VELO:<axis>` | `<mm_per_min>` | — | Set runtime velocity for axis |
 | `:GCODE:SPEEDFACTOR` | `<0–100>` | — | Set global speed factor as percentage |
-| `:GCODE:DIGOUT:<n>` | `0` or `1` | `M106 D<local> S<val>` | Set digital output (n = 0–47) |
-| `:GCODE:ANOUT:<n>` | `<0–65535>` | `M106 D<local> S<val>` | Set analog output / PWM (n = 0–47) |
+| `:GCODE:DIGOUT:<n>` | `0` or `1` | `M106 P<local> S<val>` | Set digital output (n = 0–47) |
+| `:GCODE:ANOUT:<n>` | `<0–65535>` | `M106 P<local> S<val>` | Set analog output / PWM (n = 0–47) |
 
 #### ACTION commands to GCODE
 
@@ -348,7 +391,8 @@ Default setup:
 
 ### CAMERA module (camera_vision)
 
-The CAMERA module provides the web dashboard, MJPEG camera streams, and light/pipeline control.
+The CAMERA module now provides the HTTP API used by the Qt-Control-GUI, camera thumbnail generation,
+nozzle motion helpers, offset calibration and runtime status aggregation.
 
 #### Queries answered by CAMERA
 
@@ -358,6 +402,14 @@ The CAMERA module provides the web dashboard, MJPEG camera streams, and light/pi
 | `:CAMERA:<cam>:STATUS?` | `"online"` or `"offline"` | Status of one camera |
 | `:CAMERA:<cam>:LIGHT:<light>?` | `<0–65535>` | Current light brightness |
 | `:CAMERA:<cam>:PIPELINE?` | `<name>` | Active vision pipeline name |
+
+Current runtime note:
+
+- The old browser dashboard, MJPEG stream pages and WebSocket UI transport are no longer part of the active workflow.
+- The active operator path is `opensmt control-gui` over HTTP.
+- `/api/status` is the primary aggregate endpoint consumed by the GUI.
+- `/thumb/{name}` is used for camera previews in the GUI.
+- Nozzle vacuum is exposed through `POST /api/head/nozzle/{name}/vacuum` and maps `N1..N4` to `XY` indices `2..5`.
 
 #### SET commands to CAMERA
 
@@ -373,19 +425,18 @@ When a light is set, CAMERA forwards the value to the appropriate GCODE ANOUT ch
 | Command | Target | Description |
 |---------|--------|-------------|
 | `:GCODE:ANOUT:<n>` | GCODE | Light brightness control |
-| `:COORD:REL:X` | COORD | XY jog from web dashboard |
-| `:COORD:REL:Y` | COORD | XY jog from web dashboard |
-| `:COORD:HOME` | COORD | Home all axes (web button) |
-| `:COORD:HOME:XY` | COORD | Home X and Y only (web button) |
-| `:COORD:PARK` | COORD | Move to Park (web button) |
-| `:COORD:DISPOSE` | COORD | Move to Dispose (web button) |
-| `:COORD:HOMINGFIDUCIALMAIN` | COORD | Move to Homing Fiducial Main (web button) |
-| `:COORD:SECONDARYFIDUCIAL` | COORD | Move to Secondary Fiducial (web button) |
-| `:COORD:NOZZLECHANGE` | COORD | Move to Nozzle Change (web button) |
-| `:COORD:CALIBRATIONSPOT` | COORD | Move to Calibration Spot (web button) |
-| `:COORD:ABS:<axis>?` | COORD | Periodic coordinate polling (WebSocket) |
-| `:HEAD:REL:<nozzle>` | HEAD | Nozzle up/down move from dashboard card |
-| `:HEAD:PARK:<nozzle>` | HEAD | Park nozzle to HOME position from dashboard card |
+| `:COORD:REL:X` | COORD | XY jog initiated by the control GUI |
+| `:COORD:REL:Y` | COORD | XY jog initiated by the control GUI |
+| `:COORD:HOME` | COORD | Home all axes |
+| `:COORD:HOME:XY` | COORD | Home X and Y only |
+| `:COORD:PARK` | COORD | Move to Park |
+| `:COORD:DISPOSE` | COORD | Move to Dispose |
+| `:COORD:HOMINGFIDUCIALMAIN` | COORD | Move to Homing Fiducial Main |
+| `:COORD:SECONDARYFIDUCIAL` | COORD | Move to Secondary Fiducial |
+| `:COORD:NOZZLECHANGE` | COORD | Move to Nozzle Change |
+| `:COORD:CALIBRATIONSPOT` | COORD | Move to Calibration Spot |
+| `:HEAD:REL:<nozzle>` | HEAD | Nozzle Z move from the control GUI |
+| `:HEAD:PARK:<nozzle>` | HEAD | Park nozzle to HOME position |
 
 ---
 
@@ -420,10 +471,18 @@ COORD  → :COORD:HOME:XY? DONE
 #### Setting a light
 
 ```
-WEB UI → POST /api/camera/TOP/light/standard  {value: 32768}
+Qt GUI / client → POST /api/camera/TOP/light/standard  {value: 32768}
 CAMERA → :GCODE:ANOUT:2 32768           (SET)
-GCODE  → M106 D2 S32768                 (serial)
+GCODE  → M106 P2 S32768                 (serial)
 GCODE  → :GCODE:ANOUT:2? 32768          (response)
+```
+
+#### Switching nozzle vacuum on
+
+```
+Qt GUI → POST /api/head/nozzle/N1/vacuum  {"on": true}
+CAMERA → set_analog_out("XY", 2, 255)
+XY     → M106 P2 S255                    (serial)
 ```
 
 ---
