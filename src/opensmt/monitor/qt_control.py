@@ -1098,11 +1098,11 @@ class ControlWindow(QMainWindow):
         split_root.setContentsMargins(0, 0, 0, 0)
         split_root.setSpacing(5)
 
-        top_splitter = QSplitter(Qt.Orientation.Horizontal)
-        top_splitter.setChildrenCollapsible(False)
+        self._top_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._top_splitter.setChildrenCollapsible(False)
 
-        bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
-        bottom_splitter.setChildrenCollapsible(False)
+        self._bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._bottom_splitter.setChildrenCollapsible(False)
 
         cam_group = QGroupBox("Cameras")
         cam_group_layout = QVBoxLayout(cam_group)
@@ -1116,6 +1116,7 @@ class ControlWindow(QMainWindow):
         self._camera_layout.setVerticalSpacing(3)
         cam_scroll.setWidget(cam_container)
         cam_group_layout.addWidget(cam_scroll)
+        cam_group.setMinimumWidth(220)
 
         gp_group = QGroupBox("General Purpose")
         gp_layout = QVBoxLayout(gp_group)
@@ -1279,19 +1280,20 @@ class ControlWindow(QMainWindow):
         self._nozzle_layout.setVerticalSpacing(4)
         noz_scroll.setWidget(self._nozzle_container)
         noz_layout.addWidget(noz_scroll)
+        noz_group.setMinimumWidth(220)
 
-        top_splitter.addWidget(cam_group)
-        top_splitter.addWidget(gp_group)
-        top_splitter.setStretchFactor(0, 1)
-        top_splitter.setStretchFactor(1, 1)
+        self._top_splitter.addWidget(cam_group)
+        self._top_splitter.addWidget(gp_group)
+        self._top_splitter.setStretchFactor(0, 1)
+        self._top_splitter.setStretchFactor(1, 1)
 
-        bottom_splitter.addWidget(xy_group)
-        bottom_splitter.addWidget(noz_group)
-        bottom_splitter.setStretchFactor(0, 1)
-        bottom_splitter.setStretchFactor(1, 1)
+        self._bottom_splitter.addWidget(xy_group)
+        self._bottom_splitter.addWidget(noz_group)
+        self._bottom_splitter.setStretchFactor(0, 1)
+        self._bottom_splitter.setStretchFactor(1, 1)
 
-        split_root.addWidget(top_splitter, 3)
-        split_root.addWidget(bottom_splitter, 2)
+        split_root.addWidget(self._top_splitter, 3)
+        split_root.addWidget(self._bottom_splitter, 2)
         outer.addLayout(split_root, 1)
 
         status = self.statusBar()
@@ -1325,7 +1327,32 @@ class ControlWindow(QMainWindow):
         self._poll_timer.timeout.connect(self._poll_status)
         self._poll_timer.start()
 
+        QTimer.singleShot(0, self._init_splitters)
+
         self._poll_status()
+
+    def _init_splitters(self) -> None:
+        self._top_splitter.setSizes([2, 8])
+        self._bottom_splitter.setSizes([2, 8])
+        self._top_splitter.splitterMoved.connect(lambda _pos, _index: self._clamp_splitter(self._top_splitter))
+        self._bottom_splitter.splitterMoved.connect(lambda _pos, _index: self._clamp_splitter(self._bottom_splitter))
+        self._clamp_splitter(self._top_splitter)
+        self._clamp_splitter(self._bottom_splitter)
+
+    def _clamp_splitter(self, splitter: QSplitter) -> None:
+        sizes = splitter.sizes()
+        if len(sizes) != 2:
+            return
+        total = sizes[0] + sizes[1]
+        if total <= 0:
+            return
+
+        min_left = int(total * 0.2)
+        max_left = int(total * 0.5)
+        left = sizes[0]
+        clamped = max(min_left, min(max_left, left))
+        if clamped != left:
+            splitter.setSizes([clamped, total - clamped])
 
     def _apply_host(self) -> None:
         host = self._host.text().strip() or "127.0.0.1"
