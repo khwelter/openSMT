@@ -828,10 +828,17 @@ class CameraVisionModule:
             return web.json_response({"error": "unknown_feeder"}, status=404)
 
         merged = current.to_status()
+        pick_location = merged.get("pick_location") if isinstance(merged.get("pick_location"), dict) else {}
+        base_x = float(pick_location.get("x", 0.0) or 0.0)
+        base_y = float(pick_location.get("y", 0.0) or 0.0)
         actual = merged.get("actual_data")
         if not isinstance(actual, dict):
             actual = {}
         actual["parts_picked"] = 0
+        actual["current_index_x"] = 0
+        actual["current_index_y"] = 0
+        actual["current_pick"] = {"x": base_x, "y": base_y}
+        actual["last_pick"] = {"x": base_x, "y": base_y}
         merged["actual_data"] = actual
 
         try:
