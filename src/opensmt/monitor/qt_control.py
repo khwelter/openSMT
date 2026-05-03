@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QPointF, QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,6 +22,157 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+# ---------------------------------------------------------------------------
+# Icon helpers
+# ---------------------------------------------------------------------------
+
+_ICON_SZ = 22     # individual icon size inside composites (px)
+_ARROW_W = 10     # arrow sprite width (px)
+_BTN_SQ  = 34     # square side for single-icon buttons (px)
+
+_pm_cache: dict[str, QPixmap] = {}
+
+
+def _assets_dir() -> Path:
+    """Resolve  <workspace-root>/assets/icons/opensmt-ui/32/ from this file."""
+    return (
+        Path(__file__).resolve()
+        .parent   # monitor/
+        .parent   # opensmt/
+        .parent   # src/
+        .parent   # project root
+        / "assets" / "icons" / "opensmt-ui" / "32"
+    )
+
+
+def _load_pm(name: str, size: int = _ICON_SZ) -> QPixmap:
+    """Load a named PNG from the assets dir, scaled to *size* px square."""
+    key = f"{name}@{size}"
+    if key not in _pm_cache:
+        path = _assets_dir() / f"{name}.png"
+        if path.exists():
+            pm = QPixmap(str(path))
+            if not pm.isNull():
+                pm = pm.scaled(
+                    size, size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+        else:
+            pm = QPixmap(size, size)
+            pm.fill(Qt.GlobalColor.transparent)
+        _pm_cache[key] = pm
+    return _pm_cache[key]
+
+
+def _make_camera_pm(size: int = _ICON_SZ, lens_color: QColor | None = None) -> QPixmap:
+    """Draw a simple camera icon programmatically.
+
+    *lens_color* distinguishes top camera (blue, default) from bottom camera (green).
+    """
+    if lens_color is None:
+        lens_color = QColor(60, 120, 200)
+    key = f"__cam@{size}@{lens_color.name()}"
+    if key in _pm_cache:
+        return _pm_cache[key]
+
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    body_y = int(size * 0.35)
+    body_h = int(size * 0.50)
+    bump_w = int(size * 0.30)
+    bump_h = int(size * 0.15)
+    bump_x = int(size * 0.36)
+
+    body_col = QColor(210, 210, 210)
+    p.setBrush(body_col)
+    p.setPen(QColor(150, 150, 150))
+    p.drawRoundedRect(1, body_y, size - 2, body_h, 3, 3)
+    p.drawRect(bump_x, body_y - bump_h, bump_w, bump_h)
+
+    lens_r = size * 0.16
+    cx, cy = size / 2.0, body_y + body_h / 2.0
+    p.setBrush(lens_color)
+    p.setPen(lens_color.darker(160))
+    p.drawEllipse(
+        int(cx - lens_r), int(cy - lens_r),
+        int(lens_r * 2), int(lens_r * 2),
+    )
+    p.end()
+    _pm_cache[key] = pm
+    return pm
+
+
+def _make_arrow_pm(w: int = _ARROW_W, h: int = _ICON_SZ) -> QPixmap:
+    """Draw a small right-pointing filled triangle."""
+    key = f"__arrow@{w}x{h}"
+    if key in _pm_cache:
+        return _pm_cache[key]
+    pm = QPixmap(w, h)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor(190, 190, 190))
+    p.setPen(Qt.PenStyle.NoPen)
+    hh = h * 0.32
+    cy = h / 2.0
+    poly = QPolygonF([
+        QPointF(2,       cy - hh),
+        QPointF(w - 2,   cy),
+        QPointF(2,       cy + hh),
+    ])
+    p.drawPolygon(poly)
+    p.end()
+    _pm_cache[key] = pm
+    return pm
+
+
+def _compose_pm(left: QPixmap, right: QPixmap) -> QPixmap:
+    """Return a pixmap that renders *left* → arrow → *right* in a single row."""
+    gap = 2
+    total_w = _ICON_SZ + gap + _ARROW_W + gap + _ICON_SZ
+    pm = QPixmap(total_w, _ICON_SZ)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.drawPixmap(0, 0, left)
+    p.drawPixmap(_ICON_SZ + gap, 0, _make_arrow_pm())
+    p.drawPixmap(_ICON_SZ + gap + _ARROW_W + gap, 0, right)
+    p.end()
+    return pm
+
+
+def _icon(name: str) -> QIcon:
+    return QIcon(_load_pm(name))
+
+
+def _sq_btn(pm_or_name: str | QPixmap, tooltip: str = "") -> QPushButton:
+    """Create a square icon-only button for single-icon actions."""
+    pm = _load_pm(pm_or_name) if isinstance(pm_or_name, str) else pm_or_name
+    btn = QPushButton()
+    btn.setIcon(QIcon(pm))
+    btn.setIconSize(QSize(_ICON_SZ, _ICON_SZ))
+    btn.setFixedSize(_BTN_SQ, _BTN_SQ)
+    if tooltip:
+        btn.setToolTip(tooltip)
+    return btn
+
+
+def _dual_btn(left: QPixmap, right: QPixmap, tooltip: str = "") -> QPushButton:
+    """Create a composite (left → arrow → right) icon button."""
+    pm = _compose_pm(left, right)
+    gap = 2
+    total_w = _ICON_SZ + gap + _ARROW_W + gap + _ICON_SZ
+    btn = QPushButton()
+    btn.setIcon(QIcon(pm))
+    btn.setIconSize(QSize(total_w, _ICON_SZ))
+    btn.setFixedSize(total_w + 12, _BTN_SQ)
+    if tooltip:
+        btn.setToolTip(tooltip)
+    return btn
 
 
 class ControlApiClient(QObject):
@@ -79,29 +232,48 @@ class ControlApiClient(QObject):
 class NozzleRow(QWidget):
     action_requested = Signal(str, str)
 
+    # Shared pixmaps — built once, reused for every row
+    _nozzle_pm:     QPixmap | None = None
+    _cam_top_pm:    QPixmap | None = None
+    _cam_bottom_pm: QPixmap | None = None
+    _cal_pm:        QPixmap | None = None
+
+    @classmethod
+    def _init_pms(cls) -> None:
+        if cls._nozzle_pm is not None:
+            return
+        cls._nozzle_pm     = _load_pm("nozzle_change")
+        cls._cam_top_pm    = _make_camera_pm()                              # blue lens = top
+        cls._cam_bottom_pm = _make_camera_pm(lens_color=QColor(40, 160, 80))  # green = bottom
+        cls._cal_pm        = _load_pm("calibration_spot")
+
     def __init__(self, nozzle_name: str) -> None:
         super().__init__()
+        NozzleRow._init_pms()
         self.nozzle_name = nozzle_name
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(2, 1, 2, 1)
+        layout.setSpacing(3)
 
-        self._title = QLabel(nozzle_name)
-        self._title.setMinimumWidth(44)
-        self._offset = QLabel("off X=-- Y=--")
+        self._title  = QLabel(nozzle_name)
+        self._title.setMinimumWidth(28)
+        self._offset = QLabel("X=--  Y=--")
+        self._offset.setMinimumWidth(110)
         self._z = QLabel("Z=--")
         self._r = QLabel("R=--")
 
-        b_align = QPushButton("Align->Cam")
-        b_cam = QPushButton("Cam->Nozzle")
-        b_bottom = QPushButton("Above Bottom")
-        b_cal = QPushButton("Cal Offset")
+        # Composite buttons: nozzle→cam_top, cam_top→nozzle,
+        #                    nozzle→cam_bottom, single cal
+        b_align  = _dual_btn(self._nozzle_pm,  self._cam_top_pm,    "Align nozzle to top camera")
+        b_cam    = _dual_btn(self._cam_top_pm,  self._nozzle_pm,    "Move top camera to nozzle")
+        b_bottom = _dual_btn(self._nozzle_pm,  self._cam_bottom_pm, "Move nozzle above bottom camera")
+        b_cal    = _sq_btn(self._cal_pm,                            "Calculate nozzle offset at fiducial")
 
-        b_align.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "align_to_cam"))
-        b_cam.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cam_to_nozzle"))
+        b_align.clicked.connect( lambda: self.action_requested.emit(self.nozzle_name, "align_to_cam"))
+        b_cam.clicked.connect(   lambda: self.action_requested.emit(self.nozzle_name, "cam_to_nozzle"))
         b_bottom.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "above_bottom"))
-        b_cal.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cal_offset"))
+        b_cal.clicked.connect(   lambda: self.action_requested.emit(self.nozzle_name, "cal_offset"))
 
         layout.addWidget(self._title)
         layout.addWidget(self._offset)
@@ -136,8 +308,8 @@ class NozzleRow(QWidget):
 class ControlWindow(QMainWindow):
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
-        self.setWindowTitle("openSMT Control (Qt)")
-        self.resize(1180, 760)
+        self.setWindowTitle("openSMT Control")
+        self.resize(960, 620)
 
         base_url = f"http://{host}:{port}"
         self._api = ControlApiClient(base_url)
@@ -147,15 +319,18 @@ class ControlWindow(QMainWindow):
         root = QWidget(self)
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(6, 6, 6, 6)
-        outer.setSpacing(6)
+        outer.setContentsMargins(5, 5, 5, 5)
+        outer.setSpacing(4)
 
-        # Top connection/settings row
+        # ── Connection row ──────────────────────────────────────────────────
         top = QHBoxLayout()
         self._host = QLineEdit(host)
         self._port = QLineEdit(str(port))
         self._connect_btn = QPushButton("Apply Host")
         self._conn_state = QLabel("Ready")
+
+        self._host.setMaximumWidth(160)
+        self._port.setMaximumWidth(60)
 
         top.addWidget(QLabel("Host"))
         top.addWidget(self._host)
@@ -166,9 +341,11 @@ class ControlWindow(QMainWindow):
         top.addWidget(self._conn_state)
         outer.addLayout(top)
 
-        # XY control block
+        # ── XY controls ─────────────────────────────────────────────────────
         xy_group = QGroupBox("XY")
         xy_layout = QVBoxLayout(xy_group)
+        xy_layout.setContentsMargins(4, 4, 4, 4)
+        xy_layout.setSpacing(3)
 
         step_row = QHBoxLayout()
         self._xy_step = QComboBox()
@@ -185,43 +362,47 @@ class ControlWindow(QMainWindow):
         xy_layout.addLayout(step_row)
 
         xy_buttons = QGridLayout()
-        b_home_xy = QPushButton("Home XY")
-        b_fid = QPushButton("Homing Fiducial")
-        b_park = QPushButton("Park")
-        b_l = QPushButton("←")
-        b_r = QPushButton("→")
-        b_u = QPushButton("↑")
-        b_d = QPushButton("↓")
+        xy_buttons.setSpacing(3)
+
+        b_home_xy = _sq_btn("home_xy",        "Home XY axes")
+        b_fid     = _sq_btn("fiducial_main",   "Move to homing fiducial")
+        b_park    = _sq_btn("park_zero",       "Move to park position")
+        b_l       = _sq_btn("move_left",       "Jog left")
+        b_r       = _sq_btn("move_right",      "Jog right")
+        b_u       = _sq_btn("move_up",         "Jog up (Y+)")
+        b_d       = _sq_btn("move_down",       "Jog down (Y−)")
 
         xy_buttons.addWidget(b_home_xy, 0, 0)
-        xy_buttons.addWidget(b_fid, 0, 1)
-        xy_buttons.addWidget(b_park, 0, 2)
-        xy_buttons.addWidget(b_u, 1, 1)
-        xy_buttons.addWidget(b_l, 2, 0)
-        xy_buttons.addWidget(b_d, 2, 1)
-        xy_buttons.addWidget(b_r, 2, 2)
+        xy_buttons.addWidget(b_fid,     0, 1)
+        xy_buttons.addWidget(b_park,    0, 2)
+        xy_buttons.addWidget(b_u,       1, 1)
+        xy_buttons.addWidget(b_l,       2, 0)
+        xy_buttons.addWidget(b_d,  2, 1)
+        xy_buttons.addWidget(b_r,  2, 2)
         xy_layout.addLayout(xy_buttons)
 
         outer.addWidget(xy_group)
 
-        # Nozzle controls block
+        # ── Nozzle controls ─────────────────────────────────────────────────
         noz_group = QGroupBox("Nozzles")
         noz_layout = QVBoxLayout(noz_group)
+        noz_layout.setContentsMargins(3, 3, 3, 3)
         noz_scroll = QScrollArea()
         noz_scroll.setWidgetResizable(True)
         noz_container = QWidget()
         self._nozzle_layout = QVBoxLayout(noz_container)
         self._nozzle_layout.setContentsMargins(2, 2, 2, 2)
-        self._nozzle_layout.setSpacing(3)
+        self._nozzle_layout.setSpacing(2)
         noz_scroll.setWidget(noz_container)
         noz_layout.addWidget(noz_scroll)
         outer.addWidget(noz_group, 1)
 
-        # Log block
+        # ── Log ─────────────────────────────────────────────────────────────
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self._log.setMinimumHeight(150)
+        self._log.setMinimumHeight(100)
+        self._log.setMaximumHeight(160)
         outer.addWidget(self._log)
 
         # Wire buttons

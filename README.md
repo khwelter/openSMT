@@ -64,6 +64,100 @@ Die folgenden CLI-Tools sind weiterhin verfuegbar, aber nicht Teil des neuen Sta
 
    python3 -m opensmt monitor-gui --host 127.0.0.1 --port 8765 --name MON_GUI
 
+4. Qt Control GUI starten (Fernbedienung ohne Browser)
+
+   python3 -m opensmt control-gui --host MACHINE_IP --port 8080
+
+## Qt Control GUI (Remote Operation)
+
+`opensmt control-gui` is a native Qt application that controls the machine over the network
+without a browser. It connects directly to the HTTP API of a running `opensmt run` instance.
+
+Typical use case: run the core software on the machine-side Linux host, and operate it
+from an office machine on the same network.
+
+### Requirements on the office machine
+
+- Python >= 3.11
+- PySide6 (for Qt)
+- No serial hardware required — only network access to the machine host
+
+### One-time setup on the office machine
+
+```bash
+# Create a virtual environment
+python3 -m venv ~/.venvs/opensmt-gui
+
+# Activate it
+source ~/.venvs/opensmt-gui/bin/activate
+
+# Install directly from the git repository
+pip install -U "git+ssh://YOUR_GIT_HOST/YOUR_REPO_PATH.git"
+```
+
+Replace `YOUR_GIT_HOST/YOUR_REPO_PATH` with the actual SSH path to this repository.
+
+If you prefer a local wheel instead:
+
+```bash
+# On the development/machine host — build a wheel
+python3 -m build --wheel
+
+# Copy the .whl file to the office machine, then install it there
+pip install -U dist/opensmt-0.1.0-py3-none-any.whl
+```
+
+### Launching the GUI
+
+```bash
+# Activate the virtual environment
+source ~/.venvs/opensmt-gui/bin/activate
+
+# Start the control GUI, pointing at the machine host
+opensmt control-gui --host MACHINE_FLOOR_IP --port 8080
+```
+
+The GUI polls `/api/status` every 800 ms and sends all commands through the existing REST
+API, so control latency on a wired LAN is negligible.
+
+### Updating after code changes
+
+```bash
+source ~/.venvs/opensmt-gui/bin/activate
+pip install -U "git+ssh://YOUR_GIT_HOST/YOUR_REPO_PATH.git"
+```
+
+### Optional: desktop launcher (Linux)
+
+Create `~/.local/share/applications/opensmt-control.desktop`:
+
+```ini
+[Desktop Entry]
+Name=openSMT Control
+Exec=/bin/bash -c "source ~/.venvs/opensmt-gui/bin/activate && opensmt control-gui --host MACHINE_FLOOR_IP --port 8080"
+Icon=utilities-system-monitor
+Terminal=false
+Type=Application
+Categories=Utility;
+```
+
+Then run `update-desktop-database ~/.local/share/applications/` to register it.
+
+### Machine-side prerequisite
+
+Ensure `camera.web_host` is set to `0.0.0.0` (not `127.0.0.1`) in your `system.json`
+so the HTTP API is reachable from the network:
+
+```json
+"camera": {
+  "web_host": "0.0.0.0",
+  "web_port": 8080,
+  ...
+}
+```
+
+---
+
 ## Debian Pakete
 
 Wenn Debian die Umgebung als externally managed markiert, werden Abhaengigkeiten ueber apt installiert.
