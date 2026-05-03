@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QPointF, QSize, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
+from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -334,7 +334,126 @@ class ControlApiClient(QObject):
         reply.finished.connect(_finish)
 
 
+class CameraPreviewWidget(QWidget):
+    vector_drawn = Signal(float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._frame = QPixmap()
+        self._zoom = 1.0
+        self._source_rect = QRectF()
+        self._target_rect = QRectF()
+        self._drag_start = QPointF()
+        self._drag_end = QPointF()
+        self._drag_active = False
+        self.setMinimumSize(150, 95)
+        self.setMouseTracking(True)
+
+    def set_zoom(self, value: float) -> None:
+        self._zoom = max(1.0, min(4.0, float(value)))
+        self.update()
+
+    def set_frame(self, frame: QPixmap) -> None:
+        self._frame = frame
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#070b14"))
+
+        if self._frame.isNull():
+            p.setPen(QColor("#8ba3cf"))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No Feed")
+            return
+
+        src = self._compute_source_rect()
+        target = self._fit_rect(src.width(), src.height())
+        self._source_rect = src
+        self._target_rect = target
+
+        p.drawPixmap(target, self._frame, src)
+
+        if self._drag_active:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QPen(QColor("#ff3b3b"), 2))
+            p.drawLine(self._drag_start, self._drag_end)
+            dx = self._drag_end.x() - self._drag_start.x()
+            dy = self._drag_end.y() - self._drag_start.y()
+            p.setPen(QPen(QColor("#8ba3cf"), 1))
+            p.drawText(
+                int(self._drag_end.x()) + 6,
+                int(self._drag_end.y()) - 6,
+                f"dx={dx:.1f}px dy={dy:.1f}px",
+            )
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = QPointF(event.position())
+        if not self._target_rect.contains(pos):
+            return
+        self._drag_start = pos
+        self._drag_end = pos
+        self._drag_active = True
+        self.update()
+
+    def mouseMoveEvent(self, event: Any) -> None:
+        if not self._drag_active:
+            return
+        self._drag_end = QPointF(event.position())
+        self.update()
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        if event.button() != Qt.MouseButton.LeftButton or not self._drag_active:
+            return
+        self._drag_end = QPointF(event.position())
+        self._drag_active = False
+
+        s0 = self._widget_to_source(self._drag_start)
+        s1 = self._widget_to_source(self._drag_end)
+        if s0 is not None and s1 is not None:
+            self.vector_drawn.emit(s1.x() - s0.x(), s1.y() - s0.y())
+        self.update()
+
+    def _compute_source_rect(self) -> QRectF:
+        fw = float(self._frame.width())
+        fh = float(self._frame.height())
+        if fw <= 0 or fh <= 0:
+            return QRectF()
+
+        zoom_w = fw / self._zoom
+        zoom_h = fh / self._zoom
+        x0 = (fw - zoom_w) / 2.0
+        y0 = (fh - zoom_h) / 2.0
+        return QRectF(x0, y0, zoom_w, zoom_h)
+
+    def _fit_rect(self, src_w: float, src_h: float) -> QRectF:
+        ww = float(self.width())
+        wh = float(self.height())
+        if src_w <= 0 or src_h <= 0 or ww <= 0 or wh <= 0:
+            return QRectF(0, 0, ww, wh)
+
+        scale = min(ww / src_w, wh / src_h)
+        tw = src_w * scale
+        th = src_h * scale
+        tx = (ww - tw) / 2.0
+        ty = (wh - th) / 2.0
+        return QRectF(tx, ty, tw, th)
+
+    def _widget_to_source(self, p: QPointF) -> QPointF | None:
+        if self._target_rect.isNull() or self._source_rect.isNull() or not self._target_rect.contains(p):
+            return None
+
+        nx = (p.x() - self._target_rect.x()) / self._target_rect.width()
+        ny = (p.y() - self._target_rect.y()) / self._target_rect.height()
+        sx = self._source_rect.x() + nx * self._source_rect.width()
+        sy = self._source_rect.y() + ny * self._source_rect.height()
+        return QPointF(sx, sy)
+
+
 class CameraTile(QFrame):
+    vector_move_requested = Signal(str, float, float)
+
     def __init__(self, camera_name: str) -> None:
         super().__init__()
         self.camera_name = camera_name
@@ -346,10 +465,9 @@ class CameraTile(QFrame):
 
         cam_pm = _make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)
 
-        self._preview = QLabel("No Feed")
-        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setMinimumSize(150, 95)
-        self._preview.setStyleSheet("background:#070b14; border:1px solid #2a3d66; color:#8ba3cf;")
+        self._preview = CameraPreviewWidget()
+        self._preview.setStyleSheet("background:#070b14; border:1px solid #2a3d66;")
+        self._preview.vector_drawn.connect(self._on_vector_drawn)
 
         hdr = QHBoxLayout()
         self._icon = QLabel()
@@ -362,7 +480,28 @@ class CameraTile(QFrame):
         hdr.addStretch(1)
         hdr.addWidget(self._state)
 
+        controls = QHBoxLayout()
+        controls.setSpacing(4)
+        controls.addWidget(QLabel("Zoom"))
+        self._zoom = QComboBox()
+        for z in (1.0, 1.5, 2.0, 3.0, 4.0):
+            self._zoom.addItem(f"{z:g}x", z)
+        self._zoom.setCurrentIndex(0)
+        self._zoom.currentIndexChanged.connect(self._on_zoom_changed)
+        controls.addWidget(self._zoom)
+
+        controls.addWidget(QLabel("mm/px"))
+        self._mm_per_px = QDoubleSpinBox()
+        self._mm_per_px.setRange(0.001, 5.0)
+        self._mm_per_px.setDecimals(4)
+        self._mm_per_px.setSingleStep(0.001)
+        self._mm_per_px.setValue(0.0200)
+        self._mm_per_px.setToolTip("Vector conversion factor from image pixels to machine mm")
+        controls.addWidget(self._mm_per_px)
+        controls.addStretch(1)
+
         layout.addWidget(self._preview)
+        layout.addLayout(controls)
         layout.addLayout(hdr)
 
     def apply_status(self, online: bool) -> None:
@@ -375,12 +514,19 @@ class CameraTile(QFrame):
         pm = QPixmap()
         if not pm.loadFromData(raw, "JPG"):
             return
-        fitted = pm.scaled(
-            self._preview.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._preview.setPixmap(fitted)
+        self._preview.set_frame(pm)
+
+    def _on_zoom_changed(self, _idx: int) -> None:
+        value = self._zoom.currentData()
+        self._preview.set_zoom(float(value) if value is not None else 1.0)
+
+    def _on_vector_drawn(self, dx_px: float, dy_px: float) -> None:
+        scale = float(self._mm_per_px.value())
+        dx_mm = dx_px * scale
+        dy_mm = -dy_px * scale
+        if abs(dx_mm) < 1e-9 and abs(dy_mm) < 1e-9:
+            return
+        self.vector_move_requested.emit(self.camera_name, dx_mm, dy_mm)
 
 
 class NozzleCard(QFrame):
@@ -1497,6 +1643,7 @@ class ControlWindow(QMainWindow):
             tile = self._camera_tiles.get(name)
             if tile is None:
                 tile = CameraTile(name)
+                tile.vector_move_requested.connect(self._on_camera_vector_move)
                 self._camera_tiles[name] = tile
 
             tile.apply_status(bool(camera.get("online", False)))
@@ -1762,6 +1909,18 @@ class ControlWindow(QMainWindow):
             return
         self._tray_editor.set_last_pick_location(self._current_x, self._current_y)
         self._log_line(f"OK: feeder {feeder_id} last-pick location set from camera XY ({self._current_x:.3f}, {self._current_y:.3f})")
+
+    def _on_camera_vector_move(self, camera_name: str, dx_mm: float, dy_mm: float) -> None:
+        if self._current_x is None or self._current_y is None:
+            self._log_line(f"ERR: {camera_name}: cannot vector-move camera, XY position unknown")
+            return
+
+        target_x = float(self._current_x) + float(dx_mm)
+        target_y = float(self._current_y) + float(dy_mm)
+        self._log_line(
+            f"REQ: {camera_name} vector move dx={dx_mm:.3f}mm dy={dy_mm:.3f}mm -> X={target_x:.3f} Y={target_y:.3f}"
+        )
+        self._move_camera_to_xy(target_x, target_y)
 
     def _go_to_feeder_survey(self) -> None:
         self._feeders_tabs.setCurrentIndex(0)
