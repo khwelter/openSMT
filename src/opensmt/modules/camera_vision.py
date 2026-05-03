@@ -2431,6 +2431,22 @@ class CameraVisionModule:
         """
         positions = self._position_store.all()
         nozzle_data = []
+        camera_data = []
+
+        for cam_name, cam_state in self._cameras.items():
+            cap_open = False
+            if cam_state.cap is not None:
+                try:
+                    cap_open = bool(cam_state.cap.isOpened())
+                except Exception:
+                    cap_open = False
+            camera_data.append({
+                "name": cam_name,
+                "online": cap_open,
+                "stream_path": f"/camera/{cam_name}",
+            })
+
+        camera_data.sort(key=lambda c: str(c.get("name", "")))
 
         if self._nozzle_config_store and self._valve_store:
             cam_x = positions.get("X")
@@ -2475,6 +2491,7 @@ class CameraVisionModule:
         return web.json_response({
             "positions": positions,
             "nozzles": nozzle_data,
+            "cameras": camera_data,
             "camera_position": {"x": positions.get("X"), "y": positions.get("Y")},
         })
 

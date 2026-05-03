@@ -10,6 +10,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -23,57 +24,76 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# ---------------------------------------------------------------------------
-# Icon helpers
-# ---------------------------------------------------------------------------
+_ICON_SZ = 22
+_ARROW_W = 10
+_BTN_SQ = 34
 
-_ICON_SZ = 22     # individual icon size inside composites (px)
-_ARROW_W = 10     # arrow sprite width (px)
-_BTN_SQ  = 34     # square side for single-icon buttons (px)
+_COLOR_RED = QColor(255, 40, 40)
+_COLOR_BLUE = QColor(20, 120, 255)
 
 _pm_cache: dict[str, QPixmap] = {}
 
 
 def _assets_dir() -> Path:
-    """Resolve  <workspace-root>/assets/icons/opensmt-ui/32/ from this file."""
     return (
         Path(__file__).resolve()
-        .parent   # monitor/
-        .parent   # opensmt/
-        .parent   # src/
-        .parent   # project root
-        / "assets" / "icons" / "opensmt-ui" / "32"
+        .parent
+        .parent
+        .parent
+        .parent
+        / "assets"
+        / "icons"
+        / "opensmt-ui"
+        / "32"
     )
 
 
 def _load_pm(name: str, size: int = _ICON_SZ) -> QPixmap:
-    """Load a named PNG from the assets dir, scaled to *size* px square."""
     key = f"{name}@{size}"
     if key not in _pm_cache:
         path = _assets_dir() / f"{name}.png"
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
         if path.exists():
-            pm = QPixmap(str(path))
-            if not pm.isNull():
-                pm = pm.scaled(
-                    size, size,
+            src = QPixmap(str(path))
+            if not src.isNull():
+                pm = src.scaled(
+                    size,
+                    size,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-        else:
-            pm = QPixmap(size, size)
-            pm.fill(Qt.GlobalColor.transparent)
         _pm_cache[key] = pm
     return _pm_cache[key]
 
 
-def _make_camera_pm(size: int = _ICON_SZ, lens_color: QColor | None = None) -> QPixmap:
-    """Draw a simple camera icon programmatically.
+def _tint_pm(src: QPixmap, color: QColor) -> QPixmap:
+    key = f"__tint@{int(src.cacheKey())}@{color.name()}"
+    if key in _pm_cache:
+        return _pm_cache[key]
 
-    *lens_color* distinguishes top camera (blue, default) from bottom camera (green).
-    """
+    tinted = QPixmap(src.size())
+    tinted.fill(Qt.GlobalColor.transparent)
+    p = QPainter(tinted)
+    p.drawPixmap(0, 0, src)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    p.fillRect(tinted.rect(), color)
+    p.end()
+    _pm_cache[key] = tinted
+    return tinted
+
+
+def _make_camera_pm(
+    size: int = _ICON_SZ,
+    body_color: QColor | None = None,
+    lens_color: QColor | None = None,
+) -> QPixmap:
+    if body_color is None:
+        body_color = _COLOR_BLUE
     if lens_color is None:
-        lens_color = QColor(60, 120, 200)
-    key = f"__cam@{size}@{lens_color.name()}"
+        lens_color = _COLOR_RED
+
+    key = f"__cam@{size}@{body_color.name()}@{lens_color.name()}"
     if key in _pm_cache:
         return _pm_cache[key]
 
@@ -83,56 +103,54 @@ def _make_camera_pm(size: int = _ICON_SZ, lens_color: QColor | None = None) -> Q
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
     body_y = int(size * 0.35)
-    body_h = int(size * 0.50)
-    bump_w = int(size * 0.30)
+    body_h = int(size * 0.5)
+    bump_w = int(size * 0.3)
     bump_h = int(size * 0.15)
     bump_x = int(size * 0.36)
 
-    body_col = QColor(210, 210, 210)
-    p.setBrush(body_col)
-    p.setPen(QColor(150, 150, 150))
+    p.setBrush(body_color)
+    p.setPen(body_color.darker(140))
     p.drawRoundedRect(1, body_y, size - 2, body_h, 3, 3)
     p.drawRect(bump_x, body_y - bump_h, bump_w, bump_h)
 
     lens_r = size * 0.16
     cx, cy = size / 2.0, body_y + body_h / 2.0
     p.setBrush(lens_color)
-    p.setPen(lens_color.darker(160))
-    p.drawEllipse(
-        int(cx - lens_r), int(cy - lens_r),
-        int(lens_r * 2), int(lens_r * 2),
-    )
+    p.setPen(lens_color.darker(145))
+    p.drawEllipse(int(cx - lens_r), int(cy - lens_r), int(lens_r * 2), int(lens_r * 2))
     p.end()
+
     _pm_cache[key] = pm
     return pm
 
 
 def _make_arrow_pm(w: int = _ARROW_W, h: int = _ICON_SZ) -> QPixmap:
-    """Draw a small right-pointing filled triangle."""
     key = f"__arrow@{w}x{h}"
     if key in _pm_cache:
         return _pm_cache[key]
+
     pm = QPixmap(w, h)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor(190, 190, 190))
+    p.setBrush(_COLOR_RED)
     p.setPen(Qt.PenStyle.NoPen)
+
     hh = h * 0.32
     cy = h / 2.0
     poly = QPolygonF([
-        QPointF(2,       cy - hh),
-        QPointF(w - 2,   cy),
-        QPointF(2,       cy + hh),
+        QPointF(2, cy - hh),
+        QPointF(w - 2, cy),
+        QPointF(2, cy + hh),
     ])
     p.drawPolygon(poly)
     p.end()
+
     _pm_cache[key] = pm
     return pm
 
 
 def _compose_pm(left: QPixmap, right: QPixmap) -> QPixmap:
-    """Return a pixmap that renders *left* → arrow → *right* in a single row."""
     gap = 2
     total_w = _ICON_SZ + gap + _ARROW_W + gap + _ICON_SZ
     pm = QPixmap(total_w, _ICON_SZ)
@@ -145,12 +163,7 @@ def _compose_pm(left: QPixmap, right: QPixmap) -> QPixmap:
     return pm
 
 
-def _icon(name: str) -> QIcon:
-    return QIcon(_load_pm(name))
-
-
 def _sq_btn(pm_or_name: str | QPixmap, tooltip: str = "") -> QPushButton:
-    """Create a square icon-only button for single-icon actions."""
     pm = _load_pm(pm_or_name) if isinstance(pm_or_name, str) else pm_or_name
     btn = QPushButton()
     btn.setIcon(QIcon(pm))
@@ -162,7 +175,6 @@ def _sq_btn(pm_or_name: str | QPixmap, tooltip: str = "") -> QPushButton:
 
 
 def _dual_btn(left: QPixmap, right: QPixmap, tooltip: str = "") -> QPushButton:
-    """Create a composite (left → arrow → right) icon button."""
     pm = _compose_pm(left, right)
     gap = 2
     total_w = _ICON_SZ + gap + _ARROW_W + gap + _ICON_SZ
@@ -229,61 +241,101 @@ class ControlApiClient(QObject):
         reply.finished.connect(_finish)
 
 
-class NozzleRow(QWidget):
+class CameraTile(QFrame):
+    def __init__(self, camera_name: str) -> None:
+        super().__init__()
+        self.camera_name = camera_name
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 3, 4, 3)
+        layout.setSpacing(4)
+
+        cam_pm = _make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)
+
+        self._icon = QLabel()
+        self._icon.setPixmap(cam_pm)
+        self._name = QLabel(camera_name)
+        self._state = QLabel("offline")
+
+        layout.addWidget(self._icon)
+        layout.addWidget(self._name)
+        layout.addStretch(1)
+        layout.addWidget(self._state)
+
+    def apply_status(self, online: bool) -> None:
+        self._state.setText("online" if online else "offline")
+        self._state.setStyleSheet(
+            "color: #1f8a1f;" if online else "color: #bb2b2b;"
+        )
+
+
+class NozzleCard(QFrame):
     action_requested = Signal(str, str)
 
-    # Shared pixmaps — built once, reused for every row
-    _nozzle_pm:     QPixmap | None = None
-    _cam_top_pm:    QPixmap | None = None
+    _nozzle_pm: QPixmap | None = None
+    _cam_top_pm: QPixmap | None = None
     _cam_bottom_pm: QPixmap | None = None
-    _cal_pm:        QPixmap | None = None
+    _cal_pm: QPixmap | None = None
 
     @classmethod
     def _init_pms(cls) -> None:
         if cls._nozzle_pm is not None:
             return
-        cls._nozzle_pm     = _load_pm("nozzle_change")
-        cls._cam_top_pm    = _make_camera_pm()                              # blue lens = top
-        cls._cam_bottom_pm = _make_camera_pm(lens_color=QColor(40, 160, 80))  # green = bottom
-        cls._cal_pm        = _load_pm("calibration_spot")
+
+        cls._nozzle_pm = _tint_pm(_load_pm("nozzle_change"), _COLOR_RED)
+        cls._cam_top_pm = _make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)
+        cls._cam_bottom_pm = _make_camera_pm(body_color=_COLOR_RED, lens_color=_COLOR_BLUE)
+        cls._cal_pm = _tint_pm(_load_pm("calibration_spot"), _COLOR_BLUE)
 
     def __init__(self, nozzle_name: str) -> None:
         super().__init__()
-        NozzleRow._init_pms()
+        NozzleCard._init_pms()
         self.nozzle_name = nozzle_name
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 1, 2, 1)
-        layout.setSpacing(3)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
 
-        self._title  = QLabel(nozzle_name)
-        self._title.setMinimumWidth(28)
-        self._offset = QLabel("X=--  Y=--")
-        self._offset.setMinimumWidth(110)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(5, 4, 5, 4)
+        root.setSpacing(3)
+
+        title_row = QHBoxLayout()
+        self._title = QLabel(nozzle_name)
+        self._title.setStyleSheet("font-weight: 600;")
+        title_row.addWidget(self._title)
+        title_row.addStretch(1)
+        root.addLayout(title_row)
+
+        self._offset = QLabel("Off X=-- Y=--")
         self._z = QLabel("Z=--")
         self._r = QLabel("R=--")
+        root.addWidget(self._offset)
 
-        # Composite buttons: nozzle→cam_top, cam_top→nozzle,
-        #                    nozzle→cam_bottom, single cal
-        b_align  = _dual_btn(self._nozzle_pm,  self._cam_top_pm,    "Align nozzle to top camera")
-        b_cam    = _dual_btn(self._cam_top_pm,  self._nozzle_pm,    "Move top camera to nozzle")
-        b_bottom = _dual_btn(self._nozzle_pm,  self._cam_bottom_pm, "Move nozzle above bottom camera")
-        b_cal    = _sq_btn(self._cal_pm,                            "Calculate nozzle offset at fiducial")
+        zr_row = QHBoxLayout()
+        zr_row.addWidget(self._z)
+        zr_row.addWidget(self._r)
+        zr_row.addStretch(1)
+        root.addLayout(zr_row)
 
-        b_align.clicked.connect( lambda: self.action_requested.emit(self.nozzle_name, "align_to_cam"))
-        b_cam.clicked.connect(   lambda: self.action_requested.emit(self.nozzle_name, "cam_to_nozzle"))
+        btn_grid = QGridLayout()
+        btn_grid.setSpacing(2)
+
+        b_align = _dual_btn(self._nozzle_pm, self._cam_top_pm, "Align nozzle to top camera")
+        b_cam = _dual_btn(self._cam_top_pm, self._nozzle_pm, "Move top camera to nozzle")
+        b_bottom = _dual_btn(self._nozzle_pm, self._cam_bottom_pm, "Move nozzle above bottom camera")
+        b_cal = _sq_btn(self._cal_pm, "Calculate nozzle offset at fiducial")
+
+        btn_grid.addWidget(b_align, 0, 0)
+        btn_grid.addWidget(b_cam, 0, 1)
+        btn_grid.addWidget(b_cal, 1, 0)
+        btn_grid.addWidget(b_bottom, 1, 1)
+
+        root.addLayout(btn_grid)
+
+        b_align.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "align_to_cam"))
+        b_cam.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cam_to_nozzle"))
         b_bottom.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "above_bottom"))
-        b_cal.clicked.connect(   lambda: self.action_requested.emit(self.nozzle_name, "cal_offset"))
-
-        layout.addWidget(self._title)
-        layout.addWidget(self._offset)
-        layout.addWidget(self._z)
-        layout.addWidget(self._r)
-        layout.addStretch(1)
-        layout.addWidget(b_align)
-        layout.addWidget(b_cam)
-        layout.addWidget(b_bottom)
-        layout.addWidget(b_cal)
+        b_cal.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cal_offset"))
 
     def apply_status(self, nozzle: dict[str, Any]) -> None:
         ox = nozzle.get("offset_x")
@@ -291,7 +343,7 @@ class NozzleRow(QWidget):
         z = nozzle.get("z_position")
         r = nozzle.get("r_position")
 
-        self._offset.setText(f"off X={self._fmt(ox)} Y={self._fmt(oy)}")
+        self._offset.setText(f"Off X={self._fmt(ox)} Y={self._fmt(oy)}")
         self._z.setText(f"Z={self._fmt(z)}")
         self._r.setText(f"R={self._fmt(r)}")
 
@@ -309,11 +361,15 @@ class ControlWindow(QMainWindow):
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
         self.setWindowTitle("openSMT Control")
-        self.resize(960, 620)
+        self.resize(1220, 760)
 
         base_url = f"http://{host}:{port}"
         self._api = ControlApiClient(base_url)
-        self._nozzle_rows: dict[str, NozzleRow] = {}
+
+        self._camera_tiles: dict[str, CameraTile] = {}
+        self._camera_placeholder: QLabel | None = None
+
+        self._nozzle_cards: dict[str, NozzleCard] = {}
         self._nozzle_placeholder: QLabel | None = None
 
         root = QWidget(self)
@@ -322,15 +378,14 @@ class ControlWindow(QMainWindow):
         outer.setContentsMargins(5, 5, 5, 5)
         outer.setSpacing(4)
 
-        # ── Connection row ──────────────────────────────────────────────────
         top = QHBoxLayout()
         self._host = QLineEdit(host)
         self._port = QLineEdit(str(port))
         self._connect_btn = QPushButton("Apply Host")
         self._conn_state = QLabel("Ready")
 
-        self._host.setMaximumWidth(160)
-        self._port.setMaximumWidth(60)
+        self._host.setMaximumWidth(170)
+        self._port.setMaximumWidth(70)
 
         top.addWidget(QLabel("Host"))
         top.addWidget(self._host)
@@ -341,8 +396,37 @@ class ControlWindow(QMainWindow):
         top.addWidget(self._conn_state)
         outer.addLayout(top)
 
-        # ── XY controls ─────────────────────────────────────────────────────
-        xy_group = QGroupBox("XY")
+        pane_grid = QGridLayout()
+        pane_grid.setContentsMargins(0, 0, 0, 0)
+        pane_grid.setHorizontalSpacing(5)
+        pane_grid.setVerticalSpacing(5)
+        pane_grid.setColumnStretch(0, 1)
+        pane_grid.setColumnStretch(1, 2)
+        pane_grid.setRowStretch(0, 1)
+        pane_grid.setRowStretch(1, 1)
+
+        cam_group = QGroupBox("Cameras")
+        cam_group_layout = QVBoxLayout(cam_group)
+        cam_group_layout.setContentsMargins(4, 4, 4, 4)
+        cam_scroll = QScrollArea()
+        cam_scroll.setWidgetResizable(True)
+        cam_container = QWidget()
+        self._camera_layout = QGridLayout(cam_container)
+        self._camera_layout.setContentsMargins(2, 2, 2, 2)
+        self._camera_layout.setHorizontalSpacing(3)
+        self._camera_layout.setVerticalSpacing(3)
+        cam_scroll.setWidget(cam_container)
+        cam_group_layout.addWidget(cam_scroll)
+
+        gp_group = QGroupBox("General Purpose")
+        gp_layout = QVBoxLayout(gp_group)
+        gp_layout.setContentsMargins(6, 6, 6, 6)
+        gp_note = QLabel("Reserved pane (future tools / diagnostics / workflows)")
+        gp_note.setWordWrap(True)
+        gp_layout.addWidget(gp_note)
+        gp_layout.addStretch(1)
+
+        xy_group = QGroupBox("XY Jogging")
         xy_layout = QVBoxLayout(xy_group)
         xy_layout.setContentsMargins(4, 4, 4, 4)
         xy_layout.setSpacing(3)
@@ -361,59 +445,89 @@ class ControlWindow(QMainWindow):
         step_row.addWidget(self._coord_label)
         xy_layout.addLayout(step_row)
 
-        xy_buttons = QGridLayout()
-        xy_buttons.setSpacing(3)
+        jog_grid = QGridLayout()
+        jog_grid.setSpacing(3)
 
-        b_home_xy = _sq_btn("home_xy",        "Home XY axes")
-        b_fid     = _sq_btn("fiducial_main",   "Move to homing fiducial")
-        b_park    = _sq_btn("park_zero",       "Move to park position")
-        b_l       = _sq_btn("move_left",       "Jog left")
-        b_r       = _sq_btn("move_right",      "Jog right")
-        b_u       = _sq_btn("move_up",         "Jog up (Y+)")
-        b_d       = _sq_btn("move_down",       "Jog down (Y−)")
+        b_l = _sq_btn("move_left", "Jog left")
+        b_r = _sq_btn("move_right", "Jog right")
+        b_u = _sq_btn("move_up", "Jog up (Y+)")
+        b_d = _sq_btn("move_down", "Jog down (Y-)")
 
-        xy_buttons.addWidget(b_home_xy, 0, 0)
-        xy_buttons.addWidget(b_fid,     0, 1)
-        xy_buttons.addWidget(b_park,    0, 2)
-        xy_buttons.addWidget(b_u,       1, 1)
-        xy_buttons.addWidget(b_l,       2, 0)
-        xy_buttons.addWidget(b_d,  2, 1)
-        xy_buttons.addWidget(b_r,  2, 2)
-        xy_layout.addLayout(xy_buttons)
+        jog_grid.addWidget(b_u, 0, 1)
+        jog_grid.addWidget(b_l, 1, 0)
+        jog_grid.addWidget(b_d, 1, 1)
+        jog_grid.addWidget(b_r, 1, 2)
+        xy_layout.addLayout(jog_grid)
 
-        outer.addWidget(xy_group)
+        special_grid = QGridLayout()
+        special_grid.setSpacing(3)
 
-        # ── Nozzle controls ─────────────────────────────────────────────────
+        b_home_all = _sq_btn("home_all", "Home all axes")
+        b_home_xy = _sq_btn("home_xy", "Home XY axes")
+        b_fid_main = _sq_btn("fiducial_main", "Move to homing fiducial main")
+        b_fid_sec = _sq_btn("fiducial_secondary", "Move to secondary fiducial")
+        b_park = _sq_btn("park_zero", "Move to park")
+        b_dispose = _sq_btn("dispose", "Move to dispose")
+        b_nozchg = _sq_btn(_tint_pm(_load_pm("nozzle_change"), _COLOR_RED), "Move to nozzle change")
+        b_calspot = _sq_btn(_tint_pm(_load_pm("calibration_spot"), _COLOR_BLUE), "Move to calibration spot")
+
+        special_grid.addWidget(b_home_all, 0, 0)
+        special_grid.addWidget(b_home_xy, 0, 1)
+        special_grid.addWidget(b_fid_main, 0, 2)
+        special_grid.addWidget(b_fid_sec, 0, 3)
+        special_grid.addWidget(b_park, 1, 0)
+        special_grid.addWidget(b_dispose, 1, 1)
+        special_grid.addWidget(b_nozchg, 1, 2)
+        special_grid.addWidget(b_calspot, 1, 3)
+        xy_layout.addLayout(special_grid)
+
         noz_group = QGroupBox("Nozzles")
         noz_layout = QVBoxLayout(noz_group)
-        noz_layout.setContentsMargins(3, 3, 3, 3)
+        noz_layout.setContentsMargins(4, 4, 4, 4)
         noz_scroll = QScrollArea()
         noz_scroll.setWidgetResizable(True)
         noz_container = QWidget()
-        self._nozzle_layout = QVBoxLayout(noz_container)
+        self._nozzle_layout = QGridLayout(noz_container)
         self._nozzle_layout.setContentsMargins(2, 2, 2, 2)
-        self._nozzle_layout.setSpacing(2)
+        self._nozzle_layout.setHorizontalSpacing(4)
+        self._nozzle_layout.setVerticalSpacing(4)
         noz_scroll.setWidget(noz_container)
         noz_layout.addWidget(noz_scroll)
-        outer.addWidget(noz_group, 1)
 
-        # ── Log ─────────────────────────────────────────────────────────────
+        pane_grid.addWidget(cam_group, 0, 0)
+        pane_grid.addWidget(gp_group, 0, 1)
+        pane_grid.addWidget(xy_group, 1, 0)
+        pane_grid.addWidget(noz_group, 1, 1)
+        outer.addLayout(pane_grid, 1)
+
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self._log.setMinimumHeight(100)
-        self._log.setMaximumHeight(160)
+        self._log.setMinimumHeight(90)
+        self._log.setMaximumHeight(140)
         outer.addWidget(self._log)
 
-        # Wire buttons
         self._connect_btn.clicked.connect(self._apply_host)
-        b_home_xy.clicked.connect(lambda: self._post_action("/api/coord/home-xy", None, "Home XY"))
-        b_fid.clicked.connect(lambda: self._post_action("/api/coord/homing-fiducial-main", None, "Move to Homing Fiducial Main"))
-        b_park.clicked.connect(lambda: self._post_action("/api/coord/park", None, "Move to Park"))
+
         b_l.clicked.connect(lambda: self._jog_xy(-1.0, 0.0))
         b_r.clicked.connect(lambda: self._jog_xy(1.0, 0.0))
         b_u.clicked.connect(lambda: self._jog_xy(0.0, 1.0))
         b_d.clicked.connect(lambda: self._jog_xy(0.0, -1.0))
+
+        b_home_all.clicked.connect(lambda: self._post_action("/api/coord/home", None, "Home all"))
+        b_home_xy.clicked.connect(lambda: self._post_action("/api/coord/home-xy", None, "Home XY"))
+        b_fid_main.clicked.connect(
+            lambda: self._post_action("/api/coord/homing-fiducial-main", None, "Move to homing fiducial main")
+        )
+        b_fid_sec.clicked.connect(
+            lambda: self._post_action("/api/coord/secondary-fiducial", None, "Move to secondary fiducial")
+        )
+        b_park.clicked.connect(lambda: self._post_action("/api/coord/park", None, "Move to park"))
+        b_dispose.clicked.connect(lambda: self._post_action("/api/coord/dispose", None, "Move to dispose"))
+        b_nozchg.clicked.connect(lambda: self._post_action("/api/coord/nozzle-change", None, "Move to nozzle change"))
+        b_calspot.clicked.connect(
+            lambda: self._post_action("/api/coord/calibration-spot", None, "Move to calibration spot")
+        )
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(800)
@@ -464,22 +578,67 @@ class ControlWindow(QMainWindow):
             return
 
         self._conn_state.setText("Connected")
+
         positions = data.get("positions", {}) if isinstance(data.get("positions"), dict) else {}
-        self._coord_label.setText(
-            f"X={self._fmt(positions.get('X'))}  Y={self._fmt(positions.get('Y'))}"
-        )
+        self._coord_label.setText(f"X={self._fmt(positions.get('X'))}  Y={self._fmt(positions.get('Y'))}")
+
+        cameras = data.get("cameras", []) if isinstance(data.get("cameras"), list) else []
+        self._sync_camera_tiles(cameras)
 
         nozzles = data.get("nozzles", []) if isinstance(data.get("nozzles"), list) else []
-        self._sync_nozzle_rows(nozzles)
+        self._sync_nozzle_cards(nozzles)
 
-    def _sync_nozzle_rows(self, nozzles: list[dict[str, Any]]) -> None:
+    def _sync_camera_tiles(self, cameras: list[dict[str, Any]]) -> None:
+        if self._camera_placeholder is not None:
+            self._camera_placeholder.setParent(None)
+            self._camera_placeholder.deleteLater()
+            self._camera_placeholder = None
+
+        known = set(self._camera_tiles.keys())
+        incoming: set[str] = set()
+
+        for camera in cameras:
+            name = str(camera.get("name", "")).upper()
+            if not name:
+                continue
+            incoming.add(name)
+
+            tile = self._camera_tiles.get(name)
+            if tile is None:
+                tile = CameraTile(name)
+                self._camera_tiles[name] = tile
+
+            tile.apply_status(bool(camera.get("online", False)))
+
+        for name in known - incoming:
+            tile = self._camera_tiles.pop(name)
+            tile.setParent(None)
+            tile.deleteLater()
+
+        for i in reversed(range(self._camera_layout.count())):
+            item = self._camera_layout.itemAt(i)
+            if item is not None and item.widget() is not None:
+                item.widget().setParent(None)
+
+        if not self._camera_tiles:
+            self._camera_placeholder = QLabel("No cameras found in /api/status")
+            self._camera_placeholder.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            self._camera_layout.addWidget(self._camera_placeholder, 0, 0)
+            return
+
+        for idx, name in enumerate(sorted(self._camera_tiles.keys())):
+            row = idx // 2
+            col = idx % 2
+            self._camera_layout.addWidget(self._camera_tiles[name], row, col)
+
+    def _sync_nozzle_cards(self, nozzles: list[dict[str, Any]]) -> None:
         if self._nozzle_placeholder is not None:
             self._nozzle_placeholder.setParent(None)
             self._nozzle_placeholder.deleteLater()
             self._nozzle_placeholder = None
 
-        known = set(self._nozzle_rows.keys())
-        incoming = set()
+        known = set(self._nozzle_cards.keys())
+        incoming: set[str] = set()
 
         for nozzle in nozzles:
             name = str(nozzle.get("name", "")).upper()
@@ -487,40 +646,42 @@ class ControlWindow(QMainWindow):
                 continue
             incoming.add(name)
 
-            if name not in self._nozzle_rows:
-                row = NozzleRow(name)
-                row.action_requested.connect(self._on_nozzle_action)
-                self._nozzle_rows[name] = row
-                self._nozzle_layout.addWidget(row)
+            card = self._nozzle_cards.get(name)
+            if card is None:
+                card = NozzleCard(name)
+                card.action_requested.connect(self._on_nozzle_action)
+                self._nozzle_cards[name] = card
 
-            self._nozzle_rows[name].apply_status(nozzle)
+            card.apply_status(nozzle)
 
-        removed = known - incoming
-        for name in removed:
-            row = self._nozzle_rows.pop(name)
-            row.setParent(None)
-            row.deleteLater()
+        for name in known - incoming:
+            card = self._nozzle_cards.pop(name)
+            card.setParent(None)
+            card.deleteLater()
 
-        if not self._nozzle_rows:
+        for i in reversed(range(self._nozzle_layout.count())):
+            item = self._nozzle_layout.itemAt(i)
+            if item is not None and item.widget() is not None:
+                item.widget().setParent(None)
+
+        if not self._nozzle_cards:
             self._nozzle_placeholder = QLabel("No nozzles found in /api/status")
             self._nozzle_placeholder.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            self._nozzle_layout.addWidget(self._nozzle_placeholder)
+            self._nozzle_layout.addWidget(self._nozzle_placeholder, 0, 0)
+            return
+
+        for idx, name in enumerate(sorted(self._nozzle_cards.keys())):
+            row = idx // 2
+            col = idx % 2
+            self._nozzle_layout.addWidget(self._nozzle_cards[name], row, col)
 
     def _on_nozzle_action(self, nozzle: str, action: str) -> None:
         if action == "align_to_cam":
-            self._post_action(
-                f"/api/nozzle/{nozzle}/move-to-camera",
-                None,
-                f"{nozzle}: Align to camera",
-            )
+            self._post_action(f"/api/nozzle/{nozzle}/move-to-camera", None, f"{nozzle}: Align to camera")
             return
 
         if action == "cam_to_nozzle":
-            self._post_action(
-                f"/api/nozzle/{nozzle}/move-camera-here",
-                None,
-                f"{nozzle}: Move camera to nozzle",
-            )
+            self._post_action(f"/api/nozzle/{nozzle}/move-camera-here", None, f"{nozzle}: Move camera to nozzle")
             return
 
         if action == "above_bottom":
@@ -540,9 +701,7 @@ class ControlWindow(QMainWindow):
 
     def _handle_calibration_result(self, nozzle: str, ok: bool, status: int, data: dict[str, Any]) -> None:
         if not ok:
-            self._log_line(
-                f"ERR {status}: {nozzle}: Cal offset failed: {data.get('error', 'request_failed')}"
-            )
+            self._log_line(f"ERR {status}: {nozzle}: Cal offset failed: {data.get('error', 'request_failed')}")
             return
 
         ox = self._fmt(data.get("new_offset_x"))
