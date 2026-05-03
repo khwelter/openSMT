@@ -107,9 +107,7 @@
         "tip_id": "501",
         "standard_down_z": null,
         "offset_x": -45.0,
-        "offset_y": -100.0,
-        "vacuum_valve": { "board": "AB", "io_type": "gpio", "pin": 5 },
-        "air_valve": { "board": "AB", "io_type": "gpio", "pin": 6 }
+        "offset_y": -100.0
       },
       {
         "name": "N2",
@@ -119,8 +117,7 @@
         "tip_id": "502",
         "standard_down_z": null,
         "offset_x": -15.0,
-        "offset_y": -100.0,
-        "vacuum_valve": { "board": "AB", "io_type": "gpio", "pin": 7 }
+        "offset_y": -100.0
       },
       {
         "name": "N3",
@@ -130,9 +127,7 @@
         "tip_id": "511",
         "standard_down_z": null,
         "offset_x": 15.0,
-        "offset_y": -100.0,
-        "vacuum_valve": { "board": "CD", "io_type": "gpio", "pin": 5 },
-        "air_valve": { "board": "CD", "io_type": "gpio", "pin": 6 }
+        "offset_y": -100.0
       },
       {
         "name": "N4",
@@ -142,8 +137,7 @@
         "tip_id": "500",
         "standard_down_z": null,
         "offset_x": 45.0,
-        "offset_y": -100.0,
-        "vacuum_valve": { "board": "CD", "io_type": "gpio", "pin": 7 }
+        "offset_y": -100.0
       }
     ],
 
