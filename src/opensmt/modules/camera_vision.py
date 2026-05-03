@@ -436,6 +436,8 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/home", self._api_coord_home)
         app.router.add_post("/api/coord/home-xy", self._api_coord_home_xy)
         app.router.add_post("/api/head/nozzle/{name}/move", self._api_head_move)
+        app.router.add_post("/api/head/nozzle/{name}/move-absolute", self._api_head_move_absolute)
+        app.router.add_post("/api/head/nozzle/{name}/move-standard-down", self._api_head_move_standard_down)
         app.router.add_post("/api/head/nozzle/{name}/rotate", self._api_head_rotate)
         app.router.add_post("/api/head/nozzle/{name}/home", self._api_head_home)
         app.router.add_post("/api/head/nozzle/{name}/park", self._api_head_park)
@@ -2067,7 +2069,7 @@ class CameraVisionModule:
         if self._nozzle_offsets_persist_path is None or self._nozzle_config_store is None:
             return "persistence_not_configured"
 
-        payload: dict[str, dict[str, float]] = {}
+        payload: dict[str, dict[str, float | str | None]] = {}
         for nozzle_name in self._nozzle_config_store.names():
             cfg = self._nozzle_config_store.get(nozzle_name)
             if cfg is None:
@@ -2075,8 +2077,9 @@ class CameraVisionModule:
             payload[nozzle_name.upper()] = {
                 "offset_x": float(cfg.offset_x),
                 "offset_y": float(cfg.offset_y),
+                "tip_id": cfg.tip_id,
+                "standard_down_z": float(cfg.standard_down_z) if cfg.standard_down_z is not None else None,
             }
-
         try:
             self._nozzle_offsets_persist_path.parent.mkdir(parents=True, exist_ok=True)
             self._nozzle_offsets_persist_path.write_text(
@@ -2087,6 +2090,78 @@ class CameraVisionModule:
             return str(exc)
 
         return None
+
+    async def _api_head_move_absolute(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle = raw_name.upper()
+        nozzle_cfg = self._nozzles.get(nozzle)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        try:
+            body = await request.json()
+            target = float(body.get("z"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        clamped = min(max(target, nozzle_cfg.min_z), nozzle_cfg.max_z)
+
+        job_id, canceled_prev = self._submit_domain_command(
+            "head",
+            f"head_move_abs:{nozzle}:{nozzle_cfg.z_axis}",
+            lambda axis=nozzle_cfg.z_axis, position=clamped: self._driver.move_axis(axis, position),
+        )
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle,
+            "requested_z": target,
+            "applied_z": clamped,
+            "clamped": clamped != target,
+        })
+
+    async def _api_head_move_standard_down(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle = raw_name.upper()
+        nozzle_cfg = self._nozzles.get(nozzle)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        if not self._nozzle_config_store:
+            return web.json_response({"error": "nozzle_config_not_available"}, status=500)
+
+        cfg = self._nozzle_config_store.get(nozzle)
+        if cfg is None or cfg.standard_down_z is None:
+            return web.json_response(
+                {"error": "standard_down_not_set", "message": "Set standard_down_z for this nozzle/tip first"},
+                status=409,
+            )
+
+        target = float(cfg.standard_down_z)
+        clamped = min(max(target, nozzle_cfg.min_z), nozzle_cfg.max_z)
+
+        job_id, canceled_prev = self._submit_domain_command(
+            "head",
+            f"head_move_standard_down:{nozzle}:{nozzle_cfg.z_axis}",
+            lambda axis=nozzle_cfg.z_axis, position=clamped: self._driver.move_axis(axis, position),
+        )
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "nozzle": nozzle,
+            "standard_down_z": target,
+            "applied_z": clamped,
+            "clamped": clamped != target,
+            "tip_id": cfg.tip_id,
+        })
 
     async def _api_nozzle_move_to_camera(self, request: web.Request) -> web.Response:
         """Move nozzle XY to align with camera's current position.
@@ -2299,12 +2374,18 @@ class CameraVisionModule:
 
         old_offset_x = nozzle_cfg.offset_x
         old_offset_y = nozzle_cfg.offset_y
+        old_standard_down_z = nozzle_cfg.standard_down_z
 
         new_offset_x = float(fid_x) - float(cam_x)
         new_offset_y = float(fid_y) - float(cam_y)
 
         nozzle_cfg.offset_x = new_offset_x
         nozzle_cfg.offset_y = new_offset_y
+
+        # Capture Z at calibration moment as standard-down reference for the current tip.
+        cur_z = self._position_store.get(nozzle_cfg.z_axis)
+        if cur_z is not None:
+            nozzle_cfg.standard_down_z = float(cur_z)
 
         persist_error = self._persist_nozzle_offsets()
         persisted = persist_error is None
@@ -2318,6 +2399,8 @@ class CameraVisionModule:
             "old_offset_y": old_offset_y,
             "new_offset_x": new_offset_x,
             "new_offset_y": new_offset_y,
+            "old_standard_down_z": old_standard_down_z,
+            "new_standard_down_z": nozzle_cfg.standard_down_z,
             "persisted": persisted,
             "persist_path": str(self._nozzle_offsets_persist_path) if self._nozzle_offsets_persist_path else None,
             "persist_error": persist_error,
@@ -2481,6 +2564,8 @@ class CameraVisionModule:
                     "r_position": r_pos,
                     "offset_x": nozzle_cfg.offset_x,
                     "offset_y": nozzle_cfg.offset_y,
+                    "tip_id": nozzle_cfg.tip_id,
+                    "standard_down_z": nozzle_cfg.standard_down_z,
                     "absolute_x": nozzle_abs_x,
                     "absolute_y": nozzle_abs_y,
                     "vacuum_on": valve_state.vacuum_on if valve_state else False,

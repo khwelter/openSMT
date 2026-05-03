@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -374,30 +375,73 @@ class NozzleCard(QFrame):
         zr_row.addStretch(1)
         root.addLayout(zr_row)
 
-        jog_row = QHBoxLayout()
-        jog_row.setSpacing(2)
-        self._z_step = QDoubleSpinBox()
-        self._z_step.setDecimals(1)
-        self._z_step.setRange(0.1, 20.0)
-        self._z_step.setSingleStep(0.1)
-        self._z_step.setValue(1.0)
-        self._z_step.setSuffix(" mm")
-        self._z_step.setFixedWidth(86)
+        # 3x3 compact jog keypad + two vertical step sliders
+        jog_block = QHBoxLayout()
+        jog_block.setSpacing(4)
 
-        b_home = _sq_btn("home_axis", "Home nozzle Z axis")
-        b_z_up = _sq_btn("z_up", "Move nozzle Z up")
-        b_z_down = _sq_btn("z_down", "Move nozzle Z down")
-        b_rot_ccw = _sq_btn("rotate_ccw", "Rotate CCW")
-        b_rot_cw = _sq_btn("rotate_cw", "Rotate CW")
+        keypad = QGridLayout()
+        keypad.setSpacing(2)
 
-        jog_row.addWidget(b_home)
-        jog_row.addWidget(b_z_up)
-        jog_row.addWidget(b_z_down)
-        jog_row.addWidget(b_rot_ccw)
-        jog_row.addWidget(b_rot_cw)
-        jog_row.addStretch(1)
-        jog_row.addWidget(self._z_step)
-        root.addLayout(jog_row)
+        b7_home = _sq_btn("home_axis", "7: Home Z axis")
+        b8_up = _sq_btn("z_up", "8: Move up by Z step")
+        b9_zero = _sq_btn("park_zero", "9: Move to Z=0.0")
+
+        b4_free = _sq_btn("dispose", "4: Reserved")
+        b5_park = _sq_btn("park_zero", "5: Park nozzle (Z=0.0)")
+        b6_free = _sq_btn("dispose", "6: Reserved")
+
+        b1_rot_ccw = _sq_btn("rotate_ccw", "1: Rotate CCW by angle step")
+        b2_down = _sq_btn("z_down", "2: Move down by Z step")
+        b3_std_down = _sq_btn("calibration_spot", "3: Move to standard-down Z")
+
+        b4_free.setEnabled(False)
+        b6_free.setEnabled(False)
+
+        keypad.addWidget(b7_home, 0, 0)
+        keypad.addWidget(b8_up, 0, 1)
+        keypad.addWidget(b9_zero, 0, 2)
+        keypad.addWidget(b4_free, 1, 0)
+        keypad.addWidget(b5_park, 1, 1)
+        keypad.addWidget(b6_free, 1, 2)
+        keypad.addWidget(b1_rot_ccw, 2, 0)
+        keypad.addWidget(b2_down, 2, 1)
+        keypad.addWidget(b3_std_down, 2, 2)
+
+        slider_cols = QHBoxLayout()
+        slider_cols.setSpacing(6)
+
+        z_col = QVBoxLayout()
+        z_col.setSpacing(1)
+        self._z_step_value = QLabel("1.0mm")
+        self._z_step_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._z_step_slider = QSlider(Qt.Orientation.Vertical)
+        self._z_step_slider.setRange(1, 100)  # 0.1 .. 10.0 mm
+        self._z_step_slider.setValue(10)
+        self._z_step_slider.setSingleStep(1)
+        self._z_step_slider.valueChanged.connect(self._update_step_labels)
+        z_col.addWidget(self._z_step_value)
+        z_col.addWidget(self._z_step_slider)
+
+        a_col = QVBoxLayout()
+        a_col.setSpacing(1)
+        self._a_step_value = QLabel("1.0deg")
+        self._a_step_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._a_step_slider = QSlider(Qt.Orientation.Vertical)
+        self._a_step_slider.setRange(10, 450)  # 1.0 .. 45.0 deg
+        self._a_step_slider.setValue(10)
+        self._a_step_slider.setSingleStep(1)
+        self._a_step_slider.valueChanged.connect(self._update_step_labels)
+        a_col.addWidget(self._a_step_value)
+        a_col.addWidget(self._a_step_slider)
+
+        slider_cols.addLayout(z_col)
+        slider_cols.addLayout(a_col)
+
+        jog_block.addLayout(keypad)
+        jog_block.addLayout(slider_cols)
+        jog_block.addStretch(1)
+        root.addLayout(jog_block)
+        self._update_step_labels()
 
         btn_grid = QGridLayout()
         btn_grid.setSpacing(2)
@@ -418,11 +462,13 @@ class NozzleCard(QFrame):
         b_cam.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cam_to_nozzle", 0.0))
         b_bottom.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "above_bottom", 0.0))
         b_cal.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cal_offset", 0.0))
-        b_home.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "nozzle_home", 0.0))
-        b_z_up.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_up", float(self._z_step.value())))
-        b_z_down.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_down", float(self._z_step.value())))
-        b_rot_ccw.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "rot_ccw", 1.0))
-        b_rot_cw.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "rot_cw", 1.0))
+        b7_home.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "nozzle_home", 0.0))
+        b8_up.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_up", self._z_step_mm()))
+        b9_zero.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_zero", 0.0))
+        b5_park.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_park", 0.0))
+        b1_rot_ccw.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "rot_ccw", self._angle_step_deg()))
+        b2_down.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_down", self._z_step_mm()))
+        b3_std_down.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_standard_down", 0.0))
 
     def apply_status(self, nozzle: dict[str, Any]) -> None:
         ox = nozzle.get("offset_x")
@@ -442,6 +488,16 @@ class NozzleCard(QFrame):
             return f"{float(value):.{decimals}f}"
         except Exception:
             return "--"
+
+    def _z_step_mm(self) -> float:
+        return self._z_step_slider.value() / 10.0
+
+    def _angle_step_deg(self) -> float:
+        return self._a_step_slider.value() / 10.0
+
+    def _update_step_labels(self) -> None:
+        self._z_step_value.setText(f"{self._z_step_mm():.1f}mm")
+        self._a_step_value.setText(f"{self._angle_step_deg():.1f}deg")
 
 
 class ControlWindow(QMainWindow):
@@ -853,6 +909,30 @@ class ControlWindow(QMainWindow):
                 f"/api/head/nozzle/{nozzle}/rotate",
                 {"delta": -float(value)},
                 f"{nozzle}: Rotate CCW {value:.1f}",
+            )
+            return
+
+        if action == "z_zero":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/move-absolute",
+                {"z": 0.0},
+                f"{nozzle}: Move to Z=0.0",
+            )
+            return
+
+        if action == "z_park":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/park",
+                None,
+                f"{nozzle}: Park",
+            )
+            return
+
+        if action == "z_standard_down":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/move-standard-down",
+                None,
+                f"{nozzle}: Move to standard down",
             )
             return
 

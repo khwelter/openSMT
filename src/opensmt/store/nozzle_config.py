@@ -23,6 +23,8 @@ class NozzleConfig:
     offset_x: float  # X offset relative to camera position (mm)
     offset_y: float  # Y offset relative to camera position (mm)
     vacuum_valve: ValveConfig  # Always present
+    tip_id: str | None = None  # e.g. "501" (Juki 500-series tip id)
+    standard_down_z: float | None = None  # PCB placement level for current tip/nozzle
     air_valve: ValveConfig | None = None  # Optional pressurized air valve
 
 

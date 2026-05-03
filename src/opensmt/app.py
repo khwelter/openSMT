@@ -105,6 +105,10 @@ async def run_from_config(config_path: str) -> None:
                         item["offset_x"] = float(persisted["offset_x"])
                     if "offset_y" in persisted:
                         item["offset_y"] = float(persisted["offset_y"])
+                    if "tip_id" in persisted:
+                        item["tip_id"] = str(persisted["tip_id"])
+                    if "standard_down_z" in persisted and persisted["standard_down_z"] is not None:
+                        item["standard_down_z"] = float(persisted["standard_down_z"])
             else:
                 log.warning("Ignoring persisted nozzle offsets at %s: root is not an object", offsets_persist_path)
         except Exception as exc:
@@ -140,6 +144,8 @@ async def run_from_config(config_path: str) -> None:
             offset_x=float(item.get("offset_x", 0.0)),
             offset_y=float(item.get("offset_y", 0.0)),
             vacuum_valve=vacuum_cfg,
+            tip_id=str(item.get("tip_id")) if item.get("tip_id") is not None else None,
+            standard_down_z=(float(item.get("standard_down_z")) if item.get("standard_down_z") is not None else None),
             air_valve=air_cfg,
         )
         nozzle_configs.append(nozzle_cfg)
