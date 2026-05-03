@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 _ICON_SZ = 22
 _ARROW_W = 10
 _BTN_SQ = 34
+_JOG_BTN_SQ = 48
 
 _COLOR_RED = QColor(255, 40, 40)
 _COLOR_BLUE = QColor(20, 120, 255)
@@ -187,6 +188,40 @@ def _dual_btn(left: QPixmap, right: QPixmap, tooltip: str = "") -> QPushButton:
     return btn
 
 
+def _xy_btn(
+    pm_or_name: str | QPixmap,
+    tooltip: str = "",
+    *,
+    tint: QColor | None = None,
+) -> QPushButton:
+    """Create larger, high-contrast buttons for the XY pane."""
+    pm = _load_pm(pm_or_name) if isinstance(pm_or_name, str) else pm_or_name
+    if tint is not None:
+        pm = _tint_pm(pm, tint)
+
+    btn = QPushButton()
+    btn.setIcon(QIcon(pm))
+    btn.setIconSize(QSize(30, 30))
+    btn.setFixedSize(_JOG_BTN_SQ, _JOG_BTN_SQ)
+    btn.setStyleSheet(
+        "QPushButton {"
+        " background:#0f1f3a;"
+        " border:2px solid #1d4d9a;"
+        " border-radius:9px;"
+        "}"
+        "QPushButton:hover {"
+        " background:#18335f;"
+        " border:2px solid #ff2a2a;"
+        "}"
+        "QPushButton:pressed {"
+        " background:#24508f;"
+        "}"
+    )
+    if tooltip:
+        btn.setToolTip(tooltip)
+    return btn
+
+
 class ControlApiClient(QObject):
     request_failed = Signal(str)
 
@@ -247,27 +282,47 @@ class CameraTile(QFrame):
         self.camera_name = camera_name
         self.setFrameShape(QFrame.Shape.StyledPanel)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 3, 4, 3)
-        layout.setSpacing(4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
 
         cam_pm = _make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)
 
+        self._preview = QLabel("No Feed")
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setMinimumSize(150, 95)
+        self._preview.setStyleSheet("background:#070b14; border:1px solid #2a3d66; color:#8ba3cf;")
+
+        hdr = QHBoxLayout()
         self._icon = QLabel()
         self._icon.setPixmap(cam_pm)
         self._name = QLabel(camera_name)
         self._state = QLabel("offline")
 
-        layout.addWidget(self._icon)
-        layout.addWidget(self._name)
-        layout.addStretch(1)
-        layout.addWidget(self._state)
+        hdr.addWidget(self._icon)
+        hdr.addWidget(self._name)
+        hdr.addStretch(1)
+        hdr.addWidget(self._state)
+
+        layout.addWidget(self._preview)
+        layout.addLayout(hdr)
 
     def apply_status(self, online: bool) -> None:
         self._state.setText("online" if online else "offline")
         self._state.setStyleSheet(
             "color: #1f8a1f;" if online else "color: #bb2b2b;"
         )
+
+    def apply_frame(self, raw: bytes) -> None:
+        pm = QPixmap()
+        if not pm.loadFromData(raw, "JPG"):
+            return
+        fitted = pm.scaled(
+            self._preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._preview.setPixmap(fitted)
 
 
 class NozzleCard(QFrame):
@@ -365,9 +420,11 @@ class ControlWindow(QMainWindow):
 
         base_url = f"http://{host}:{port}"
         self._api = ControlApiClient(base_url)
+        self._img_net = QNetworkAccessManager(self)
 
         self._camera_tiles: dict[str, CameraTile] = {}
         self._camera_placeholder: QLabel | None = None
+        self._camera_thumb_pending: set[str] = set()
 
         self._nozzle_cards: dict[str, NozzleCard] = {}
         self._nozzle_placeholder: QLabel | None = None
@@ -448,10 +505,10 @@ class ControlWindow(QMainWindow):
         jog_grid = QGridLayout()
         jog_grid.setSpacing(3)
 
-        b_l = _sq_btn("move_left", "Jog left")
-        b_r = _sq_btn("move_right", "Jog right")
-        b_u = _sq_btn("move_up", "Jog up (Y+)")
-        b_d = _sq_btn("move_down", "Jog down (Y-)")
+        b_l = _xy_btn("move_left", "Jog left", tint=_COLOR_BLUE)
+        b_r = _xy_btn("move_right", "Jog right", tint=_COLOR_BLUE)
+        b_u = _xy_btn("move_up", "Jog up (Y+)", tint=_COLOR_BLUE)
+        b_d = _xy_btn("move_down", "Jog down (Y-)", tint=_COLOR_BLUE)
 
         jog_grid.addWidget(b_u, 0, 1)
         jog_grid.addWidget(b_l, 1, 0)
@@ -462,14 +519,14 @@ class ControlWindow(QMainWindow):
         special_grid = QGridLayout()
         special_grid.setSpacing(3)
 
-        b_home_all = _sq_btn("home_all", "Home all axes")
-        b_home_xy = _sq_btn("home_xy", "Home XY axes")
-        b_fid_main = _sq_btn("fiducial_main", "Move to homing fiducial main")
-        b_fid_sec = _sq_btn("fiducial_secondary", "Move to secondary fiducial")
-        b_park = _sq_btn("park_zero", "Move to park")
-        b_dispose = _sq_btn("dispose", "Move to dispose")
-        b_nozchg = _sq_btn(_tint_pm(_load_pm("nozzle_change"), _COLOR_RED), "Move to nozzle change")
-        b_calspot = _sq_btn(_tint_pm(_load_pm("calibration_spot"), _COLOR_BLUE), "Move to calibration spot")
+        b_home_all = _xy_btn("home_all", "Home all axes", tint=_COLOR_RED)
+        b_home_xy = _xy_btn("home_xy", "Home XY axes", tint=_COLOR_BLUE)
+        b_fid_main = _xy_btn("fiducial_main", "Move to homing fiducial main", tint=_COLOR_RED)
+        b_fid_sec = _xy_btn("fiducial_secondary", "Move to secondary fiducial", tint=_COLOR_BLUE)
+        b_park = _xy_btn("park_zero", "Move to park", tint=_COLOR_RED)
+        b_dispose = _xy_btn("dispose", "Move to dispose", tint=_COLOR_BLUE)
+        b_nozchg = _xy_btn("nozzle_change", "Move to nozzle change", tint=_COLOR_RED)
+        b_calspot = _xy_btn("calibration_spot", "Move to calibration spot", tint=_COLOR_BLUE)
 
         special_grid.addWidget(b_home_all, 0, 0)
         special_grid.addWidget(b_home_xy, 0, 1)
@@ -583,7 +640,14 @@ class ControlWindow(QMainWindow):
         self._coord_label.setText(f"X={self._fmt(positions.get('X'))}  Y={self._fmt(positions.get('Y'))}")
 
         cameras = data.get("cameras", []) if isinstance(data.get("cameras"), list) else []
+        if not cameras and not self._camera_tiles:
+            # Backward compatibility: older backends may not include camera list in /api/status.
+            cameras = [
+                {"name": "TOP", "online": False},
+                {"name": "BOTTOM", "online": False},
+            ]
         self._sync_camera_tiles(cameras)
+        self._refresh_camera_thumbs()
 
         nozzles = data.get("nozzles", []) if isinstance(data.get("nozzles"), list) else []
         self._sync_nozzle_cards(nozzles)
@@ -630,6 +694,29 @@ class ControlWindow(QMainWindow):
             row = idx // 2
             col = idx % 2
             self._camera_layout.addWidget(self._camera_tiles[name], row, col)
+
+    def _refresh_camera_thumbs(self) -> None:
+        for name, tile in self._camera_tiles.items():
+            if name in self._camera_thumb_pending:
+                continue
+
+            self._camera_thumb_pending.add(name)
+            request = QNetworkRequest(QUrl(f"{self._api._base_url}/thumb/{name}"))
+            reply = self._img_net.get(request)
+
+            def _finish(cam_name: str = name, cam_tile: CameraTile = tile, rep: QNetworkReply = reply) -> None:
+                try:
+                    raw = bytes(rep.readAll())
+                    status_obj = rep.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+                    status = int(status_obj) if status_obj is not None else 0
+                    ok = rep.error() == QNetworkReply.NetworkError.NoError and status == 200 and bool(raw)
+                    if ok:
+                        cam_tile.apply_frame(raw)
+                finally:
+                    self._camera_thumb_pending.discard(cam_name)
+                    rep.deleteLater()
+
+            reply.finished.connect(_finish)
 
     def _sync_nozzle_cards(self, nozzles: list[dict[str, Any]]) -> None:
         if self._nozzle_placeholder is not None:
