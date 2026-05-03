@@ -220,270 +220,100 @@ Fuer Qt wird zusaetzlich ein passendes PySide6-Paket aus den Debian-Repositories
 
 Beispiel in config/examples/playback.txt.
 
-## SCPI Command Reference
+## Aktuelle Architektur und API
 
-This section describes all internal SCPI commands that are exchanged between modules on the message bus.
-Each command uses the format `:MODULE:VERB[:SUBVERB]` with an optional value.
+Dieser Abschnitt beschreibt den aktuellen Stand der produktiven Laufzeit (Qt-Control-GUI + HTTP API).
+Die fruehere browserbasierte Bedienoberflaeche ist nicht mehr Teil des aktiven Bedienpfads.
 
-Legend:
-- **Sender** — module that initiates the command
-- **Receiver** — module that handles the command
-- `?` suffix — this is a query; the receiver replies with a response
-- `WORKING` — intermediate status sent during long-running operations
-- `DONE` — final confirmation sent when an operation completes
+### Architekturueberblick
 
----
+- Prozessstart ueber `python3 -m opensmt run --config config/examples/system.json`
+- Eine Laufzeit mit:
+   - Board-Verbindungen (`XY`, `AB`, `CD`)
+   - `HardwareDriver` (Bewegung + IO)
+   - `PositionStore` / `LocationStore`
+   - `CameraVisionModule` als HTTP API Schicht
+- Bedienung primar ueber `opensmt control-gui`
 
-### COORD module (coordinate_system)
+### Konfiguration (heute relevant)
 
-The COORD module manages the machine coordinate cache, translates relative moves to absolute,
-and dispatches motion commands to GCODE.
+- `boards`: serielle Board-Endpunkte
+- `driver`: Achs-Mapping, Geschwindigkeiten, Homing-Gruppen
+- `locations`: Park/Dispose/Fiducials/Nozzle-Change/Calibration-Spot
+- `camera`:
+   - Kameraquellen
+   - Nozzle-Geometrie und Offsets
+   - Lichtdefinitionen
+   - Web-Host/Port fuer API
+- `feeders` (extern eingebunden ueber `$include`, Beispiel: `config/examples/feeders.json`)
 
-#### Queries answered by COORD
+### HTTP API (operator path)
 
-| Command | Response | Description |
-|---------|----------|-------------|
-| `:COORD:ABS:<axis>?` | `<value>` | Absolute position of axis (X, Y, Z1–Z4, R1–R4) |
-| `:COORD:POS:<axis>?` | `<value>` | Same as ABS |
-| `:COORD:PARK?` | `<x> <y>` | Configured Park position |
-| `:COORD:DISPOSE?` | `<x> <y>` | Configured Dispose position |
-| `:COORD:HOMINGFIDUCIALMAIN?` | `<x> <y>` | Homing Fiducial Main position |
-| `:COORD:SECONDARYFIDUCIAL?` | `<x> <y>` | Secondary Fiducial position |
-| `:COORD:NOZZLECHANGE?` | `<x> <y>` | Nozzle Change position |
-| `:COORD:CALIBRATIONSPOT?` | `<x> <y>` | Calibration Spot position |
+Wichtige Endpunkte fuer die Qt-Control-GUI:
 
-#### SET commands to COORD
+- `GET /api/status`
+   - Gesamtstatus fuer Positionen, Kameras, Nozzles, Feeder
+   - Primarer Poll-Endpunkt der GUI
+- `GET /thumb/{name}`
+   - JPEG-Thumbnail pro Kamera
+- `POST /api/coord/jog`
+- `POST /api/coord/home`
+- `POST /api/coord/home-xy`
+- `POST /api/coord/park`
+- `POST /api/coord/dispose`
+- `POST /api/coord/homing-fiducial-main`
+- `POST /api/coord/secondary-fiducial`
+- `POST /api/coord/nozzle-change`
+- `POST /api/coord/calibration-spot`
+- `POST /api/coord/set-home-here`
+- `POST /api/coord/set-calibration-spot-here`
+- `POST /api/head/nozzle/{name}/home`
+- `POST /api/head/nozzle/{name}/move`
+- `POST /api/head/nozzle/{name}/move-absolute`
+- `POST /api/head/nozzle/{name}/move-standard-down`
+- `POST /api/head/nozzle/{name}/rotate`
+- `POST /api/head/nozzle/{name}/park`
+- `POST /api/head/nozzle/{name}/vacuum`
+- `POST /api/nozzle/{name}/move-to-camera`
+- `POST /api/nozzle/{name}/move-to-bottom-camera`
+- `POST /api/nozzle/{name}/move-camera-here`
+- `POST /api/nozzle/{name}/calculate-offset-top`
 
-| Command | Value | Description |
-|---------|-------|-------------|
-| `:COORD:ABS:<axis>` | `<position>` | Move axis to absolute position |
-| `:COORD:ABS:XY` | `<x> <y>` | Move X and Y simultaneously to absolute position |
-| `:COORD:REL:<axis>` | `<delta>` | Move axis by relative delta (added to cached position) |
+### Wichtige Verhaltensregeln
 
-#### ACTION commands to COORD
+- Nozzle-Vakuum wird ueber Board `XY` gefahren:
+   - `N1 -> index 2`
+   - `N2 -> index 3`
+   - `N3 -> index 4`
+   - `N4 -> index 5`
+   - Werte: `255` (on), `0` (off)
+- IO-Setzung nutzt `M106 P<index> S<value>` auf den Boards.
 
-| Command | Description |
-|---------|-------------|
-| `:COORD:HOME` | Home all configured axis groups (XY, Z1Z2, Z3Z4) sequentially |
-| `:COORD:HOME:XY` | Home X and Y axes simultaneously |
-| `:COORD:HOME:Z1Z2` | Home Z1 and Z2 axes simultaneously |
-| `:COORD:HOME:Z3Z4` | Home Z3 and Z4 axes simultaneously |
-| `:COORD:PARK` | Move to Park position |
-| `:COORD:DISPOSE` | Move to Dispose position |
-| `:COORD:HOMINGFIDUCIALMAIN` | Move to Homing Fiducial Main position |
-| `:COORD:SECONDARYFIDUCIAL` | Move to Secondary Fiducial position |
-| `:COORD:NOZZLECHANGE` | Move to Nozzle Change position |
-| `:COORD:CALIBRATIONSPOT` | Move to Calibration Spot position |
+### API Beispiel
 
-All action commands send `:COORD:... WORKING` during execution and respond with `DONE` or `TIMEOUT:...` on completion.
+Vakuum fuer `N1` einschalten:
 
----
-
-### GCODE module (serial_gcode)
-
-The GCODE module translates SCPI commands to GCode and sends them over serial ports.
-Each axis is mapped to a GCode axis letter on a specific serial port.
-
-Axis–port–GCode mapping (configurable, default):
-
-| Logical Axis | Port | GCode Axis |
-|---|---|---|
-| X | XY | X |
-| Y | XY | Y |
-| Z1, Z2 | AB | X, Y |
-| R1, R2 | AB | A, B |
-| Z3, Z4 | CD | X, Y |
-| R3, R4 | CD | A, B |
-
-#### Queries answered by GCODE
-
-| Command | Response | Description |
-|---------|----------|-------------|
-| `:GCODE:STATUS?` | `"online"` | Module status |
-| `:GCODE:SPEEDFACTOR?` | `<percent>` | Current speed factor (0–100) |
-| `:GCODE:LASTRX?` | `"PORT=<text>;..."` | Last received line from each serial port |
-| `:GCODE:DIGOUT:<n>?` | `0` or `1` | Current digital output state (n = 0–47) |
-| `:GCODE:ANOUT:<n>?` | `<0–65535>` | Current analog output value (n = 0–47) |
-
-#### SET commands to GCODE
-
-| Command | Value | GCode emitted | Description |
-|---------|-------|--------------|-------------|
-| `:GCODE:POS:<axis>` | `<position>` | `G0 <ax><pos> F<velo>` then `M400` | Move single axis |
-| `:GCODE:POS:XY` | `<x> <y>` | `G0 X<x> Y<y> F<velo>` then `M400` | Move X and Y simultaneously |
-| `:GCODE:POS:Z1R1` | `<z> <r>` | `G0 X<z> A<r> F<velo>` then `M400` | Move Z1 and R1 together (AB port) |
-| `:GCODE:POS:Z2R2` | `<z> <r>` | `G0 Y<z> B<r> F<velo>` then `M400` | Move Z2 and R2 together (AB port) |
-| `:GCODE:VELO:<axis>` | `<mm_per_min>` | — | Set runtime velocity for axis |
-| `:GCODE:SPEEDFACTOR` | `<0–100>` | — | Set global speed factor as percentage |
-| `:GCODE:DIGOUT:<n>` | `0` or `1` | `M106 P<local> S<val>` | Set digital output (n = 0–47) |
-| `:GCODE:ANOUT:<n>` | `<0–65535>` | `M106 P<local> S<val>` | Set analog output / PWM (n = 0–47) |
-
-#### ACTION commands to GCODE
-
-| Command | GCode emitted | Description |
-|---------|--------------|-------------|
-| `:GCODE:HOME:XY` | `M210 X<vhx> Y<vhy>` then `G28 X Y` | Home X and Y simultaneously |
-| `:GCODE:HOME:Z1Z2` | `M210 X<vhz> Y<vhz>` then `G28 X Y` | Home Z1 and Z2 (AB port) |
-| `:GCODE:HOME:Z3Z4` | `M210 X<vhz> Y<vhz>` then `G28 X Y` | Home Z3 and Z4 (CD port) |
-
-`M210` sets homing velocities from `homing_velocity` config. `M400` waits for motion to complete.
-
-#### Responses emitted by GCODE (position updates)
-
-After every completed move or home, the GCODE module sends position reports:
-
-| Command | Value | Description |
-|---------|-------|-------------|
-| `:GCODE:POS:<axis>` | `<position>` | Updated position for each moved axis |
-
-These responses are consumed by the COORD module to keep its position cache current.
-
-#### Raw serial access
-
-| Command | Value | Description |
-|---------|-------|-------------|
-| `:SERIAL:<port>:TX` | `<gcode string>` | Send raw GCode line directly to a port |
-| `:SERIAL:<port>:STATUS?` | `0` or `1` | Port connected state |
-| `:SERIAL:<port>:LASTRX?` | `<text>` | Last received line from port |
-| `:SERIAL:<port>:RX` | `<text>` | Broadcast of every incoming line from port |
-
----
-
-### HEAD module (head)
-
-The HEAD module manages one or more nozzles and maps them to GCODE Z-axes.
-Each nozzle has relative offsets `xr`/`yr` (referenced to the primary camera),
-an assigned Z axis (`Z1..Z4`), and a configurable HOME Z position.
-
-Default setup:
-- Primary camera: `TOP`
-- Home position: `50.0 mm`
-- Nozzles: `N1..N4` mapped to `Z1..Z4`
-
-#### Queries answered by HEAD
-
-| Command | Response | Description |
-|---------|----------|-------------|
-| `:HEAD:NOZZLES?` | JSON payload | Full head configuration + live nozzle Z states |
-| `:HEAD:POS:<nozzle>?` | `<z>` | Current Z position for nozzle |
-
-#### SET commands to HEAD
-
-| Command | Value | Description |
-|---------|-------|-------------|
-| `:HEAD:ABS:<nozzle>` | `<z>` | Move nozzle to absolute Z position (via mapped `:GCODE:POS:Zx`) |
-| `:HEAD:REL:<nozzle>` | `<delta_z>` | Move nozzle by relative Z delta |
-
-#### ACTION commands to HEAD
-
-| Command | Description |
-|---------|-------------|
-| `:HEAD:PARK:<nozzle>` | Move nozzle to HOME Z position |
-| `:HEAD:PARK` | Park all nozzles to HOME Z position |
-
-#### Outbound commands from HEAD (to GCODE)
-
-| Command | Target | Description |
-|---------|--------|-------------|
-| `:GCODE:POS:<Z1..Z4>` | GCODE | Underlying Z-axis move for nozzle command |
-
----
-
-### CAMERA module (camera_vision)
-
-The CAMERA module now provides the HTTP API used by the Qt-Control-GUI, camera thumbnail generation,
-nozzle motion helpers, offset calibration and runtime status aggregation.
-
-#### Queries answered by CAMERA
-
-| Command | Response | Description |
-|---------|----------|-------------|
-| `:CAMERA:STATUS?` | `{"CAM": "online"|"offline", ...}` | Status of all cameras |
-| `:CAMERA:<cam>:STATUS?` | `"online"` or `"offline"` | Status of one camera |
-| `:CAMERA:<cam>:LIGHT:<light>?` | `<0–65535>` | Current light brightness |
-| `:CAMERA:<cam>:PIPELINE?` | `<name>` | Active vision pipeline name |
-
-Current runtime note:
-
-- The old browser dashboard, MJPEG stream pages and WebSocket UI transport are no longer part of the active workflow.
-- The active operator path is `opensmt control-gui` over HTTP.
-- `/api/status` is the primary aggregate endpoint consumed by the GUI.
-- `/thumb/{name}` is used for camera previews in the GUI.
-- Nozzle vacuum is exposed through `POST /api/head/nozzle/{name}/vacuum` and maps `N1..N4` to `XY` indices `2..5`.
-
-#### SET commands to CAMERA
-
-| Command | Value | Description |
-|---------|-------|-------------|
-| `:CAMERA:<cam>:LIGHT:<light>` | `<0–65535>` \| `ON` \| `OFF` | Set light brightness (standard, spec1, spec2) |
-| `:CAMERA:<cam>:PIPELINE:<name>` | `<json params>` | Activate vision pipeline with optional JSON parameters |
-
-When a light is set, CAMERA forwards the value to the appropriate GCODE ANOUT channel.
-
-#### Outbound commands from CAMERA (to GCODE / COORD / HEAD)
-
-| Command | Target | Description |
-|---------|--------|-------------|
-| `:GCODE:ANOUT:<n>` | GCODE | Light brightness control |
-| `:COORD:REL:X` | COORD | XY jog initiated by the control GUI |
-| `:COORD:REL:Y` | COORD | XY jog initiated by the control GUI |
-| `:COORD:HOME` | COORD | Home all axes |
-| `:COORD:HOME:XY` | COORD | Home X and Y only |
-| `:COORD:PARK` | COORD | Move to Park |
-| `:COORD:DISPOSE` | COORD | Move to Dispose |
-| `:COORD:HOMINGFIDUCIALMAIN` | COORD | Move to Homing Fiducial Main |
-| `:COORD:SECONDARYFIDUCIAL` | COORD | Move to Secondary Fiducial |
-| `:COORD:NOZZLECHANGE` | COORD | Move to Nozzle Change |
-| `:COORD:CALIBRATIONSPOT` | COORD | Move to Calibration Spot |
-| `:HEAD:REL:<nozzle>` | HEAD | Nozzle Z move from the control GUI |
-| `:HEAD:PARK:<nozzle>` | HEAD | Park nozzle to HOME position |
-
----
-
-### Command Flow Examples
-
-#### Moving to Homing Fiducial Main (simultaneous XY)
-
-```
-CAMERA → :COORD:HOMINGFIDUCIALMAIN       (ACTION)
-COORD  → :COORD:HOMINGFIDUCIALMAIN WORKING
-COORD  → :GCODE:POS:XY 262.4 120.5      (SET, simultaneous G0)
-GCODE  → G0 X262.4 Y120.5 F25000        (serial)
-GCODE  → M400                            (serial, wait)
-GCODE  → :GCODE:POS:X 262.4             (response → COORD cache)
-GCODE  → :GCODE:POS:Y 120.5             (response → COORD cache)
-COORD  → :COORD:HOMINGFIDUCIALMAIN? DONE 262.4 120.5
+```bash
+curl -sS -X POST \
+   -H "Content-Type: application/json" \
+   -d '{"on": true}' \
+   http://127.0.0.1:8080/api/head/nozzle/N1/vacuum
 ```
 
-#### Homing X and Y (simultaneous, with velocity preset)
+Status abrufen:
 
-```
-CAMERA → :COORD:HOME:XY                 (ACTION)
-COORD  → :COORD:HOME:XY WORKING
-COORD  → :GCODE:HOME:XY                 (ACTION)
-GCODE  → M210 X5000 Y5000               (serial, set homing velocities)
-GCODE  → G28 X Y                        (serial, simultaneous home)
-GCODE  → :GCODE:POS:X 0                 (response → COORD cache)
-GCODE  → :GCODE:POS:Y 0                 (response → COORD cache)
-COORD  → :COORD:HOME:XY? DONE
+```bash
+curl -sS http://127.0.0.1:8080/api/status
 ```
 
-#### Setting a light
+### Legacy-Hinweis
 
-```
-Qt GUI / client → POST /api/camera/TOP/light/standard  {value: 32768}
-CAMERA → :GCODE:ANOUT:2 32768           (SET)
-GCODE  → M106 P2 S32768                 (serial)
-GCODE  → :GCODE:ANOUT:2? 32768          (response)
-```
+Das Projekt enthaelt weiterhin Legacy-Module und SCPI-/Broker-Werkzeuge fuer Entwicklungs- und
+Migrationszwecke. Fuer den aktuellen Produktionsfluss gilt jedoch:
 
-#### Switching nozzle vacuum on
-
-```
-Qt GUI → POST /api/head/nozzle/N1/vacuum  {"on": true}
-CAMERA → set_analog_out("XY", 2, 255)
-XY     → M106 P2 S255                    (serial)
-```
+- Steuerung: Qt-Control-GUI
+- Transport: HTTP API
+- Konfigurationsquelle: `system.json` mit Includes
 
 ---
 
