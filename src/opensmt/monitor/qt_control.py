@@ -1097,8 +1097,8 @@ class ControlWindow(QMainWindow):
         pane_grid.setContentsMargins(0, 0, 0, 0)
         pane_grid.setHorizontalSpacing(5)
         pane_grid.setVerticalSpacing(5)
-        pane_grid.setColumnStretch(0, 1)
-        pane_grid.setColumnStretch(1, 2)
+        pane_grid.setColumnStretch(0, 2)
+        pane_grid.setColumnStretch(1, 3)
         pane_grid.setRowStretch(0, 3)
         pane_grid.setRowStretch(1, 2)
 
