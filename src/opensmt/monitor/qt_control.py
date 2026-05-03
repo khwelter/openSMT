@@ -570,6 +570,7 @@ class TrayFeederEditor(QWidget):
     reload_requested = Signal(str)
     move_base_requested = Signal(float, float)
     move_current_requested = Signal(float, float)
+    back_to_survey_requested = Signal()
     set_pick_from_camera_requested = Signal(str)
     reset_requested = Signal(str)
     advance_requested = Signal(str)
@@ -630,6 +631,7 @@ class TrayFeederEditor(QWidget):
         self._btn_move_current.setToolTip("Move top camera above current pick location")
         self._btn_save = QPushButton("Save")
         self._btn_cancel = QPushButton("Cancel Editing")
+        self._btn_back = QPushButton("Back to Survey")
         self._btn_pick_from_camera = QPushButton("Use Camera as Pick")
         self._btn_advance = QPushButton("Advance")
         self._btn_reset = QPushButton("Reset")
@@ -661,6 +663,7 @@ class TrayFeederEditor(QWidget):
         btn_row.addWidget(self._btn_advance)
         btn_row.addWidget(self._btn_reset)
         btn_row.addStretch(1)
+        btn_row.addWidget(self._btn_back)
         btn_row.addWidget(self._btn_cancel)
         btn_row.addWidget(self._btn_save)
 
@@ -691,6 +694,9 @@ class TrayFeederEditor(QWidget):
             w.setRange(-9999.0, 9999.0)
             w.setDecimals(3)
             w.setSingleStep(0.1)
+        for w in (self._current_x, self._current_y, self._last_x, self._last_y):
+            w.setReadOnly(True)
+            w.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         for w in (self._parts_avail_x, self._parts_avail_y, self._index_x, self._index_y, self._parts_picked):
             w.setRange(0, 1000000)
         self._parts_picked.setReadOnly(True)
@@ -760,6 +766,7 @@ class TrayFeederEditor(QWidget):
 
         self._btn_save.clicked.connect(self._emit_save)
         self._btn_cancel.clicked.connect(self._emit_reload)
+        self._btn_back.clicked.connect(self.back_to_survey_requested)
         self._btn_move_base.clicked.connect(self._emit_move_base)
         self._btn_move_current.clicked.connect(self._emit_move_current)
         self._btn_pick_from_camera.clicked.connect(self._emit_set_pick_from_camera)
@@ -785,6 +792,10 @@ class TrayFeederEditor(QWidget):
         ):
             w.valueChanged.connect(self._on_fields_changed)
         self._preferred_direction.currentIndexChanged.connect(self._on_fields_changed)
+        self._step_x.valueChanged.connect(self._sync_current_pick_display)
+        self._step_y.valueChanged.connect(self._sync_current_pick_display)
+        self._index_x.valueChanged.connect(self._sync_current_pick_display)
+        self._index_y.valueChanged.connect(self._sync_current_pick_display)
         self._set_enabled(False)
 
     def set_feeder(self, feeder: dict[str, Any]) -> None:
@@ -845,6 +856,7 @@ class TrayFeederEditor(QWidget):
             self._btn_pick_from_camera,
             self._btn_advance,
             self._btn_reset,
+            self._btn_back,
             self._btn_save,
             self._btn_cancel,
         ):
@@ -867,8 +879,9 @@ class TrayFeederEditor(QWidget):
             return
 
         self._loading_values = True
-        self._current_x.setValue(self._current_x.value() + dx)
-        self._current_y.setValue(self._current_y.value() + dy)
+        current_x, current_y = self._computed_current_pick()
+        self._current_x.setValue(current_x)
+        self._current_y.setValue(current_y)
         self._last_x.setValue(self._last_x.value() + dx)
         self._last_y.setValue(self._last_y.value() + dy)
         self._loading_values = False
@@ -878,6 +891,7 @@ class TrayFeederEditor(QWidget):
         self._refresh_dirty_state()
 
     def _build_payload(self) -> dict[str, Any]:
+        current_x, current_y = self._computed_current_pick()
         return {
             "manufacturer_part_number": self._part_number.text().strip(),
             "pick_location": {
@@ -897,8 +911,8 @@ class TrayFeederEditor(QWidget):
                 "current_index_y": int(self._index_y.value()),
                 "parts_picked": int(self._parts_picked.value()),
                 "current_pick": {
-                    "x": self._current_x.value(),
-                    "y": self._current_y.value(),
+                    "x": current_x,
+                    "y": current_y,
                 },
                 "last_pick": {
                     "x": self._last_x.value(),
@@ -929,7 +943,12 @@ class TrayFeederEditor(QWidget):
         self.move_base_requested.emit(self._pick_x.value(), self._pick_y.value())
 
     def _emit_move_current(self) -> None:
-        self.move_current_requested.emit(self._current_x.value(), self._current_y.value())
+        current_x, current_y = self._computed_current_pick()
+        self._loading_values = True
+        self._current_x.setValue(current_x)
+        self._current_y.setValue(current_y)
+        self._loading_values = False
+        self.move_current_requested.emit(current_x, current_y)
 
     def _emit_reset(self) -> None:
         if self._feeder_id:
@@ -949,6 +968,24 @@ class TrayFeederEditor(QWidget):
     def set_pick_location(self, x: float, y: float) -> None:
         self._pick_x.setValue(float(x))
         self._pick_y.setValue(float(y))
+
+    def _computed_current_pick(self) -> tuple[float, float]:
+        base_x = self._pick_x.value()
+        base_y = self._pick_y.value()
+        step_x = self._step_x.value()
+        step_y = self._step_y.value()
+        idx_x = int(self._index_x.value())
+        idx_y = int(self._index_y.value())
+        return base_x + (idx_x * step_x), base_y + (idx_y * step_y)
+
+    def _sync_current_pick_display(self, *_args: Any) -> None:
+        if self._loading_values:
+            return
+        current_x, current_y = self._computed_current_pick()
+        self._loading_values = True
+        self._current_x.setValue(current_x)
+        self._current_y.setValue(current_y)
+        self._loading_values = False
 
     def show_status(self, text: str, ok: bool = True) -> None:
         color = "#1f8a1f" if ok else "#bb2b2b"
@@ -1094,6 +1131,7 @@ class ControlWindow(QMainWindow):
                 self._tray_editor.reload_requested.connect(self._load_feeder_from_api)
                 self._tray_editor.move_base_requested.connect(self._move_camera_to_xy)
                 self._tray_editor.move_current_requested.connect(self._move_camera_to_xy)
+                self._tray_editor.back_to_survey_requested.connect(self._go_to_feeder_survey)
                 self._tray_editor.set_pick_from_camera_requested.connect(self._set_tray_pick_from_camera)
                 self._tray_editor.advance_requested.connect(self._advance_feeder_pick)
                 self._tray_editor.reset_requested.connect(self._reset_feeder)
@@ -1455,7 +1493,7 @@ class ControlWindow(QMainWindow):
             selected = self._feeders_by_id.get(self._selected_feeder_id, {})
             if str(selected.get("feeder_type", "")).strip().lower() == "tray_feeder" and self._tray_editor.is_dirty():
                 return
-            self._open_feeder_editor(self._selected_feeder_id)
+            self._open_feeder_editor(self._selected_feeder_id, activate_tab=False)
 
     def _on_feeder_row_double_clicked(self, row: int, _col: int) -> None:
         item = self._feeder_table.item(row, 0)
@@ -1465,14 +1503,14 @@ class ControlWindow(QMainWindow):
         if feeder_id:
             self._open_feeder_editor(feeder_id)
 
-    def _open_feeder_editor(self, feeder_id: str, force: bool = False) -> None:
+    def _open_feeder_editor(self, feeder_id: str, force: bool = False, activate_tab: bool = True) -> None:
         feeder = self._feeders_by_id.get(feeder_id)
         if feeder is None:
             return
 
         feeder_type = str(feeder.get("feeder_type", "")).strip().lower()
         tab_idx = self._feeder_tab_index.get(feeder_type)
-        if tab_idx is not None:
+        if activate_tab and tab_idx is not None:
             self._feeders_tabs.setCurrentIndex(tab_idx)
 
         self._selected_feeder_id = feeder_id
@@ -1589,6 +1627,9 @@ class ControlWindow(QMainWindow):
             return
         self._tray_editor.set_pick_location(self._current_x, self._current_y)
         self._log_line(f"OK: feeder {feeder_id} pick location set from camera XY ({self._current_x:.3f}, {self._current_y:.3f})")
+
+    def _go_to_feeder_survey(self) -> None:
+        self._feeders_tabs.setCurrentIndex(0)
 
     def _move_camera_to_xy(self, x: float, y: float) -> None:
         self._post_action(
