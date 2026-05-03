@@ -179,6 +179,35 @@ def _compose_pm(left: QPixmap, right: QPixmap) -> QPixmap:
     return pm
 
 
+def _make_target_marker_pm(label: str, size: int = _ICON_SZ, color: QColor | None = None) -> QPixmap:
+    if color is None:
+        color = _COLOR_RED
+    key = f"__target@{label}@{size}@{color.name()}"
+    if key in _pm_cache:
+        return _pm_cache[key]
+
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    r = int(size * 0.34)
+    cx = size // 2
+    cy = size // 2
+    p.setPen(color)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
+    p.drawLine(cx - r - 2, cy, cx + r + 2, cy)
+    p.drawLine(cx, cy - r - 2, cx, cy + r + 2)
+
+    p.setPen(color.darker(140))
+    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, label)
+    p.end()
+
+    _pm_cache[key] = pm
+    return pm
+
+
 def _sq_btn(pm_or_name: str | QPixmap, tooltip: str = "") -> QPushButton:
     pm = _load_pm(pm_or_name) if isinstance(pm_or_name, str) else pm_or_name
     btn = QPushButton()
@@ -544,18 +573,21 @@ class TrayFeederEditor(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._feeder_id = ""
+        self._baseline_payload: dict[str, Any] = {}
+        self._loading_values = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
 
         fixed_box = QGroupBox("Tray Feeder - Common")
-        fixed_layout = QFormLayout(fixed_box)
+        fixed_layout = QVBoxLayout(fixed_box)
         fixed_layout.setContentsMargins(6, 6, 6, 6)
         fixed_layout.setSpacing(4)
 
         self._id_label = QLabel("--")
         self._part_number = QLineEdit()
+        self._part_number.setMinimumWidth(300)
         self._pick_x = QDoubleSpinBox()
         self._pick_y = QDoubleSpinBox()
         self._pick_h = QDoubleSpinBox()
@@ -564,15 +596,32 @@ class TrayFeederEditor(QWidget):
             w.setDecimals(3)
             w.setSingleStep(0.1)
 
-        pick_xy = QHBoxLayout()
-        pick_xy.addWidget(QLabel("X"))
-        pick_xy.addWidget(self._pick_x)
-        pick_xy.addWidget(QLabel("Y"))
-        pick_xy.addWidget(self._pick_y)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(QLabel("ID"))
+        row.addWidget(self._id_label)
+        row.addSpacing(6)
+        row.addWidget(QLabel("Part"))
+        row.addWidget(self._part_number, 1)
+        row.addSpacing(6)
+        row.addWidget(QLabel("X"))
+        row.addWidget(self._pick_x)
+        row.addWidget(QLabel("Y"))
+        row.addWidget(self._pick_y)
+        row.addWidget(QLabel("Z"))
+        row.addWidget(self._pick_h)
 
         btn_row = QHBoxLayout()
-        self._btn_move_base = QPushButton("Top Cam -> Base Pick")
-        self._btn_move_current = QPushButton("Top Cam -> Current Pick")
+        self._btn_move_base = QPushButton()
+        self._btn_move_current = QPushButton()
+        self._btn_move_base.setIcon(QIcon(_compose_pm(_make_camera_pm(), _make_target_marker_pm("B", color=_COLOR_BLUE))))
+        self._btn_move_current.setIcon(QIcon(_compose_pm(_make_camera_pm(), _make_target_marker_pm("C", color=_COLOR_RED))))
+        self._btn_move_base.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
+        self._btn_move_current.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
+        self._btn_move_base.setFixedHeight(_BTN_SQ)
+        self._btn_move_current.setFixedHeight(_BTN_SQ)
+        self._btn_move_base.setToolTip("Move top camera above base pick location")
+        self._btn_move_current.setToolTip("Move top camera above current pick location")
         self._btn_save = QPushButton("Save")
         self._btn_cancel = QPushButton("Cancel Editing")
         btn_row.addWidget(self._btn_move_base)
@@ -581,11 +630,8 @@ class TrayFeederEditor(QWidget):
         btn_row.addWidget(self._btn_cancel)
         btn_row.addWidget(self._btn_save)
 
-        fixed_layout.addRow("Feeder ID", self._id_label)
-        fixed_layout.addRow("Part Number", self._part_number)
-        fixed_layout.addRow("Base Pick", pick_xy)
-        fixed_layout.addRow("Pick Height", self._pick_h)
-        fixed_layout.addRow(btn_row)
+        fixed_layout.addLayout(row)
+        fixed_layout.addLayout(btn_row)
         root.addWidget(fixed_box)
 
         scroll = QScrollArea()
@@ -607,10 +653,8 @@ class TrayFeederEditor(QWidget):
             w.setSingleStep(0.1)
 
         self._preferred_direction = QComboBox()
-        self._preferred_direction.addItem("X+", "X+")
-        self._preferred_direction.addItem("X-", "X-")
-        self._preferred_direction.addItem("Y+", "Y+")
-        self._preferred_direction.addItem("Y-", "Y-")
+        self._preferred_direction.addItem("X", "X")
+        self._preferred_direction.addItem("Y", "Y")
 
         detail_layout.addRow("X step to next pick", self._step_x)
         detail_layout.addRow("Y step to next pick", self._step_y)
@@ -628,9 +672,14 @@ class TrayFeederEditor(QWidget):
         self._btn_cancel.clicked.connect(self._emit_reload)
         self._btn_move_base.clicked.connect(self._emit_move_base)
         self._btn_move_current.clicked.connect(self._emit_move_current)
+        self._part_number.textChanged.connect(self._on_fields_changed)
+        for w in (self._pick_x, self._pick_y, self._pick_h, self._step_x, self._step_y, self._current_x, self._current_y, self._last_x, self._last_y):
+            w.valueChanged.connect(self._on_fields_changed)
+        self._preferred_direction.currentIndexChanged.connect(self._on_fields_changed)
         self._set_enabled(False)
 
     def set_feeder(self, feeder: dict[str, Any]) -> None:
+        self._loading_values = True
         self._feeder_id = str(feeder.get("feeder_id", "")).upper()
         self._id_label.setText(self._feeder_id or "--")
 
@@ -645,7 +694,7 @@ class TrayFeederEditor(QWidget):
 
         self._step_x.setValue(float(type_data.get("x_step", 0.0) or 0.0))
         self._step_y.setValue(float(type_data.get("y_step", 0.0) or 0.0))
-        pref = str(type_data.get("preferred_direction", "X+"))
+        pref = str(type_data.get("preferred_direction", "X"))
         idx = self._preferred_direction.findData(pref)
         self._preferred_direction.setCurrentIndex(idx if idx >= 0 else 0)
 
@@ -655,7 +704,10 @@ class TrayFeederEditor(QWidget):
         self._current_y.setValue(float(current.get("y", self._pick_y.value()) or self._pick_y.value()))
         self._last_x.setValue(float(last.get("x", self._pick_x.value()) or self._pick_x.value()))
         self._last_y.setValue(float(last.get("y", self._pick_y.value()) or self._pick_y.value()))
+        self._baseline_payload = self._build_payload()
+        self._loading_values = False
         self._set_enabled(bool(self._feeder_id))
+        self._refresh_dirty_state()
 
     def _set_enabled(self, enabled: bool) -> None:
         for w in (
@@ -677,20 +729,13 @@ class TrayFeederEditor(QWidget):
         ):
             w.setEnabled(enabled)
 
-    def _emit_reload(self) -> None:
-        if self._feeder_id:
-            self.reload_requested.emit(self._feeder_id)
-
-    def _emit_move_base(self) -> None:
-        self.move_base_requested.emit(self._pick_x.value(), self._pick_y.value())
-
-    def _emit_move_current(self) -> None:
-        self.move_current_requested.emit(self._current_x.value(), self._current_y.value())
-
-    def _emit_save(self) -> None:
-        if not self._feeder_id:
+    def _on_fields_changed(self, *_args: Any) -> None:
+        if self._loading_values:
             return
-        payload = {
+        self._refresh_dirty_state()
+
+    def _build_payload(self) -> dict[str, Any]:
+        return {
             "manufacturer_part_number": self._part_number.text().strip(),
             "pick_location": {
                 "x": self._pick_x.value(),
@@ -713,6 +758,32 @@ class TrayFeederEditor(QWidget):
                 },
             },
         }
+
+    def _refresh_dirty_state(self) -> None:
+        dirty = bool(self._feeder_id) and self._build_payload() != self._baseline_payload
+        if dirty:
+            self._btn_save.setStyleSheet("QPushButton { background:#1f7a1f; color:#ffffff; font-weight:600; }")
+            self._btn_cancel.setStyleSheet("QPushButton { background:#b82828; color:#ffffff; font-weight:600; }")
+        else:
+            self._btn_save.setStyleSheet("")
+            self._btn_cancel.setStyleSheet("")
+        self._btn_save.setEnabled(bool(self._feeder_id) and dirty)
+        self._btn_cancel.setEnabled(bool(self._feeder_id) and dirty)
+
+    def _emit_reload(self) -> None:
+        if self._feeder_id:
+            self.reload_requested.emit(self._feeder_id)
+
+    def _emit_move_base(self) -> None:
+        self.move_base_requested.emit(self._pick_x.value(), self._pick_y.value())
+
+    def _emit_move_current(self) -> None:
+        self.move_current_requested.emit(self._current_x.value(), self._current_y.value())
+
+    def _emit_save(self) -> None:
+        if not self._feeder_id:
+            return
+        payload = self._build_payload()
         self.save_requested.emit(self._feeder_id, payload)
 
 
@@ -766,8 +837,8 @@ class ControlWindow(QMainWindow):
         pane_grid.setVerticalSpacing(5)
         pane_grid.setColumnStretch(0, 1)
         pane_grid.setColumnStretch(1, 2)
-        pane_grid.setRowStretch(0, 1)
-        pane_grid.setRowStretch(1, 1)
+        pane_grid.setRowStretch(0, 3)
+        pane_grid.setRowStretch(1, 2)
 
         cam_group = QGroupBox("Cameras")
         cam_group_layout = QVBoxLayout(cam_group)
