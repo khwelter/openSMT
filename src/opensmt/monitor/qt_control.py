@@ -1716,15 +1716,31 @@ class ControlWindow(QMainWindow):
 
     def _refresh_camera_selector(self, ordered: list[str], status_by_name: dict[str, bool]) -> None:
         self._camera_selector.blockSignals(True)
-        self._camera_selector.clear()
-        for name in ordered:
-            state = "online" if status_by_name.get(name, False) else "offline"
-            item = QListWidgetItem(f"{name} ({state})")
-            item.setData(Qt.ItemDataRole.UserRole, name)
-            self._camera_selector.addItem(item)
-            if name == self._active_camera_name:
-                self._camera_selector.setCurrentItem(item)
-        self._camera_selector.blockSignals(False)
+        try:
+            while self._camera_selector.count() > len(ordered):
+                item = self._camera_selector.takeItem(self._camera_selector.count() - 1)
+                del item
+
+            while self._camera_selector.count() < len(ordered):
+                self._camera_selector.addItem("")
+
+            selected_row = -1
+            for row, name in enumerate(ordered):
+                state = "online" if status_by_name.get(name, False) else "offline"
+                item = self._camera_selector.item(row)
+                if item is None:
+                    continue
+                item.setText(f"{name} ({state})")
+                item.setData(Qt.ItemDataRole.UserRole, name)
+                if name == self._active_camera_name:
+                    selected_row = row
+
+            if selected_row >= 0:
+                self._camera_selector.setCurrentRow(selected_row)
+            elif self._camera_selector.count() > 0:
+                self._camera_selector.setCurrentRow(0)
+        finally:
+            self._camera_selector.blockSignals(False)
 
     def _show_selected_camera(self) -> None:
         selected = self._active_camera_name
