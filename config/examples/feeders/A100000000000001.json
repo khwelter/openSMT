@@ -6,7 +6,7 @@
     "y": 99.3
   },
   "pick_height": -1.1,
-  "manufacturer_part_number": "EXAMPLE-TRAY-001",
+  "manufacturer_part_number": "Mein Teil I",
   "type_data": {
     "parts_available_x": 1,
     "parts_available_y": 10,
@@ -16,15 +16,15 @@
   },
   "actual_data": {
     "current_index_x": 0,
-    "current_index_y": 0,
+    "current_index_y": 2,
     "current_pick": {
       "x": 21.2,
-      "y": 99.3
+      "y": 91.3
     },
     "last_pick": {
       "x": 21.2,
-      "y": 99.3
+      "y": 95.3
     },
-    "parts_picked": 0
+    "parts_picked": 2
   }
 }

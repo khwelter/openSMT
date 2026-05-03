@@ -570,6 +570,7 @@ class TrayFeederEditor(QWidget):
     reload_requested = Signal(str)
     move_base_requested = Signal(float, float)
     move_current_requested = Signal(float, float)
+    set_last_from_camera_requested = Signal(str)
     back_to_survey_requested = Signal()
     set_pick_from_camera_requested = Signal(str)
     reset_requested = Signal(str)
@@ -759,6 +760,12 @@ class TrayFeederEditor(QWidget):
         last_row_l.addWidget(self._last_x)
         last_row_l.addWidget(QLabel("Y"))
         last_row_l.addWidget(self._last_y)
+        self._btn_last_from_camera = QPushButton()
+        self._btn_last_from_camera.setIcon(QIcon(_compose_pm(_make_camera_pm(), _make_target_marker_pm("L", color=_COLOR_RED))))
+        self._btn_last_from_camera.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
+        self._btn_last_from_camera.setFixedHeight(_BTN_SQ)
+        self._btn_last_from_camera.setToolTip("Set last-pick position from current top-camera XY")
+        last_row_l.addWidget(self._btn_last_from_camera)
         detail_layout.addRow("Last pick", last_row)
 
         scroll.setWidget(detail_widget)
@@ -769,6 +776,7 @@ class TrayFeederEditor(QWidget):
         self._btn_back.clicked.connect(self.back_to_survey_requested)
         self._btn_move_base.clicked.connect(self._emit_move_base)
         self._btn_move_current.clicked.connect(self._emit_move_current)
+        self._btn_last_from_camera.clicked.connect(self._emit_set_last_from_camera)
         self._btn_pick_from_camera.clicked.connect(self._emit_set_pick_from_camera)
         self._btn_advance.clicked.connect(self._emit_advance)
         self._btn_reset.clicked.connect(self._emit_reset)
@@ -796,6 +804,10 @@ class TrayFeederEditor(QWidget):
         self._step_y.valueChanged.connect(self._sync_current_pick_display)
         self._index_x.valueChanged.connect(self._sync_current_pick_display)
         self._index_y.valueChanged.connect(self._sync_current_pick_display)
+        self._parts_avail_x.valueChanged.connect(self._sync_last_pick_display)
+        self._parts_avail_y.valueChanged.connect(self._sync_last_pick_display)
+        self._step_x.valueChanged.connect(self._sync_last_pick_display)
+        self._step_y.valueChanged.connect(self._sync_last_pick_display)
         self._set_enabled(False)
 
     def set_feeder(self, feeder: dict[str, Any]) -> None:
@@ -836,6 +848,7 @@ class TrayFeederEditor(QWidget):
         self._loading_values = False
         self._status.setText("")
         self._set_enabled(bool(self._feeder_id))
+        self._sync_last_pick_display()
         self._refresh_dirty_state()
 
     def _set_enabled(self, enabled: bool) -> None:
@@ -854,6 +867,7 @@ class TrayFeederEditor(QWidget):
             self._btn_move_base,
             self._btn_move_current,
             self._btn_pick_from_camera,
+            self._btn_last_from_camera,
             self._btn_advance,
             self._btn_reset,
             self._btn_back,
@@ -882,8 +896,9 @@ class TrayFeederEditor(QWidget):
         current_x, current_y = self._computed_current_pick()
         self._current_x.setValue(current_x)
         self._current_y.setValue(current_y)
-        self._last_x.setValue(self._last_x.value() + dx)
-        self._last_y.setValue(self._last_y.value() + dy)
+        last_x, last_y = self._computed_last_pick()
+        self._last_x.setValue(last_x)
+        self._last_y.setValue(last_y)
         self._loading_values = False
 
         self._base_x_prev = x
@@ -962,6 +977,10 @@ class TrayFeederEditor(QWidget):
         if self._feeder_id:
             self.set_pick_from_camera_requested.emit(self._feeder_id)
 
+    def _emit_set_last_from_camera(self) -> None:
+        if self._feeder_id:
+            self.set_last_from_camera_requested.emit(self._feeder_id)
+
     def is_dirty(self) -> bool:
         return bool(self._feeder_id) and self._build_payload() != self._baseline_payload
 
@@ -978,6 +997,15 @@ class TrayFeederEditor(QWidget):
         idx_y = int(self._index_y.value())
         return base_x + (idx_x * step_x), base_y + (idx_y * step_y)
 
+    def _computed_last_pick(self) -> tuple[float, float]:
+        base_x = self._pick_x.value()
+        base_y = self._pick_y.value()
+        step_x = self._step_x.value()
+        step_y = self._step_y.value()
+        count_x = int(self._parts_avail_x.value())
+        count_y = int(self._parts_avail_y.value())
+        return base_x + (count_x * step_x), base_y + (count_y * step_y)
+
     def _sync_current_pick_display(self, *_args: Any) -> None:
         if self._loading_values:
             return
@@ -986,6 +1014,22 @@ class TrayFeederEditor(QWidget):
         self._current_x.setValue(current_x)
         self._current_y.setValue(current_y)
         self._loading_values = False
+
+    def _sync_last_pick_display(self, *_args: Any) -> None:
+        if self._loading_values:
+            return
+        last_x, last_y = self._computed_last_pick()
+        self._loading_values = True
+        self._last_x.setValue(last_x)
+        self._last_y.setValue(last_y)
+        self._loading_values = False
+
+    def set_last_pick_location(self, x: float, y: float) -> None:
+        self._loading_values = True
+        self._last_x.setValue(float(x))
+        self._last_y.setValue(float(y))
+        self._loading_values = False
+        self._refresh_dirty_state()
 
     def show_status(self, text: str, ok: bool = True) -> None:
         color = "#1f8a1f" if ok else "#bb2b2b"
@@ -1133,6 +1177,7 @@ class ControlWindow(QMainWindow):
                 self._tray_editor.move_current_requested.connect(self._move_camera_to_xy)
                 self._tray_editor.back_to_survey_requested.connect(self._go_to_feeder_survey)
                 self._tray_editor.set_pick_from_camera_requested.connect(self._set_tray_pick_from_camera)
+                self._tray_editor.set_last_from_camera_requested.connect(self._set_tray_last_from_camera)
                 self._tray_editor.advance_requested.connect(self._advance_feeder_pick)
                 self._tray_editor.reset_requested.connect(self._reset_feeder)
                 type_layout.addWidget(self._tray_editor)
@@ -1627,6 +1672,13 @@ class ControlWindow(QMainWindow):
             return
         self._tray_editor.set_pick_location(self._current_x, self._current_y)
         self._log_line(f"OK: feeder {feeder_id} pick location set from camera XY ({self._current_x:.3f}, {self._current_y:.3f})")
+
+    def _set_tray_last_from_camera(self, feeder_id: str) -> None:
+        if self._current_x is None or self._current_y is None:
+            self._log_line("ERR: no valid XY position available from status")
+            return
+        self._tray_editor.set_last_pick_location(self._current_x, self._current_y)
+        self._log_line(f"OK: feeder {feeder_id} last-pick location set from camera XY ({self._current_x:.3f}, {self._current_y:.3f})")
 
     def _go_to_feeder_survey(self) -> None:
         self._feeders_tabs.setCurrentIndex(0)

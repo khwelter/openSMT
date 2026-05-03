@@ -1,0 +1,24 @@
+{
+  "feeder_id": "A100000000000005",
+  "feeder_type": "label_feeder",
+  "pick_location": {
+    "x": 145.0,
+    "y": 42.0
+  },
+  "pick_height": -1.0,
+  "manufacturer_part_number": "EXAMPLE-LABEL-001",
+  "type_data": {},
+  "actual_data": {
+    "parts_picked": 0,
+    "current_index_x": 0,
+    "current_index_y": 0,
+    "current_pick": {
+      "x": 145.0,
+      "y": 42.0
+    },
+    "last_pick": {
+      "x": 145.0,
+      "y": 42.0
+    }
+  }
+}
