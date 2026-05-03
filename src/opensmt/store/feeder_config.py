@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -30,12 +30,18 @@ class FeederConfig:
     pick_height: float
     manufacturer_part_number: str
     feeder_type: str
+    type_data: dict[str, Any] = field(default_factory=dict)
+    actual_data: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.feeder_id = str(self.feeder_id).upper()
         self.feeder_type = str(self.feeder_type).strip().lower()
         self.manufacturer_part_number = str(self.manufacturer_part_number).strip()
         self.pick_height = float(self.pick_height)
+        if not isinstance(self.type_data, dict):
+            self.type_data = {}
+        if not isinstance(self.actual_data, dict):
+            self.actual_data = {}
 
         if not _FEEDER_ID_RE.fullmatch(self.feeder_id):
             raise ValueError(
@@ -58,6 +64,8 @@ class FeederConfig:
             },
             "pick_height": self.pick_height,
             "manufacturer_part_number": self.manufacturer_part_number,
+            "type_data": dict(self.type_data),
+            "actual_data": dict(self.actual_data),
         }
 
 
@@ -121,6 +129,8 @@ def feeder_from_dict(item: dict[str, Any]) -> FeederConfig:
         pick_location=pick_location,
         pick_height=float(item["pick_height"]),
         manufacturer_part_number=str(item["manufacturer_part_number"]),
+        type_data=(dict(item.get("type_data", {})) if isinstance(item.get("type_data"), dict) else {}),
+        actual_data=(dict(item.get("actual_data", {})) if isinstance(item.get("actual_data"), dict) else {}),
     )
 
 
@@ -141,3 +151,6 @@ class FeederConfigStore:
     def by_type(self, feeder_type: str) -> list[FeederConfig]:
         key = str(feeder_type).strip().lower()
         return [feeder for feeder in self._feeders.values() if feeder.feeder_type == key]
+
+    def upsert(self, feeder: FeederConfig) -> None:
+        self._feeders[feeder.feeder_id] = feeder

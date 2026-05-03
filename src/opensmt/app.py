@@ -154,11 +154,38 @@ async def run_from_config(config_path: str) -> None:
     nozzle_config_store = NozzleConfigStore(nozzle_configs)
     valve_store = ValveStore(nozzle_config_store.names())
 
-    feeder_configs = [
-        feeder_from_dict(item)
-        for item in config.get("feeders", [])
-        if isinstance(item, dict)
+    feeders_persist_dir_raw = config.get("feeders_persist_dir")
+    if feeders_persist_dir_raw is not None:
+        feeders_persist_dir = Path(str(feeders_persist_dir_raw)).expanduser()
+        if not feeders_persist_dir.is_absolute():
+            feeders_persist_dir = (cfg_path.parent / feeders_persist_dir).resolve()
+    else:
+        feeders_persist_dir = (cfg_path.parent / "feeders").resolve()
+
+    feeder_items: list[dict[str, Any]] = [
+        dict(item) for item in config.get("feeders", []) if isinstance(item, dict)
     ]
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in feeder_items:
+        feeder_id = str(item.get("feeder_id", "")).upper().strip()
+        if feeder_id:
+            by_id[feeder_id] = item
+
+    if feeders_persist_dir.is_dir():
+        for path in sorted(feeders_persist_dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                log.warning("Failed to read feeder file %s: %s", path, exc)
+                continue
+            if not isinstance(raw, dict):
+                continue
+            feeder_id = str(raw.get("feeder_id", "")).upper().strip()
+            if not feeder_id:
+                continue
+            by_id[feeder_id] = raw
+
+    feeder_configs = [feeder_from_dict(item) for item in by_id.values()]
     feeder_config_store = FeederConfigStore(feeder_configs)
 
     # ------------------------------------------------------------------ #
@@ -182,6 +209,7 @@ async def run_from_config(config_path: str) -> None:
         location_store=location_store,
         nozzle_config_store=nozzle_config_store,
         feeder_config_store=feeder_config_store,
+        feeders_persist_dir=feeders_persist_dir,
         valve_store=valve_store,
     )
 

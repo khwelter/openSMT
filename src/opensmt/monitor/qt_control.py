@@ -10,6 +10,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -262,6 +263,18 @@ class ControlApiClient(QObject):
         request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
         body = b"" if payload is None else json.dumps(payload).encode("utf-8")
         reply = self._net.post(request, body)
+        self._wire_reply(reply, on_done)
+
+    def put_json(
+        self,
+        path: str,
+        payload: dict[str, Any] | None,
+        on_done: Callable[[bool, int, dict[str, Any]], None],
+    ) -> None:
+        request = QNetworkRequest(QUrl(f"{self._base_url}{path}"))
+        request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
+        body = b"" if payload is None else json.dumps(payload).encode("utf-8")
+        reply = self._net.put(request, body)
         self._wire_reply(reply, on_done)
 
     def _wire_reply(
@@ -522,46 +535,185 @@ class NozzleCard(QFrame):
         return float(v) if v is not None else 5.0
 
 
-class FeederDetailCard(QGroupBox):
-    def __init__(self, feeder: dict[str, Any]) -> None:
-        feeder_id = str(feeder.get("feeder_id", ""))
-        super().__init__(feeder_id or "Feeder")
+class TrayFeederEditor(QWidget):
+    save_requested = Signal(str, dict)
+    reload_requested = Signal(str)
+    move_base_requested = Signal(float, float)
+    move_current_requested = Signal(float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._feeder_id = ""
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
+        root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(4)
 
-        common_box = QGroupBox("Common")
-        common_layout = QFormLayout(common_box)
-        common_layout.setContentsMargins(6, 6, 6, 6)
-        common_layout.setSpacing(4)
+        fixed_box = QGroupBox("Tray Feeder - Common")
+        fixed_layout = QFormLayout(fixed_box)
+        fixed_layout.setContentsMargins(6, 6, 6, 6)
+        fixed_layout.setSpacing(4)
 
-        pick_location = feeder.get("pick_location") if isinstance(feeder.get("pick_location"), dict) else {}
-        pick_x = self._fmt(pick_location.get("x"), 3)
-        pick_y = self._fmt(pick_location.get("y"), 3)
-        pick_height = self._fmt(feeder.get("pick_height"), 3)
+        self._id_label = QLabel("--")
+        self._part_number = QLineEdit()
+        self._pick_x = QDoubleSpinBox()
+        self._pick_y = QDoubleSpinBox()
+        self._pick_h = QDoubleSpinBox()
+        for w in (self._pick_x, self._pick_y, self._pick_h):
+            w.setRange(-9999.0, 9999.0)
+            w.setDecimals(3)
+            w.setSingleStep(0.1)
 
-        common_layout.addRow("Feeder ID", QLabel(feeder_id or "--"))
-        common_layout.addRow("Type", QLabel(ControlWindow._human_feeder_type(str(feeder.get("feeder_type", "")))))
-        common_layout.addRow("Part Number", QLabel(str(feeder.get("manufacturer_part_number", "--"))))
-        common_layout.addRow("Pick Location", QLabel(f"X={pick_x}  Y={pick_y}"))
-        common_layout.addRow("Pick Height", QLabel(pick_height))
+        pick_xy = QHBoxLayout()
+        pick_xy.addWidget(QLabel("X"))
+        pick_xy.addWidget(self._pick_x)
+        pick_xy.addWidget(QLabel("Y"))
+        pick_xy.addWidget(self._pick_y)
 
-        root.addWidget(common_box)
+        btn_row = QHBoxLayout()
+        self._btn_move_base = QPushButton("Top Cam -> Base Pick")
+        self._btn_move_current = QPushButton("Top Cam -> Current Pick")
+        self._btn_save = QPushButton("Save")
+        self._btn_cancel = QPushButton("Cancel Editing")
+        btn_row.addWidget(self._btn_move_base)
+        btn_row.addWidget(self._btn_move_current)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self._btn_cancel)
+        btn_row.addWidget(self._btn_save)
 
-        pending = QLabel("Type-specific controls and parameters will be added here.")
-        pending.setWordWrap(True)
-        root.addWidget(pending)
-        root.addStretch(1)
+        fixed_layout.addRow("Feeder ID", self._id_label)
+        fixed_layout.addRow("Part Number", self._part_number)
+        fixed_layout.addRow("Base Pick", pick_xy)
+        fixed_layout.addRow("Pick Height", self._pick_h)
+        fixed_layout.addRow(btn_row)
+        root.addWidget(fixed_box)
 
-    @staticmethod
-    def _fmt(value: Any, decimals: int = 3) -> str:
-        try:
-            if value is None:
-                return "--"
-            return f"{float(value):.{decimals}f}"
-        except Exception:
-            return "--"
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        detail_widget = QWidget()
+        detail_layout = QFormLayout(detail_widget)
+        detail_layout.setContentsMargins(6, 6, 6, 6)
+        detail_layout.setSpacing(4)
+
+        self._step_x = QDoubleSpinBox()
+        self._step_y = QDoubleSpinBox()
+        self._current_x = QDoubleSpinBox()
+        self._current_y = QDoubleSpinBox()
+        self._last_x = QDoubleSpinBox()
+        self._last_y = QDoubleSpinBox()
+        for w in (self._step_x, self._step_y, self._current_x, self._current_y, self._last_x, self._last_y):
+            w.setRange(-9999.0, 9999.0)
+            w.setDecimals(3)
+            w.setSingleStep(0.1)
+
+        self._preferred_direction = QComboBox()
+        self._preferred_direction.addItem("X+", "X+")
+        self._preferred_direction.addItem("X-", "X-")
+        self._preferred_direction.addItem("Y+", "Y+")
+        self._preferred_direction.addItem("Y-", "Y-")
+
+        detail_layout.addRow("X step to next pick", self._step_x)
+        detail_layout.addRow("Y step to next pick", self._step_y)
+        detail_layout.addRow("Preferred next direction", self._preferred_direction)
+        detail_layout.addRow(QLabel("Actual Data"))
+        detail_layout.addRow("Current pick X", self._current_x)
+        detail_layout.addRow("Current pick Y", self._current_y)
+        detail_layout.addRow("Last pick X", self._last_x)
+        detail_layout.addRow("Last pick Y", self._last_y)
+
+        scroll.setWidget(detail_widget)
+        root.addWidget(scroll, 1)
+
+        self._btn_save.clicked.connect(self._emit_save)
+        self._btn_cancel.clicked.connect(self._emit_reload)
+        self._btn_move_base.clicked.connect(self._emit_move_base)
+        self._btn_move_current.clicked.connect(self._emit_move_current)
+        self._set_enabled(False)
+
+    def set_feeder(self, feeder: dict[str, Any]) -> None:
+        self._feeder_id = str(feeder.get("feeder_id", "")).upper()
+        self._id_label.setText(self._feeder_id or "--")
+
+        pick = feeder.get("pick_location") if isinstance(feeder.get("pick_location"), dict) else {}
+        type_data = feeder.get("type_data") if isinstance(feeder.get("type_data"), dict) else {}
+        actual = feeder.get("actual_data") if isinstance(feeder.get("actual_data"), dict) else {}
+
+        self._part_number.setText(str(feeder.get("manufacturer_part_number", "")))
+        self._pick_x.setValue(float(pick.get("x", 0.0) or 0.0))
+        self._pick_y.setValue(float(pick.get("y", 0.0) or 0.0))
+        self._pick_h.setValue(float(feeder.get("pick_height", 0.0) or 0.0))
+
+        self._step_x.setValue(float(type_data.get("x_step", 0.0) or 0.0))
+        self._step_y.setValue(float(type_data.get("y_step", 0.0) or 0.0))
+        pref = str(type_data.get("preferred_direction", "X+"))
+        idx = self._preferred_direction.findData(pref)
+        self._preferred_direction.setCurrentIndex(idx if idx >= 0 else 0)
+
+        current = actual.get("current_pick") if isinstance(actual.get("current_pick"), dict) else {}
+        last = actual.get("last_pick") if isinstance(actual.get("last_pick"), dict) else {}
+        self._current_x.setValue(float(current.get("x", self._pick_x.value()) or self._pick_x.value()))
+        self._current_y.setValue(float(current.get("y", self._pick_y.value()) or self._pick_y.value()))
+        self._last_x.setValue(float(last.get("x", self._pick_x.value()) or self._pick_x.value()))
+        self._last_y.setValue(float(last.get("y", self._pick_y.value()) or self._pick_y.value()))
+        self._set_enabled(bool(self._feeder_id))
+
+    def _set_enabled(self, enabled: bool) -> None:
+        for w in (
+            self._part_number,
+            self._pick_x,
+            self._pick_y,
+            self._pick_h,
+            self._step_x,
+            self._step_y,
+            self._preferred_direction,
+            self._current_x,
+            self._current_y,
+            self._last_x,
+            self._last_y,
+            self._btn_move_base,
+            self._btn_move_current,
+            self._btn_save,
+            self._btn_cancel,
+        ):
+            w.setEnabled(enabled)
+
+    def _emit_reload(self) -> None:
+        if self._feeder_id:
+            self.reload_requested.emit(self._feeder_id)
+
+    def _emit_move_base(self) -> None:
+        self.move_base_requested.emit(self._pick_x.value(), self._pick_y.value())
+
+    def _emit_move_current(self) -> None:
+        self.move_current_requested.emit(self._current_x.value(), self._current_y.value())
+
+    def _emit_save(self) -> None:
+        if not self._feeder_id:
+            return
+        payload = {
+            "manufacturer_part_number": self._part_number.text().strip(),
+            "pick_location": {
+                "x": self._pick_x.value(),
+                "y": self._pick_y.value(),
+            },
+            "pick_height": self._pick_h.value(),
+            "type_data": {
+                "x_step": self._step_x.value(),
+                "y_step": self._step_y.value(),
+                "preferred_direction": str(self._preferred_direction.currentData()),
+            },
+            "actual_data": {
+                "current_pick": {
+                    "x": self._current_x.value(),
+                    "y": self._current_y.value(),
+                },
+                "last_pick": {
+                    "x": self._last_x.value(),
+                    "y": self._last_y.value(),
+                },
+            },
+        }
+        self.save_requested.emit(self._feeder_id, payload)
 
 
 class ControlWindow(QMainWindow):
@@ -580,7 +732,9 @@ class ControlWindow(QMainWindow):
 
         self._nozzle_cards: dict[str, NozzleCard] = {}
         self._nozzle_placeholder: QLabel | None = None
-        self._feeder_type_layouts: dict[str, QVBoxLayout] = {}
+        self._feeders_by_id: dict[str, dict[str, Any]] = {}
+        self._feeder_tab_index: dict[str, int] = {}
+        self._selected_feeder_id: str = ""
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -671,6 +825,7 @@ class ControlWindow(QMainWindow):
         self._feeder_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._feeder_table.verticalHeader().setVisible(False)
         self._feeder_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._feeder_table.cellDoubleClicked.connect(self._on_feeder_row_double_clicked)
         all_feeders_layout.addWidget(self._feeder_table)
         self._feeders_tabs.addTab(all_feeders_tab, "All Feeders")
 
@@ -679,17 +834,21 @@ class ControlWindow(QMainWindow):
             type_layout = QVBoxLayout(type_tab)
             type_layout.setContentsMargins(6, 6, 6, 6)
 
-            type_scroll = QScrollArea()
-            type_scroll.setWidgetResizable(True)
-            type_container = QWidget()
-            cards_layout = QVBoxLayout(type_container)
-            cards_layout.setContentsMargins(2, 2, 2, 2)
-            cards_layout.setSpacing(4)
-            type_scroll.setWidget(type_container)
-            type_layout.addWidget(type_scroll)
+            if feeder_type == "tray_feeder":
+                self._tray_editor = TrayFeederEditor()
+                self._tray_editor.save_requested.connect(self._on_tray_save)
+                self._tray_editor.reload_requested.connect(self._load_feeder_from_api)
+                self._tray_editor.move_base_requested.connect(self._move_camera_to_xy)
+                self._tray_editor.move_current_requested.connect(self._move_camera_to_xy)
+                type_layout.addWidget(self._tray_editor)
+            else:
+                note = QLabel("Type-specific editor will be added in a later step.")
+                note.setWordWrap(True)
+                type_layout.addWidget(note)
+                type_layout.addStretch(1)
 
-            self._feeder_type_layouts[feeder_type] = cards_layout
-            self._feeders_tabs.addTab(type_tab, title)
+            tab_idx = self._feeders_tabs.addTab(type_tab, title)
+            self._feeder_tab_index[feeder_type] = tab_idx
 
         feeders_layout.addWidget(self._feeders_tabs)
 
@@ -994,12 +1153,17 @@ class ControlWindow(QMainWindow):
             self._nozzle_container.setMinimumHeight(sample_card.sizeHint().height() + 8)
 
     def _sync_feeders(self, feeders: list[dict[str, Any]]) -> None:
+        self._feeders_by_id = {}
         self._feeder_table.setRowCount(len(feeders))
 
         for row, feeder in enumerate(feeders):
+            feeder_id = str(feeder.get("feeder_id", "")).upper()
+            if feeder_id:
+                self._feeders_by_id[feeder_id] = feeder
+
             pick_location = feeder.get("pick_location") if isinstance(feeder.get("pick_location"), dict) else {}
             cells = [
-                str(feeder.get("feeder_id", "")),
+                feeder_id,
                 self._human_feeder_type(str(feeder.get("feeder_type", ""))),
                 str(feeder.get("manufacturer_part_number", "")),
                 self._fmt(pick_location.get("x")),
@@ -1009,30 +1173,83 @@ class ControlWindow(QMainWindow):
             for col, value in enumerate(cells):
                 self._feeder_table.setItem(row, col, QTableWidgetItem(value))
 
-        grouped: dict[str, list[dict[str, Any]]] = {key: [] for key, _ in _FEEDER_TYPE_TITLES}
-        for feeder in feeders:
-            feeder_type = str(feeder.get("feeder_type", "")).strip().lower()
-            if feeder_type in grouped:
-                grouped[feeder_type].append(feeder)
+        if self._selected_feeder_id and self._selected_feeder_id in self._feeders_by_id:
+            self._open_feeder_editor(self._selected_feeder_id)
 
-        for feeder_type, cards_layout in self._feeder_type_layouts.items():
-            while cards_layout.count() > 0:
-                item = cards_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
+    def _on_feeder_row_double_clicked(self, row: int, _col: int) -> None:
+        item = self._feeder_table.item(row, 0)
+        if item is None:
+            return
+        feeder_id = item.text().strip().upper()
+        if feeder_id:
+            self._open_feeder_editor(feeder_id)
 
-            type_feeders = grouped.get(feeder_type, [])
-            if not type_feeders:
-                empty = QLabel("No feeders of this type are defined in configuration.")
-                empty.setWordWrap(True)
-                cards_layout.addWidget(empty)
-                cards_layout.addStretch(1)
-                continue
+    def _open_feeder_editor(self, feeder_id: str) -> None:
+        feeder = self._feeders_by_id.get(feeder_id)
+        if feeder is None:
+            return
 
-            for feeder in type_feeders:
-                cards_layout.addWidget(FeederDetailCard(feeder))
-            cards_layout.addStretch(1)
+        feeder_type = str(feeder.get("feeder_type", "")).strip().lower()
+        tab_idx = self._feeder_tab_index.get(feeder_type)
+        if tab_idx is not None:
+            self._feeders_tabs.setCurrentIndex(tab_idx)
+
+        self._selected_feeder_id = feeder_id
+        if feeder_type == "tray_feeder":
+            self._tray_editor.set_feeder(feeder)
+
+    def _load_feeder_from_api(self, feeder_id: str) -> None:
+        self._api.get_json(
+            f"/api/feeders/{feeder_id}",
+            lambda ok, status, data, fid=feeder_id: self._on_feeder_loaded(fid, ok, status, data),
+        )
+
+    def _on_feeder_loaded(self, feeder_id: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"ERR {status}: feeder reload failed: {data.get('error', 'request_failed')}")
+            return
+
+        feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
+        if feeder is None:
+            self._log_line("ERR: feeder reload failed: invalid feeder payload")
+            return
+
+        fid = str(feeder.get("feeder_id", feeder_id)).upper()
+        self._feeders_by_id[fid] = feeder
+        self._open_feeder_editor(fid)
+        self._log_line(f"OK: feeder {fid} reloaded")
+        self._poll_status()
+
+    def _on_tray_save(self, feeder_id: str, payload: dict[str, Any]) -> None:
+        self._api.put_json(
+            f"/api/feeders/{feeder_id}",
+            payload,
+            lambda ok, status, data, fid=feeder_id: self._on_tray_saved(fid, ok, status, data),
+        )
+
+    def _on_tray_saved(self, feeder_id: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"ERR {status}: feeder {feeder_id} save failed: {data.get('error', 'request_failed')}")
+            return
+
+        feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
+        if feeder is not None:
+            fid = str(feeder.get("feeder_id", feeder_id)).upper()
+            self._feeders_by_id[fid] = feeder
+            self._selected_feeder_id = fid
+
+        if data.get("persisted", True):
+            self._log_line(f"OK: feeder {feeder_id} saved")
+        else:
+            self._log_line(f"WARN: feeder {feeder_id} updated but not persisted: {data.get('persist_error')}")
+        self._poll_status()
+
+    def _move_camera_to_xy(self, x: float, y: float) -> None:
+        self._post_action(
+            "/api/coord/move-xy",
+            {"x": float(x), "y": float(y)},
+            f"Move top camera to X={x:.3f}, Y={y:.3f}",
+        )
 
     def _on_nozzle_action(self, nozzle: str, action: str, value: float) -> None:
         if action == "align_to_cam":

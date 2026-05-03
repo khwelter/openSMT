@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -16,7 +17,7 @@ from opensmt.vision import PassthroughPipeline, VisionPipelineBase
 
 from opensmt.hardware.driver import HardwareDriver
 from opensmt.runtime.command_runner import CommandRunner
-from opensmt.store.feeder_config import FeederConfigStore
+from opensmt.store.feeder_config import FeederConfigStore, feeder_from_dict
 from opensmt.store.location_store import LocationStore
 from opensmt.store.nozzle_config import NozzleConfigStore
 from opensmt.store.position_store import PositionStore
@@ -117,6 +118,7 @@ class CameraVisionModule:
         location_store: LocationStore,
         nozzle_config_store: NozzleConfigStore | None = None,
         feeder_config_store: FeederConfigStore | None = None,
+        feeders_persist_dir: Path | None = None,
         valve_store: ValveStore | None = None,
     ) -> None:
         self.name = name
@@ -126,6 +128,7 @@ class CameraVisionModule:
         self._location_store = location_store
         self._nozzle_config_store = nozzle_config_store
         self._feeder_config_store = feeder_config_store
+        self._feeders_persist_dir = feeders_persist_dir
         self._valve_store = valve_store
         self._cameras: dict[str, CameraState] = {}
         self._pipelines: dict[str, VisionPipelineBase] = {
@@ -433,7 +436,11 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/calibration-spot", self._api_coord_calibration_spot)
         app.router.add_post("/api/coord/set-home-here", self._api_coord_set_home_here)
         app.router.add_post("/api/coord/set-calibration-spot-here", self._api_coord_set_calibration_spot_here)
+        app.router.add_post("/api/coord/move-xy", self._api_coord_move_xy)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
+        app.router.add_get("/api/feeders", self._api_feeders)
+        app.router.add_get("/api/feeders/{feeder_id}", self._api_feeder_get)
+        app.router.add_put("/api/feeders/{feeder_id}", self._api_feeder_put)
         app.router.add_post("/api/nozzle/{name}/move-to-camera", self._api_nozzle_move_to_camera)
         app.router.add_post("/api/nozzle/{name}/move-to-bottom-camera", self._api_nozzle_move_to_bottom_camera)
         app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
@@ -706,8 +713,108 @@ class CameraVisionModule:
             "persist_path": self._location_store.persist_path(),
         })
 
+    async def _api_coord_move_xy(self, request: web.Request) -> web.Response:
+        if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
+            return web.json_response({"error": "xy_not_homed"}, status=409)
+
+        try:
+            body = await request.json()
+            x = float(body.get("x"))
+            y = float(body.get("y"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        job_id, canceled_prev = self._submit_domain_command(
+            "coord",
+            f"coord_move_xy:{x}:{y}",
+            lambda tx=x, ty=y: self._driver.move_axes({"X": tx, "Y": ty}),
+        )
+        return web.json_response({
+            "status": "accepted",
+            "job_id": job_id,
+            "previous_job_canceled": canceled_prev,
+            "x": x,
+            "y": y,
+        })
+
     async def _api_coord_positions(self, request: web.Request) -> web.Response:
         return web.json_response(self._position_store.all())
+
+    def _persist_feeder_config(self, feeder_payload: dict[str, Any]) -> str | None:
+        if self._feeders_persist_dir is None:
+            return "feeders_persist_dir_not_configured"
+        feeder_id = str(feeder_payload.get("feeder_id", "")).upper().strip()
+        if not feeder_id:
+            return "invalid_feeder_id"
+
+        try:
+            self._feeders_persist_dir.mkdir(parents=True, exist_ok=True)
+            path = self._feeders_persist_dir / f"{feeder_id}.json"
+            path.write_text(json.dumps(feeder_payload, indent=2), encoding="utf-8")
+            return None
+        except Exception as exc:
+            return str(exc)
+
+    async def _api_feeders(self, request: web.Request) -> web.Response:
+        if self._feeder_config_store is None:
+            return web.json_response({"feeders": []})
+        feeders = [feeder.to_status() for feeder in self._feeder_config_store.all()]
+        feeders.sort(key=lambda feeder: (str(feeder.get("feeder_type", "")), str(feeder.get("feeder_id", ""))))
+        return web.json_response({"feeders": feeders})
+
+    async def _api_feeder_get(self, request: web.Request) -> web.Response:
+        if self._feeder_config_store is None:
+            return web.json_response({"error": "feeders_not_available"}, status=404)
+
+        feeder_id = str(request.match_info.get("feeder_id", "")).upper().strip()
+        feeder = self._feeder_config_store.get(feeder_id)
+        if feeder is None:
+            return web.json_response({"error": "unknown_feeder"}, status=404)
+
+        return web.json_response({"feeder": feeder.to_status()})
+
+    async def _api_feeder_put(self, request: web.Request) -> web.Response:
+        if self._feeder_config_store is None:
+            return web.json_response({"error": "feeders_not_available"}, status=404)
+
+        feeder_id = str(request.match_info.get("feeder_id", "")).upper().strip()
+        current = self._feeder_config_store.get(feeder_id)
+        if current is None:
+            return web.json_response({"error": "unknown_feeder"}, status=404)
+
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        merged = current.to_status()
+        for key in ("pick_location", "type_data", "actual_data"):
+            if key in body and isinstance(body.get(key), dict):
+                merged[key] = copy.deepcopy(body[key])
+        for key in ("pick_height", "manufacturer_part_number"):
+            if key in body:
+                merged[key] = body[key]
+
+        merged["feeder_id"] = feeder_id
+        merged["feeder_type"] = current.feeder_type
+
+        try:
+            updated = feeder_from_dict(merged)
+        except Exception as exc:
+            return web.json_response({"error": f"invalid_feeder_payload: {exc}"}, status=400)
+
+        self._feeder_config_store.upsert(updated)
+        persist_error = self._persist_feeder_config(updated.to_status())
+
+        return web.json_response({
+            "status": "ok",
+            "feeder": updated.to_status(),
+            "persisted": persist_error is None,
+            "persist_error": persist_error,
+            "persist_dir": str(self._feeders_persist_dir) if self._feeders_persist_dir else None,
+        })
 
     def _get_bottom_camera_xy(self) -> tuple[float, float] | None:
         for cam_cfg in self.config.get("cameras", []):
