@@ -1233,6 +1233,7 @@ class ControlWindow(QMainWindow):
         self._top_left_ratio_max = 0.4
         self._bottom_left_ratio_min = 0.2
         self._bottom_left_ratio_max = 0.5
+        self._splitter_clamp_active: set[int] = set()
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -1512,6 +1513,10 @@ class ControlWindow(QMainWindow):
         self._clamp_splitter(self._bottom_splitter)
 
     def _clamp_splitter(self, splitter: QSplitter) -> None:
+        splitter_key = id(splitter)
+        if splitter_key in self._splitter_clamp_active:
+            return
+
         sizes = splitter.sizes()
         if len(sizes) != 2:
             return
@@ -1545,7 +1550,13 @@ class ControlWindow(QMainWindow):
         left = sizes[0]
         clamped = max(min_left, min(max_left, left))
         if clamped != left:
-            splitter.setSizes([clamped, total - clamped])
+            self._splitter_clamp_active.add(splitter_key)
+            try:
+                blocker = QSignalBlocker(splitter)
+                splitter.setSizes([clamped, total - clamped])
+                del blocker
+            finally:
+                self._splitter_clamp_active.discard(splitter_key)
 
     def _set_splitter_ratio(self, splitter: QSplitter, left_ratio: float) -> None:
         total = self._splitter_total_width(splitter)
