@@ -1,18 +1,26 @@
 {
   "N1": {
     "offset_x": -47.799999999999955,
-    "offset_y": -98.05
+    "offset_y": -98.05,
+    "tip_id": "501",
+    "standard_down_z": -38.1
   },
   "N2": {
     "offset_x": -16.699999999999932,
-    "offset_y": -99.585
+    "offset_y": -99.585,
+    "tip_id": "502",
+    "standard_down_z": null
   },
   "N3": {
     "offset_x": 16.0,
-    "offset_y": -99.00000000000001
+    "offset_y": -99.00000000000001,
+    "tip_id": "511",
+    "standard_down_z": null
   },
   "N4": {
     "offset_x": 47.70000000000002,
-    "offset_y": -99.80000000000003
+    "offset_y": -99.80000000000003,
+    "tip_id": "500",
+    "standard_down_z": null
   }
 }

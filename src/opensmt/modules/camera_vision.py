@@ -441,6 +441,7 @@ class CameraVisionModule:
         app.router.add_post("/api/head/nozzle/{name}/rotate", self._api_head_rotate)
         app.router.add_post("/api/head/nozzle/{name}/home", self._api_head_home)
         app.router.add_post("/api/head/nozzle/{name}/park", self._api_head_park)
+        app.router.add_post("/api/head/nozzle/{name}/vacuum", self._api_head_nozzle_vacuum)
         app.router.add_post("/api/coord/park", self._api_coord_park)
         app.router.add_post("/api/coord/dispose", self._api_coord_dispose)
         app.router.add_post("/api/coord/homing-fiducial-main", self._api_coord_homing_fiducial_main)
@@ -2161,6 +2162,46 @@ class CameraVisionModule:
             "applied_z": clamped,
             "clamped": clamped != target,
             "tip_id": cfg.tip_id,
+        })
+
+    async def _api_head_nozzle_vacuum(self, request: web.Request) -> web.Response:
+        """Control nozzle vacuum via analog output on board XY.
+
+        POST /api/head/nozzle/{name}/vacuum  body: {"on": bool}
+        N1 -> XY analog index 2, N2 -> 3, N3 -> 4, N4 -> 5, …
+        Values: 0 = off, 255 = on.
+        """
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle = raw_name.upper()
+        if nozzle not in self._nozzles:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        try:
+            body = await request.json()
+            on = bool(body.get("on", False))
+        except (json.JSONDecodeError, TypeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        m = re.search(r"(\d+)$", nozzle)
+        if not m:
+            return web.json_response({"error": "cannot_determine_nozzle_index"}, status=400)
+        analog_index = int(m.group(1)) + 1  # N1->2, N2->3, …
+        value = 255 if on else 0
+
+        try:
+            await self._driver.set_analog_out("XY", analog_index, value)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response({
+            "nozzle": nozzle,
+            "vacuum": "on" if on else "off",
+            "board": "XY",
+            "analog_index": analog_index,
+            "value": value,
         })
 
     async def _api_nozzle_move_to_camera(self, request: web.Request) -> web.Response:

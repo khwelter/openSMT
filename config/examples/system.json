@@ -160,9 +160,9 @@
         "flip_vertical": false,
         "rotation_deg": 0,
         "lights": {
-          "standard": { "board": "XY", "index": 2, "on_value": 2   },
+          "standard": { "board": "XY", "index": 102, "on_value": 2   },
           "spec1":    { "board": "AB", "index": 0, "on_value": 128 },
-          "spec2":    { "board": "XY", "index": 4, "on_value": 48  }
+          "spec2":    { "board": "XY", "index": 104, "on_value": 48  }
         },
         "pipelines": ["DETECT_FIDUCIAL", "MEASURE_COMPONENT"]
       },

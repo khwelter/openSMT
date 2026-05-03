@@ -10,7 +10,6 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -20,7 +19,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
-    QSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -335,6 +333,9 @@ class NozzleCard(QFrame):
     _cam_bottom_pm: QPixmap | None = None
     _cal_pm: QPixmap | None = None
 
+    _Z_STEPS: list[float] = [10.0, 5.0, 2.5, 1.0, 0.1]
+    _R_STEPS: list[float] = [45.0, 15.0, 5.0, 1.0, 0.1]
+
     @classmethod
     def _init_pms(cls) -> None:
         if cls._nozzle_pm is not None:
@@ -386,62 +387,69 @@ class NozzleCard(QFrame):
         b8_up = _sq_btn("z_up", "8: Move up by Z step")
         b9_zero = _sq_btn("park_zero", "9: Move to Z=0.0")
 
-        b4_free = _sq_btn("dispose", "4: Reserved")
+        b4_vac_off = QPushButton("VAC\nOFF")
+        b4_vac_off.setFixedSize(_BTN_SQ, _BTN_SQ)
+        b4_vac_off.setStyleSheet(
+            "QPushButton { background:#1a0000; border:2px solid #cc2200; border-radius:4px;"
+            " color:#ff4444; font-size:9px; font-weight:bold; }"
+            "QPushButton:hover { background:#2a0000; }"
+            "QPushButton:pressed { background:#400000; }"
+        )
+        b4_vac_off.setToolTip("4: Vacuum OFF")
         b5_park = _sq_btn("park_zero", "5: Park nozzle (Z=0.0)")
-        b6_free = _sq_btn("dispose", "6: Reserved")
+        b6_vac_on = QPushButton("VAC\nON")
+        b6_vac_on.setFixedSize(_BTN_SQ, _BTN_SQ)
+        b6_vac_on.setStyleSheet(
+            "QPushButton { background:#001a00; border:2px solid #22aa22; border-radius:4px;"
+            " color:#44ee44; font-size:9px; font-weight:bold; }"
+            "QPushButton:hover { background:#002a00; }"
+            "QPushButton:pressed { background:#004000; }"
+        )
+        b6_vac_on.setToolTip("6: Vacuum ON")
 
         b1_rot_ccw = _sq_btn("rotate_ccw", "1: Rotate CCW by angle step")
         b2_down = _sq_btn("z_down", "2: Move down by Z step")
         b3_std_down = _sq_btn("calibration_spot", "3: Move to standard-down Z")
 
-        b4_free.setEnabled(False)
-        b6_free.setEnabled(False)
-
         keypad.addWidget(b7_home, 0, 0)
         keypad.addWidget(b8_up, 0, 1)
         keypad.addWidget(b9_zero, 0, 2)
-        keypad.addWidget(b4_free, 1, 0)
+        keypad.addWidget(b4_vac_off, 1, 0)
         keypad.addWidget(b5_park, 1, 1)
-        keypad.addWidget(b6_free, 1, 2)
+        keypad.addWidget(b6_vac_on, 1, 2)
         keypad.addWidget(b1_rot_ccw, 2, 0)
         keypad.addWidget(b2_down, 2, 1)
         keypad.addWidget(b3_std_down, 2, 2)
 
-        slider_cols = QHBoxLayout()
-        slider_cols.setSpacing(6)
+        step_cols = QVBoxLayout()
+        step_cols.setSpacing(3)
 
-        z_col = QVBoxLayout()
-        z_col.setSpacing(1)
-        self._z_step_value = QLabel("1.0mm")
-        self._z_step_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._z_step_slider = QSlider(Qt.Orientation.Vertical)
-        self._z_step_slider.setRange(1, 100)  # 0.1 .. 10.0 mm
-        self._z_step_slider.setValue(10)
-        self._z_step_slider.setSingleStep(1)
-        self._z_step_slider.valueChanged.connect(self._update_step_labels)
-        z_col.addWidget(self._z_step_value)
-        z_col.addWidget(self._z_step_slider)
+        z_row = QHBoxLayout()
+        z_row.addWidget(QLabel("Z:"))
+        self._z_step_combo = QComboBox()
+        for mm in self._Z_STEPS:
+            self._z_step_combo.addItem(f"{mm:g} mm", mm)
+        self._z_step_combo.setCurrentIndex(3)  # default 1 mm
+        self._z_step_combo.setFixedWidth(70)
+        z_row.addWidget(self._z_step_combo)
 
-        a_col = QVBoxLayout()
-        a_col.setSpacing(1)
-        self._a_step_value = QLabel("1.0deg")
-        self._a_step_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._a_step_slider = QSlider(Qt.Orientation.Vertical)
-        self._a_step_slider.setRange(10, 450)  # 1.0 .. 45.0 deg
-        self._a_step_slider.setValue(10)
-        self._a_step_slider.setSingleStep(1)
-        self._a_step_slider.valueChanged.connect(self._update_step_labels)
-        a_col.addWidget(self._a_step_value)
-        a_col.addWidget(self._a_step_slider)
+        r_row = QHBoxLayout()
+        r_row.addWidget(QLabel("R:"))
+        self._r_step_combo = QComboBox()
+        for deg in self._R_STEPS:
+            self._r_step_combo.addItem(f"{deg:g}\u00b0", deg)
+        self._r_step_combo.setCurrentIndex(2)  # default 5°
+        self._r_step_combo.setFixedWidth(70)
+        r_row.addWidget(self._r_step_combo)
 
-        slider_cols.addLayout(z_col)
-        slider_cols.addLayout(a_col)
+        step_cols.addLayout(z_row)
+        step_cols.addLayout(r_row)
+        step_cols.addStretch(1)
 
         jog_block.addLayout(keypad)
-        jog_block.addLayout(slider_cols)
+        jog_block.addLayout(step_cols)
         jog_block.addStretch(1)
         root.addLayout(jog_block)
-        self._update_step_labels()
 
         btn_grid = QGridLayout()
         btn_grid.setSpacing(2)
@@ -465,7 +473,9 @@ class NozzleCard(QFrame):
         b7_home.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "nozzle_home", 0.0))
         b8_up.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_up", self._z_step_mm()))
         b9_zero.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_zero", 0.0))
+        b4_vac_off.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "vacuum_off", 0.0))
         b5_park.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_park", 0.0))
+        b6_vac_on.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "vacuum_on", 0.0))
         b1_rot_ccw.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "rot_ccw", self._angle_step_deg()))
         b2_down.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_down", self._z_step_mm()))
         b3_std_down.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_standard_down", 0.0))
@@ -490,14 +500,12 @@ class NozzleCard(QFrame):
             return "--"
 
     def _z_step_mm(self) -> float:
-        return self._z_step_slider.value() / 10.0
+        v = self._z_step_combo.currentData()
+        return float(v) if v is not None else 1.0
 
     def _angle_step_deg(self) -> float:
-        return self._a_step_slider.value() / 10.0
-
-    def _update_step_labels(self) -> None:
-        self._z_step_value.setText(f"{self._z_step_mm():.1f}mm")
-        self._a_step_value.setText(f"{self._angle_step_deg():.1f}deg")
+        v = self._r_step_combo.currentData()
+        return float(v) if v is not None else 5.0
 
 
 class ControlWindow(QMainWindow):
@@ -933,6 +941,22 @@ class ControlWindow(QMainWindow):
                 f"/api/head/nozzle/{nozzle}/move-standard-down",
                 None,
                 f"{nozzle}: Move to standard down",
+            )
+            return
+
+        if action == "vacuum_off":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/vacuum",
+                {"on": False},
+                f"{nozzle}: Vacuum OFF",
+            )
+            return
+
+        if action == "vacuum_on":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/vacuum",
+                {"on": True},
+                f"{nozzle}: Vacuum ON",
             )
             return
 
