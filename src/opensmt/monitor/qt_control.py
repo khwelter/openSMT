@@ -596,7 +596,7 @@ class TrayFeederEditor(QWidget):
 
         self._id_label = QLabel("--")
         self._part_number = QLineEdit()
-        self._part_number.setMinimumWidth(150)
+        self._part_number.setMinimumWidth(75)
         self._pick_x = QDoubleSpinBox()
         self._pick_y = QDoubleSpinBox()
         self._pick_h = QDoubleSpinBox()
