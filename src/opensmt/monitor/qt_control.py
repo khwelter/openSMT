@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -1214,6 +1216,8 @@ class ControlWindow(QMainWindow):
 
         self._camera_tiles: dict[str, CameraTile] = {}
         self._camera_order: list[str] = []
+        self._active_camera_name: str = ""
+        self._shown_camera_name: str = ""
         self._camera_placeholder: QLabel | None = None
         self._camera_thumb_pending: set[str] = set()
 
@@ -1267,15 +1271,18 @@ class ControlWindow(QMainWindow):
         cam_group = QGroupBox("Cameras")
         cam_group_layout = QVBoxLayout(cam_group)
         cam_group_layout.setContentsMargins(4, 4, 4, 4)
-        cam_scroll = QScrollArea()
-        cam_scroll.setWidgetResizable(True)
-        cam_container = QWidget()
-        self._camera_layout = QGridLayout(cam_container)
-        self._camera_layout.setContentsMargins(2, 2, 2, 2)
-        self._camera_layout.setHorizontalSpacing(3)
-        self._camera_layout.setVerticalSpacing(3)
-        cam_scroll.setWidget(cam_container)
-        cam_group_layout.addWidget(cam_scroll)
+        self._camera_host = QWidget()
+        self._camera_host_layout = QVBoxLayout(self._camera_host)
+        self._camera_host_layout.setContentsMargins(2, 2, 2, 2)
+        self._camera_host_layout.setSpacing(0)
+        cam_group_layout.addWidget(self._camera_host, 1)
+
+        cam_group_layout.addWidget(QLabel("Available cameras"))
+        self._camera_selector = QListWidget()
+        self._camera_selector.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self._camera_selector.setMaximumHeight(96)
+        self._camera_selector.currentItemChanged.connect(self._on_camera_selected)
+        cam_group_layout.addWidget(self._camera_selector)
 
         gp_group = QGroupBox("General Purpose")
         gp_layout = QVBoxLayout(gp_group)
@@ -1628,20 +1635,16 @@ class ControlWindow(QMainWindow):
         self._sync_feeders(feeders)
 
     def _sync_camera_tiles(self, cameras: list[dict[str, Any]]) -> None:
-        had_placeholder = self._camera_placeholder is not None
-        if self._camera_placeholder is not None:
-            self._camera_placeholder.setParent(None)
-            self._camera_placeholder.deleteLater()
-            self._camera_placeholder = None
-
         known = set(self._camera_tiles.keys())
         incoming: set[str] = set()
+        status_by_name: dict[str, bool] = {}
 
         for camera in cameras:
             name = str(camera.get("name", "")).upper()
             if not name:
                 continue
             incoming.add(name)
+            status_by_name[name] = bool(camera.get("online", False))
 
             tile = self._camera_tiles.get(name)
             if tile is None:
@@ -1659,56 +1662,90 @@ class ControlWindow(QMainWindow):
             tile = self._camera_tiles.pop(name)
             tile.setParent(None)
             tile.deleteLater()
-            self._camera_order = []
-
         if not self._camera_tiles:
-            for i in reversed(range(self._camera_layout.count())):
-                item = self._camera_layout.itemAt(i)
-                if item is not None and item.widget() is not None:
-                    item.widget().setParent(None)
-            self._camera_placeholder = QLabel("No cameras found in /api/status")
-            self._camera_placeholder.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            self._camera_layout.addWidget(self._camera_placeholder, 0, 0)
             self._camera_order = []
+            self._active_camera_name = ""
+            self._refresh_camera_selector([], {})
+            self._show_selected_camera()
             return
 
         ordered = sorted(self._camera_tiles.keys())
-        if ordered == self._camera_order and not had_placeholder:
-            return
-
-        for i in reversed(range(self._camera_layout.count())):
-            item = self._camera_layout.itemAt(i)
-            if item is not None and item.widget() is not None:
-                item.widget().setParent(None)
-
         self._camera_order = ordered
-        for idx, name in enumerate(ordered):
-            row = idx // 2
-            col = idx % 2
-            self._camera_layout.addWidget(self._camera_tiles[name], row, col)
+        if self._active_camera_name not in self._camera_tiles:
+            self._active_camera_name = ordered[0]
+
+        self._refresh_camera_selector(ordered, status_by_name)
+        self._show_selected_camera()
 
     def _refresh_camera_thumbs(self) -> None:
-        for name, tile in self._camera_tiles.items():
-            if name in self._camera_thumb_pending:
-                continue
+        name = self._active_camera_name
+        if not name:
+            return
+        tile = self._camera_tiles.get(name)
+        if tile is None or name in self._camera_thumb_pending:
+            return
 
-            self._camera_thumb_pending.add(name)
-            request = QNetworkRequest(QUrl(f"{self._api._base_url}/thumb/{name}"))
-            reply = self._img_net.get(request)
+        self._camera_thumb_pending.add(name)
+        request = QNetworkRequest(QUrl(f"{self._api._base_url}/thumb/{name}"))
+        reply = self._img_net.get(request)
 
-            def _finish(cam_name: str = name, cam_tile: CameraTile = tile, rep: QNetworkReply = reply) -> None:
-                try:
-                    raw = bytes(rep.readAll())
-                    status_obj = rep.attribute(QNetworkRequest.HttpStatusCodeAttribute)
-                    status = int(status_obj) if status_obj is not None else 0
-                    ok = rep.error() == QNetworkReply.NetworkError.NoError and status == 200 and bool(raw)
-                    if ok:
-                        cam_tile.apply_frame(raw)
-                finally:
-                    self._camera_thumb_pending.discard(cam_name)
-                    rep.deleteLater()
+        def _finish(cam_name: str = name, cam_tile: CameraTile = tile, rep: QNetworkReply = reply) -> None:
+            try:
+                raw = bytes(rep.readAll())
+                status_obj = rep.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+                status = int(status_obj) if status_obj is not None else 0
+                ok = rep.error() == QNetworkReply.NetworkError.NoError and status == 200 and bool(raw)
+                if ok:
+                    cam_tile.apply_frame(raw)
+            finally:
+                self._camera_thumb_pending.discard(cam_name)
+                rep.deleteLater()
 
-            reply.finished.connect(_finish)
+        reply.finished.connect(_finish)
+
+    def _refresh_camera_selector(self, ordered: list[str], status_by_name: dict[str, bool]) -> None:
+        self._camera_selector.blockSignals(True)
+        self._camera_selector.clear()
+        for name in ordered:
+            state = "online" if status_by_name.get(name, False) else "offline"
+            item = QListWidgetItem(f"{name} ({state})")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self._camera_selector.addItem(item)
+            if name == self._active_camera_name:
+                self._camera_selector.setCurrentItem(item)
+        self._camera_selector.blockSignals(False)
+
+    def _show_selected_camera(self) -> None:
+        selected = self._active_camera_name
+        if selected == self._shown_camera_name:
+            return
+
+        while self._camera_host_layout.count():
+            item = self._camera_host_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
+        tile = self._camera_tiles.get(selected)
+        if tile is None:
+            self._camera_placeholder = QLabel("No cameras found in /api/status")
+            self._camera_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._camera_host_layout.addWidget(self._camera_placeholder)
+            self._shown_camera_name = ""
+            return
+
+        self._camera_host_layout.addWidget(tile)
+        self._shown_camera_name = selected
+        self._refresh_camera_thumbs()
+
+    def _on_camera_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        if current is None:
+            return
+        name = str(current.data(Qt.ItemDataRole.UserRole) or "").upper()
+        if not name or name == self._active_camera_name:
+            return
+        self._active_camera_name = name
+        self._show_selected_camera()
 
     def _sync_nozzle_cards(self, nozzles: list[dict[str, Any]]) -> None:
         if self._nozzle_placeholder is not None:
