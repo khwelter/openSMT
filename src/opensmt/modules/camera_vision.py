@@ -68,7 +68,7 @@ class CameraConfig:
     resolution_dpcm_y: float
     flip_horizontal: bool
     flip_vertical: bool
-    rotation_deg: int
+    rotation_deg: float
     lights: dict[str, LightConfig]   # key: "standard" | "spec1" | "spec2"
     pipeline_names: list[str]
 
@@ -88,7 +88,7 @@ class CameraState:
     active_pipeline: str | None = None
     pipeline_params: dict[str, Any] = field(default_factory=dict)
     last_pipeline_result: dict[str, Any] = field(default_factory=dict)
-    current_rotation_deg: int = field(default_factory=lambda: 0)
+    current_rotation_deg: float = field(default_factory=lambda: 0.0)
 
 
 @dataclass(slots=True)
@@ -205,7 +205,7 @@ class CameraVisionModule:
                 resolution_dpcm_y=float(cam_cfg.get("resolution_dpcm_y", 0.0)),
                 flip_horizontal=bool(cam_cfg.get("flip_horizontal", False)),
                 flip_vertical=bool(cam_cfg.get("flip_vertical", False)),
-                rotation_deg=int(cam_cfg.get("rotation_deg", 0)),
+                rotation_deg=float(cam_cfg.get("rotation_deg", 0.0)),
                 lights=lights,
                 pipeline_names=pipe_names,
             )
@@ -312,13 +312,26 @@ class CameraVisionModule:
         elif cfg.flip_vertical:
             frame = cv2.flip(frame, 0)
 
-        rotation = state.current_rotation_deg % 360
-        if rotation == 90:
+        rotation = float(state.current_rotation_deg) % 360.0
+        if abs(rotation - 90.0) < 1e-6:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif rotation == 180:
+        elif abs(rotation - 180.0) < 1e-6:
             frame = cv2.rotate(frame, cv2.ROTATE_180)
-        elif rotation == 270:
+        elif abs(rotation - 270.0) < 1e-6:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif abs(rotation) > 1e-6:
+            h, w = frame.shape[:2]
+            center = (w / 2.0, h / 2.0)
+            mat = cv2.getRotationMatrix2D(center, rotation, 1.0)
+            cos_v = abs(mat[0, 0])
+            sin_v = abs(mat[0, 1])
+
+            new_w = int((h * sin_v) + (w * cos_v))
+            new_h = int((h * cos_v) + (w * sin_v))
+
+            mat[0, 2] += (new_w / 2.0) - center[0]
+            mat[1, 2] += (new_h / 2.0) - center[1]
+            frame = cv2.warpAffine(frame, mat, (new_w, new_h))
         elif rotation != 0:
             h, w = frame.shape[:2]
             center = (w / 2.0, h / 2.0)
@@ -465,14 +478,6 @@ class CameraVisionModule:
             raise web.HTTPNotFound()
 
         frame, _ = await self._apply_pipeline(state)
-        h, w = frame.shape[:2]
-        if w > 320:
-            thumb_w, thumb_h = 320, int(h * 320 / w)
-            loop = asyncio.get_running_loop()
-            frame = await loop.run_in_executor(
-                None, lambda f=frame: cv2.resize(f, (thumb_w, thumb_h))
-            )
-
         loop = asyncio.get_running_loop()
         ok, jpg = await loop.run_in_executor(
             None,
