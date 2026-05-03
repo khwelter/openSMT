@@ -1116,7 +1116,6 @@ class ControlWindow(QMainWindow):
         self._camera_layout.setVerticalSpacing(3)
         cam_scroll.setWidget(cam_container)
         cam_group_layout.addWidget(cam_scroll)
-        cam_group.setMinimumWidth(220)
 
         gp_group = QGroupBox("General Purpose")
         gp_layout = QVBoxLayout(gp_group)
@@ -1280,7 +1279,6 @@ class ControlWindow(QMainWindow):
         self._nozzle_layout.setVerticalSpacing(4)
         noz_scroll.setWidget(self._nozzle_container)
         noz_layout.addWidget(noz_scroll)
-        noz_group.setMinimumWidth(220)
 
         self._top_splitter.addWidget(cam_group)
         self._top_splitter.addWidget(gp_group)
@@ -1347,8 +1345,25 @@ class ControlWindow(QMainWindow):
         if total <= 0:
             return
 
-        min_left = int(total * 0.2)
-        max_left = int(total * 0.5)
+        desired_min_left = int(total * 0.2)
+        desired_max_left = int(total * 0.5)
+
+        left_w = splitter.widget(0)
+        right_w = splitter.widget(1)
+        left_min = left_w.minimumSizeHint().width() if left_w is not None else 0
+        right_min = right_w.minimumSizeHint().width() if right_w is not None else 0
+
+        hard_min_left = max(0, left_min)
+        hard_max_left = max(0, total - right_min)
+
+        min_left = max(desired_min_left, hard_min_left)
+        max_left = min(desired_max_left, hard_max_left)
+        if min_left > max_left:
+            min_left = hard_min_left
+            max_left = hard_max_left
+        if min_left > max_left:
+            return
+
         left = sizes[0]
         clamped = max(min_left, min(max_left, left))
         if clamped != left:
