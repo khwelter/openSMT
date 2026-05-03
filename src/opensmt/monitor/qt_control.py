@@ -576,7 +576,7 @@ class ControlWindow(QMainWindow):
         noz_scroll = QScrollArea()
         noz_scroll.setWidgetResizable(False)
         noz_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        noz_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        noz_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._nozzle_container = QWidget()
         self._nozzle_layout = QGridLayout(self._nozzle_container)
         self._nozzle_layout.setContentsMargins(2, 2, 2, 2)
@@ -796,10 +796,12 @@ class ControlWindow(QMainWindow):
 
         card_count = len(self._nozzle_cards)
         if card_count > 0:
-            card_w = next(iter(self._nozzle_cards.values())).minimumWidth()
+            sample_card = next(iter(self._nozzle_cards.values()))
+            card_w = sample_card.minimumWidth()
             spacing = self._nozzle_layout.horizontalSpacing()
             total_w = (card_w * card_count) + (spacing * max(0, card_count - 1)) + 16
             self._nozzle_container.setMinimumWidth(total_w)
+            self._nozzle_container.setMinimumHeight(sample_card.sizeHint().height() + 8)
 
     def _on_nozzle_action(self, nozzle: str, action: str, value: float) -> None:
         if action == "align_to_cam":
