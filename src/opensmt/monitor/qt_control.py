@@ -1146,7 +1146,7 @@ class ControlWindow(QMainWindow):
         all_feeders_tab = QWidget()
         all_feeders_layout = QVBoxLayout(all_feeders_tab)
         all_feeders_layout.setContentsMargins(6, 6, 6, 6)
-        self._feeder_table = QTableWidget(0, 8)
+        self._feeder_table = QTableWidget(0, 6)
         self._feeder_table.setHorizontalHeaderLabels([
             "Feeder ID",
             "Type",
@@ -1154,8 +1154,6 @@ class ControlWindow(QMainWindow):
             "Pick X",
             "Pick Y",
             "Pick Height",
-            "Picked",
-            "",
         ])
         self._feeder_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._feeder_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -1583,7 +1581,6 @@ class ControlWindow(QMainWindow):
                 self._feeders_by_id[feeder_id] = feeder
 
             pick_location = feeder.get("pick_location") if isinstance(feeder.get("pick_location"), dict) else {}
-            actual_data = feeder.get("actual_data") if isinstance(feeder.get("actual_data"), dict) else {}
             cells = [
                 feeder_id,
                 self._human_feeder_type(str(feeder.get("feeder_type", ""))),
@@ -1591,15 +1588,9 @@ class ControlWindow(QMainWindow):
                 self._fmt(pick_location.get("x")),
                 self._fmt(pick_location.get("y")),
                 self._fmt(feeder.get("pick_height")),
-                str(int(actual_data.get("parts_picked", 0) or 0)),
             ]
             for col, value in enumerate(cells):
                 self._feeder_table.setItem(row, col, QTableWidgetItem(value))
-
-            btn_reset = QPushButton("Reset")
-            btn_reset.setToolTip("Reset picked-count to 0")
-            btn_reset.clicked.connect(lambda _checked=False, fid=feeder_id: self._reset_feeder(fid))
-            self._feeder_table.setCellWidget(row, 7, btn_reset)
 
         if self._selected_feeder_id and self._selected_feeder_id in self._feeders_by_id:
             selected = self._feeders_by_id.get(self._selected_feeder_id, {})
