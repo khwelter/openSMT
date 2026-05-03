@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -1093,14 +1094,15 @@ class ControlWindow(QMainWindow):
         top.addWidget(self._conn_state)
         outer.addLayout(top)
 
-        pane_grid = QGridLayout()
-        pane_grid.setContentsMargins(0, 0, 0, 0)
-        pane_grid.setHorizontalSpacing(5)
-        pane_grid.setVerticalSpacing(5)
-        pane_grid.setColumnStretch(0, 2)
-        pane_grid.setColumnStretch(1, 3)
-        pane_grid.setRowStretch(0, 3)
-        pane_grid.setRowStretch(1, 2)
+        split_root = QVBoxLayout()
+        split_root.setContentsMargins(0, 0, 0, 0)
+        split_root.setSpacing(5)
+
+        top_splitter = QSplitter(Qt.Orientation.Horizontal)
+        top_splitter.setChildrenCollapsible(False)
+
+        bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
+        bottom_splitter.setChildrenCollapsible(False)
 
         cam_group = QGroupBox("Cameras")
         cam_group_layout = QVBoxLayout(cam_group)
@@ -1278,11 +1280,19 @@ class ControlWindow(QMainWindow):
         noz_scroll.setWidget(self._nozzle_container)
         noz_layout.addWidget(noz_scroll)
 
-        pane_grid.addWidget(cam_group, 0, 0)
-        pane_grid.addWidget(gp_group, 0, 1)
-        pane_grid.addWidget(xy_group, 1, 0)
-        pane_grid.addWidget(noz_group, 1, 1)
-        outer.addLayout(pane_grid, 1)
+        top_splitter.addWidget(cam_group)
+        top_splitter.addWidget(gp_group)
+        top_splitter.setStretchFactor(0, 1)
+        top_splitter.setStretchFactor(1, 1)
+
+        bottom_splitter.addWidget(xy_group)
+        bottom_splitter.addWidget(noz_group)
+        bottom_splitter.setStretchFactor(0, 1)
+        bottom_splitter.setStretchFactor(1, 1)
+
+        split_root.addWidget(top_splitter, 3)
+        split_root.addWidget(bottom_splitter, 2)
+        outer.addLayout(split_root, 1)
 
         status = self.statusBar()
         status.setSizeGripEnabled(False)
