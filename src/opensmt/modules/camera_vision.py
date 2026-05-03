@@ -1384,6 +1384,8 @@ class CameraVisionModule:
                 "name": cam_name,
                 "online": cap_open,
                 "stream_path": f"/camera/{cam_name}",
+                "resolution_dpcm_x": float(cam_state.config.resolution_dpcm_x),
+                "resolution_dpcm_y": float(cam_state.config.resolution_dpcm_y),
             })
 
         camera_data.sort(key=lambda c: str(c.get("name", "")))

@@ -457,6 +457,8 @@ class CameraTile(QFrame):
     def __init__(self, camera_name: str) -> None:
         super().__init__()
         self.camera_name = camera_name
+        self._resolution_dpcm_x = 0.0
+        self._resolution_dpcm_y = 0.0
         self.setFrameShape(QFrame.Shape.StyledPanel)
 
         layout = QVBoxLayout(self)
@@ -489,15 +491,6 @@ class CameraTile(QFrame):
         self._zoom.setCurrentIndex(0)
         self._zoom.currentIndexChanged.connect(self._on_zoom_changed)
         controls.addWidget(self._zoom)
-
-        controls.addWidget(QLabel("mm/px"))
-        self._mm_per_px = QDoubleSpinBox()
-        self._mm_per_px.setRange(0.001, 5.0)
-        self._mm_per_px.setDecimals(4)
-        self._mm_per_px.setSingleStep(0.001)
-        self._mm_per_px.setValue(0.0200)
-        self._mm_per_px.setToolTip("Vector conversion factor from image pixels to machine mm")
-        controls.addWidget(self._mm_per_px)
         controls.addStretch(1)
 
         layout.addWidget(self._preview)
@@ -516,14 +509,22 @@ class CameraTile(QFrame):
             return
         self._preview.set_frame(pm)
 
+    def set_resolution_dpcm(self, x: float, y: float) -> None:
+        self._resolution_dpcm_x = float(x)
+        self._resolution_dpcm_y = float(y)
+
     def _on_zoom_changed(self, _idx: int) -> None:
         value = self._zoom.currentData()
         self._preview.set_zoom(float(value) if value is not None else 1.0)
 
     def _on_vector_drawn(self, dx_px: float, dy_px: float) -> None:
-        scale = float(self._mm_per_px.value())
-        dx_mm = dx_px * scale
-        dy_mm = -dy_px * scale
+        mm_per_px_x = (10.0 / self._resolution_dpcm_x) if self._resolution_dpcm_x > 0.0 else 0.0
+        mm_per_px_y = (10.0 / self._resolution_dpcm_y) if self._resolution_dpcm_y > 0.0 else 0.0
+        if mm_per_px_x <= 0.0 or mm_per_px_y <= 0.0:
+            return
+
+        dx_mm = dx_px * mm_per_px_x
+        dy_mm = -dy_px * mm_per_px_y
         if abs(dx_mm) < 1e-9 and abs(dy_mm) < 1e-9:
             return
         self.vector_move_requested.emit(self.camera_name, dx_mm, dy_mm)
@@ -1212,6 +1213,7 @@ class ControlWindow(QMainWindow):
         self._img_net = QNetworkAccessManager(self)
 
         self._camera_tiles: dict[str, CameraTile] = {}
+        self._camera_order: list[str] = []
         self._camera_placeholder: QLabel | None = None
         self._camera_thumb_pending: set[str] = set()
 
@@ -1626,6 +1628,7 @@ class ControlWindow(QMainWindow):
         self._sync_feeders(feeders)
 
     def _sync_camera_tiles(self, cameras: list[dict[str, Any]]) -> None:
+        had_placeholder = self._camera_placeholder is not None
         if self._camera_placeholder is not None:
             self._camera_placeholder.setParent(None)
             self._camera_placeholder.deleteLater()
@@ -1647,24 +1650,39 @@ class ControlWindow(QMainWindow):
                 self._camera_tiles[name] = tile
 
             tile.apply_status(bool(camera.get("online", False)))
+            tile.set_resolution_dpcm(
+                float(camera.get("resolution_dpcm_x", 0.0) or 0.0),
+                float(camera.get("resolution_dpcm_y", 0.0) or 0.0),
+            )
 
         for name in known - incoming:
             tile = self._camera_tiles.pop(name)
             tile.setParent(None)
             tile.deleteLater()
+            self._camera_order = []
+
+        if not self._camera_tiles:
+            for i in reversed(range(self._camera_layout.count())):
+                item = self._camera_layout.itemAt(i)
+                if item is not None and item.widget() is not None:
+                    item.widget().setParent(None)
+            self._camera_placeholder = QLabel("No cameras found in /api/status")
+            self._camera_placeholder.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            self._camera_layout.addWidget(self._camera_placeholder, 0, 0)
+            self._camera_order = []
+            return
+
+        ordered = sorted(self._camera_tiles.keys())
+        if ordered == self._camera_order and not had_placeholder:
+            return
 
         for i in reversed(range(self._camera_layout.count())):
             item = self._camera_layout.itemAt(i)
             if item is not None and item.widget() is not None:
                 item.widget().setParent(None)
 
-        if not self._camera_tiles:
-            self._camera_placeholder = QLabel("No cameras found in /api/status")
-            self._camera_placeholder.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            self._camera_layout.addWidget(self._camera_placeholder, 0, 0)
-            return
-
-        for idx, name in enumerate(sorted(self._camera_tiles.keys())):
+        self._camera_order = ordered
+        for idx, name in enumerate(ordered):
             row = idx // 2
             col = idx % 2
             self._camera_layout.addWidget(self._camera_tiles[name], row, col)
