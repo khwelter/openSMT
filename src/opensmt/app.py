@@ -10,6 +10,7 @@ from opensmt.config import load_config
 from opensmt.hardware.board import BoardConfig, SerialBoard
 from opensmt.hardware.driver import HardwareDriver
 from opensmt.modules.camera_vision import CameraVisionModule
+from opensmt.store.feeder_config import FeederConfigStore, feeder_from_dict
 from opensmt.store.location_store import LocationStore
 from opensmt.store.nozzle_config import NozzleConfig, NozzleConfigStore, ValveConfig
 from opensmt.store.position_store import PositionStore
@@ -153,6 +154,13 @@ async def run_from_config(config_path: str) -> None:
     nozzle_config_store = NozzleConfigStore(nozzle_configs)
     valve_store = ValveStore(nozzle_config_store.names())
 
+    feeder_configs = [
+        feeder_from_dict(item)
+        for item in config.get("feeders", [])
+        if isinstance(item, dict)
+    ]
+    feeder_config_store = FeederConfigStore(feeder_configs)
+
     # ------------------------------------------------------------------ #
     # Hardware driver
     # ------------------------------------------------------------------ #
@@ -173,6 +181,7 @@ async def run_from_config(config_path: str) -> None:
         position_store=position_store,
         location_store=location_store,
         nozzle_config_store=nozzle_config_store,
+        feeder_config_store=feeder_config_store,
         valve_store=valve_store,
     )
 

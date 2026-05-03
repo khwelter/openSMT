@@ -1,0 +1,46 @@
+{
+  "feeders": [
+    {
+      "feeder_id": "A100000000000001",
+      "feeder_type": "tray_feeder",
+      "pick_location": { "x": 85.0, "y": 42.0 },
+      "pick_height": -1.10,
+      "manufacturer_part_number": "EXAMPLE-TRAY-001"
+    },
+    {
+      "feeder_id": "A100000000000002",
+      "feeder_type": "auto_feeder",
+      "pick_location": { "x": 100.0, "y": 42.0 },
+      "pick_height": -1.15,
+      "manufacturer_part_number": "EXAMPLE-AUTO-001"
+    },
+    {
+      "feeder_id": "A100000000000003",
+      "feeder_type": "push_pull_feeder",
+      "pick_location": { "x": 115.0, "y": 42.0 },
+      "pick_height": -1.20,
+      "manufacturer_part_number": "EXAMPLE-PUSHPULL-001"
+    },
+    {
+      "feeder_id": "A100000000000004",
+      "feeder_type": "vibration_feeder",
+      "pick_location": { "x": 130.0, "y": 42.0 },
+      "pick_height": -1.05,
+      "manufacturer_part_number": "EXAMPLE-VIBRATION-001"
+    },
+    {
+      "feeder_id": "A100000000000005",
+      "feeder_type": "label_feeder",
+      "pick_location": { "x": 145.0, "y": 42.0 },
+      "pick_height": -1.00,
+      "manufacturer_part_number": "EXAMPLE-LABEL-001"
+    },
+    {
+      "feeder_id": "A100000000000006",
+      "feeder_type": "tube_feeder",
+      "pick_location": { "x": 160.0, "y": 42.0 },
+      "pick_height": -1.25,
+      "manufacturer_part_number": "EXAMPLE-TUBE-001"
+    }
+  ]
+}

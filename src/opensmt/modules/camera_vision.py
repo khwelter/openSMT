@@ -16,6 +16,7 @@ from opensmt.vision import PassthroughPipeline, VisionPipelineBase
 
 from opensmt.hardware.driver import HardwareDriver
 from opensmt.runtime.command_runner import CommandRunner
+from opensmt.store.feeder_config import FeederConfigStore
 from opensmt.store.location_store import LocationStore
 from opensmt.store.nozzle_config import NozzleConfigStore
 from opensmt.store.position_store import PositionStore
@@ -115,6 +116,7 @@ class CameraVisionModule:
         position_store: PositionStore,
         location_store: LocationStore,
         nozzle_config_store: NozzleConfigStore | None = None,
+        feeder_config_store: FeederConfigStore | None = None,
         valve_store: ValveStore | None = None,
     ) -> None:
         self.name = name
@@ -123,6 +125,7 @@ class CameraVisionModule:
         self._position_store = position_store
         self._location_store = location_store
         self._nozzle_config_store = nozzle_config_store
+        self._feeder_config_store = feeder_config_store
         self._valve_store = valve_store
         self._cameras: dict[str, CameraState] = {}
         self._pipelines: dict[str, VisionPipelineBase] = {
@@ -1114,6 +1117,7 @@ class CameraVisionModule:
         positions = self._position_store.all()
         nozzle_data = []
         camera_data = []
+        feeder_data = []
 
         for cam_name, cam_state in self._cameras.items():
             cap_open = False
@@ -1172,10 +1176,15 @@ class CameraVisionModule:
                     "has_air_valve": nozzle_cfg.air_valve is not None,
                 })
 
+        if self._feeder_config_store is not None:
+            feeder_data = [feeder.to_status() for feeder in self._feeder_config_store.all()]
+            feeder_data.sort(key=lambda feeder: (str(feeder.get("feeder_type", "")), str(feeder.get("feeder_id", ""))))
+
         return web.json_response({
             "positions": positions,
             "nozzles": nozzle_data,
             "cameras": camera_data,
+            "feeders": feeder_data,
             "camera_position": {"x": positions.get("X"), "y": positions.get("Y")},
         })
 

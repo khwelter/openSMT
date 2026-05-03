@@ -10,8 +10,10 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFormLayout,
     QFrame,
     QGridLayout,
+    QHeaderView,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -19,6 +21,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -31,6 +36,15 @@ _JOG_BTN_SQ = 48
 
 _COLOR_RED = QColor(255, 40, 40)
 _COLOR_BLUE = QColor(20, 120, 255)
+
+_FEEDER_TYPE_TITLES: list[tuple[str, str]] = [
+    ("tray_feeder", "Tray Feeders"),
+    ("auto_feeder", "Auto Feeders"),
+    ("push_pull_feeder", "Push/Pull Feeders"),
+    ("vibration_feeder", "Vibration Feeders"),
+    ("label_feeder", "Label Feeders"),
+    ("tube_feeder", "Tube Feeders"),
+]
 
 _pm_cache: dict[str, QPixmap] = {}
 
@@ -508,6 +522,48 @@ class NozzleCard(QFrame):
         return float(v) if v is not None else 5.0
 
 
+class FeederDetailCard(QGroupBox):
+    def __init__(self, feeder: dict[str, Any]) -> None:
+        feeder_id = str(feeder.get("feeder_id", ""))
+        super().__init__(feeder_id or "Feeder")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        common_box = QGroupBox("Common")
+        common_layout = QFormLayout(common_box)
+        common_layout.setContentsMargins(6, 6, 6, 6)
+        common_layout.setSpacing(4)
+
+        pick_location = feeder.get("pick_location") if isinstance(feeder.get("pick_location"), dict) else {}
+        pick_x = self._fmt(pick_location.get("x"), 3)
+        pick_y = self._fmt(pick_location.get("y"), 3)
+        pick_height = self._fmt(feeder.get("pick_height"), 3)
+
+        common_layout.addRow("Feeder ID", QLabel(feeder_id or "--"))
+        common_layout.addRow("Type", QLabel(ControlWindow._human_feeder_type(str(feeder.get("feeder_type", "")))))
+        common_layout.addRow("Part Number", QLabel(str(feeder.get("manufacturer_part_number", "--"))))
+        common_layout.addRow("Pick Location", QLabel(f"X={pick_x}  Y={pick_y}"))
+        common_layout.addRow("Pick Height", QLabel(pick_height))
+
+        root.addWidget(common_box)
+
+        pending = QLabel("Type-specific controls and parameters will be added here.")
+        pending.setWordWrap(True)
+        root.addWidget(pending)
+        root.addStretch(1)
+
+    @staticmethod
+    def _fmt(value: Any, decimals: int = 3) -> str:
+        try:
+            if value is None:
+                return "--"
+            return f"{float(value):.{decimals}f}"
+        except Exception:
+            return "--"
+
+
 class ControlWindow(QMainWindow):
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
@@ -524,6 +580,7 @@ class ControlWindow(QMainWindow):
 
         self._nozzle_cards: dict[str, NozzleCard] = {}
         self._nozzle_placeholder: QLabel | None = None
+        self._feeder_type_layouts: dict[str, QVBoxLayout] = {}
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -574,10 +631,83 @@ class ControlWindow(QMainWindow):
         gp_group = QGroupBox("General Purpose")
         gp_layout = QVBoxLayout(gp_group)
         gp_layout.setContentsMargins(6, 6, 6, 6)
-        gp_note = QLabel("Reserved pane (future tools / diagnostics / workflows)")
-        gp_note.setWordWrap(True)
-        gp_layout.addWidget(gp_note)
-        gp_layout.addStretch(1)
+        gp_tabs = QTabWidget()
+
+        setup_tab = QWidget()
+        setup_layout = QVBoxLayout(setup_tab)
+        setup_layout.setContentsMargins(6, 6, 6, 6)
+        setup_note = QLabel("Reserved for setup and machine configuration workflows.")
+        setup_note.setWordWrap(True)
+        setup_layout.addWidget(setup_note)
+        setup_layout.addStretch(1)
+
+        production_tab = QWidget()
+        production_layout = QVBoxLayout(production_tab)
+        production_layout.setContentsMargins(6, 6, 6, 6)
+        production_note = QLabel("Reserved for production tools and run-time workflows.")
+        production_note.setWordWrap(True)
+        production_layout.addWidget(production_note)
+        production_layout.addStretch(1)
+
+        feeders_tab = QWidget()
+        feeders_layout = QVBoxLayout(feeders_tab)
+        feeders_layout.setContentsMargins(6, 6, 6, 6)
+        self._feeders_tabs = QTabWidget()
+
+        all_feeders_tab = QWidget()
+        all_feeders_layout = QVBoxLayout(all_feeders_tab)
+        all_feeders_layout.setContentsMargins(6, 6, 6, 6)
+        self._feeder_table = QTableWidget(0, 6)
+        self._feeder_table.setHorizontalHeaderLabels([
+            "Feeder ID",
+            "Type",
+            "Part Number",
+            "Pick X",
+            "Pick Y",
+            "Pick Height",
+        ])
+        self._feeder_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._feeder_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._feeder_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._feeder_table.verticalHeader().setVisible(False)
+        self._feeder_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        all_feeders_layout.addWidget(self._feeder_table)
+        self._feeders_tabs.addTab(all_feeders_tab, "All Feeders")
+
+        for feeder_type, title in _FEEDER_TYPE_TITLES:
+            type_tab = QWidget()
+            type_layout = QVBoxLayout(type_tab)
+            type_layout.setContentsMargins(6, 6, 6, 6)
+
+            type_scroll = QScrollArea()
+            type_scroll.setWidgetResizable(True)
+            type_container = QWidget()
+            cards_layout = QVBoxLayout(type_container)
+            cards_layout.setContentsMargins(2, 2, 2, 2)
+            cards_layout.setSpacing(4)
+            type_scroll.setWidget(type_container)
+            type_layout.addWidget(type_scroll)
+
+            self._feeder_type_layouts[feeder_type] = cards_layout
+            self._feeders_tabs.addTab(type_tab, title)
+
+        feeders_layout.addWidget(self._feeders_tabs)
+
+        diagnostics_tab = QWidget()
+        diagnostics_layout = QVBoxLayout(diagnostics_tab)
+        diagnostics_layout.setContentsMargins(6, 6, 6, 6)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._log.setMinimumHeight(90)
+        diagnostics_layout.addWidget(self._log)
+
+        gp_tabs.addTab(setup_tab, "Setup & Configuration")
+        gp_tabs.addTab(production_tab, "Production")
+        gp_tabs.addTab(feeders_tab, "Feeders")
+        gp_tabs.addTab(diagnostics_tab, "Diagnostics Log")
+        gp_layout.addWidget(gp_tabs)
 
         xy_group = QGroupBox("XY Jogging")
         xy_layout = QVBoxLayout(xy_group)
@@ -654,13 +784,6 @@ class ControlWindow(QMainWindow):
         pane_grid.addWidget(xy_group, 1, 0)
         pane_grid.addWidget(noz_group, 1, 1)
         outer.addLayout(pane_grid, 1)
-
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self._log.setMinimumHeight(90)
-        self._log.setMaximumHeight(140)
-        outer.addWidget(self._log)
 
         self._connect_btn.clicked.connect(self._apply_host)
 
@@ -749,6 +872,9 @@ class ControlWindow(QMainWindow):
 
         nozzles = data.get("nozzles", []) if isinstance(data.get("nozzles"), list) else []
         self._sync_nozzle_cards(nozzles)
+
+        feeders = data.get("feeders", []) if isinstance(data.get("feeders"), list) else []
+        self._sync_feeders(feeders)
 
     def _sync_camera_tiles(self, cameras: list[dict[str, Any]]) -> None:
         if self._camera_placeholder is not None:
@@ -867,6 +993,47 @@ class ControlWindow(QMainWindow):
             self._nozzle_container.setMinimumWidth(total_w)
             self._nozzle_container.setMinimumHeight(sample_card.sizeHint().height() + 8)
 
+    def _sync_feeders(self, feeders: list[dict[str, Any]]) -> None:
+        self._feeder_table.setRowCount(len(feeders))
+
+        for row, feeder in enumerate(feeders):
+            pick_location = feeder.get("pick_location") if isinstance(feeder.get("pick_location"), dict) else {}
+            cells = [
+                str(feeder.get("feeder_id", "")),
+                self._human_feeder_type(str(feeder.get("feeder_type", ""))),
+                str(feeder.get("manufacturer_part_number", "")),
+                self._fmt(pick_location.get("x")),
+                self._fmt(pick_location.get("y")),
+                self._fmt(feeder.get("pick_height")),
+            ]
+            for col, value in enumerate(cells):
+                self._feeder_table.setItem(row, col, QTableWidgetItem(value))
+
+        grouped: dict[str, list[dict[str, Any]]] = {key: [] for key, _ in _FEEDER_TYPE_TITLES}
+        for feeder in feeders:
+            feeder_type = str(feeder.get("feeder_type", "")).strip().lower()
+            if feeder_type in grouped:
+                grouped[feeder_type].append(feeder)
+
+        for feeder_type, cards_layout in self._feeder_type_layouts.items():
+            while cards_layout.count() > 0:
+                item = cards_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+
+            type_feeders = grouped.get(feeder_type, [])
+            if not type_feeders:
+                empty = QLabel("No feeders of this type are defined in configuration.")
+                empty.setWordWrap(True)
+                cards_layout.addWidget(empty)
+                cards_layout.addStretch(1)
+                continue
+
+            for feeder in type_feeders:
+                cards_layout.addWidget(FeederDetailCard(feeder))
+            cards_layout.addStretch(1)
+
     def _on_nozzle_action(self, nozzle: str, action: str, value: float) -> None:
         if action == "align_to_cam":
             self._post_action(f"/api/nozzle/{nozzle}/move-to-camera", None, f"{nozzle}: Align to camera")
@@ -984,6 +1151,14 @@ class ControlWindow(QMainWindow):
 
     def _log_line(self, text: str) -> None:
         self._log.append(text)
+
+    @staticmethod
+    def _human_feeder_type(value: str) -> str:
+        key = value.strip().lower()
+        for feeder_type, title in _FEEDER_TYPE_TITLES:
+            if feeder_type == key:
+                return title[:-1] if title.endswith("s") else title
+        return key.replace("_", " ").title() if key else "--"
 
     @staticmethod
     def _fmt(value: Any) -> str:
