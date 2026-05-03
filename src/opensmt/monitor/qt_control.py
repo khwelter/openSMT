@@ -579,6 +579,8 @@ class TrayFeederEditor(QWidget):
         self._feeder_id = ""
         self._baseline_payload: dict[str, Any] = {}
         self._loading_values = False
+        self._base_x_prev = 0.0
+        self._base_y_prev = 0.0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -631,6 +633,8 @@ class TrayFeederEditor(QWidget):
         self._btn_pick_from_camera = QPushButton("Use Camera as Pick")
         self._btn_advance = QPushButton("Advance")
         self._btn_reset = QPushButton("Reset")
+        self._status = QLabel("")
+        self._status.setStyleSheet("color:#5f6b80;")
 
         pick_pm = _compose_pm(_make_camera_pm(), _make_target_marker_pm("P", color=_COLOR_BLUE))
         self._btn_pick_from_camera.setIcon(QIcon(pick_pm))
@@ -662,6 +666,7 @@ class TrayFeederEditor(QWidget):
 
         fixed_layout.addLayout(row)
         fixed_layout.addLayout(btn_row)
+        fixed_layout.addWidget(self._status)
         root.addWidget(fixed_box)
 
         scroll = QScrollArea()
@@ -761,6 +766,8 @@ class TrayFeederEditor(QWidget):
         self._btn_advance.clicked.connect(self._emit_advance)
         self._btn_reset.clicked.connect(self._emit_reset)
         self._part_number.textChanged.connect(self._on_fields_changed)
+        self._pick_x.valueChanged.connect(self._on_base_pick_changed)
+        self._pick_y.valueChanged.connect(self._on_base_pick_changed)
         for w in (
             self._pick_x,
             self._pick_y,
@@ -792,6 +799,8 @@ class TrayFeederEditor(QWidget):
         self._part_number.setText(str(feeder.get("manufacturer_part_number", "")))
         self._pick_x.setValue(float(pick.get("x", 0.0) or 0.0))
         self._pick_y.setValue(float(pick.get("y", 0.0) or 0.0))
+        self._base_x_prev = self._pick_x.value()
+        self._base_y_prev = self._pick_y.value()
         self._pick_h.setValue(float(feeder.get("pick_height", 0.0) or 0.0))
 
         self._step_x.setValue(float(type_data.get("x_step", 0.0) or 0.0))
@@ -814,6 +823,7 @@ class TrayFeederEditor(QWidget):
         self._last_y.setValue(float(last.get("y", self._pick_y.value()) or self._pick_y.value()))
         self._baseline_payload = self._build_payload()
         self._loading_values = False
+        self._status.setText("")
         self._set_enabled(bool(self._feeder_id))
         self._refresh_dirty_state()
 
@@ -844,6 +854,27 @@ class TrayFeederEditor(QWidget):
     def _on_fields_changed(self, *_args: Any) -> None:
         if self._loading_values:
             return
+        self._refresh_dirty_state()
+
+    def _on_base_pick_changed(self, *_args: Any) -> None:
+        if self._loading_values:
+            return
+        x = self._pick_x.value()
+        y = self._pick_y.value()
+        dx = x - self._base_x_prev
+        dy = y - self._base_y_prev
+        if abs(dx) < 1e-12 and abs(dy) < 1e-12:
+            return
+
+        self._loading_values = True
+        self._current_x.setValue(self._current_x.value() + dx)
+        self._current_y.setValue(self._current_y.value() + dy)
+        self._last_x.setValue(self._last_x.value() + dx)
+        self._last_y.setValue(self._last_y.value() + dy)
+        self._loading_values = False
+
+        self._base_x_prev = x
+        self._base_y_prev = y
         self._refresh_dirty_state()
 
     def _build_payload(self) -> dict[str, Any]:
@@ -919,6 +950,11 @@ class TrayFeederEditor(QWidget):
         self._pick_x.setValue(float(x))
         self._pick_y.setValue(float(y))
 
+    def show_status(self, text: str, ok: bool = True) -> None:
+        color = "#1f8a1f" if ok else "#bb2b2b"
+        self._status.setStyleSheet(f"color:{color};")
+        self._status.setText(text)
+
     def feeder_id(self) -> str:
         return self._feeder_id
 
@@ -950,6 +986,7 @@ class ControlWindow(QMainWindow):
         self._selected_feeder_id: str = ""
         self._current_x: float | None = None
         self._current_y: float | None = None
+        self._machine_status = QLabel("X=--  Y=--")
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -1164,6 +1201,10 @@ class ControlWindow(QMainWindow):
         pane_grid.addWidget(noz_group, 1, 1)
         outer.addLayout(pane_grid, 1)
 
+        status = self.statusBar()
+        status.setSizeGripEnabled(False)
+        status.addPermanentWidget(self._machine_status, 1)
+
         self._connect_btn.clicked.connect(self._apply_host)
 
         b_l.clicked.connect(lambda: self._jog_xy(-1.0, 0.0))
@@ -1231,6 +1272,7 @@ class ControlWindow(QMainWindow):
     def _handle_status(self, ok: bool, status: int, data: dict[str, Any]) -> None:
         if not ok:
             self._conn_state.setText("Disconnected")
+            self._machine_status.setText("Disconnected: coordinates unavailable")
             self._log_line(f"ERR {status}: status poll failed: {data.get('error', 'request_failed')}")
             return
 
@@ -1259,6 +1301,7 @@ class ControlWindow(QMainWindow):
 
         nozzles = data.get("nozzles", []) if isinstance(data.get("nozzles"), list) else []
         self._sync_nozzle_cards(nozzles)
+        self._update_machine_status_bar(positions, nozzles)
 
         feeders = data.get("feeders", []) if isinstance(data.get("feeders"), list) else []
         self._sync_feeders(feeders)
@@ -1422,7 +1465,7 @@ class ControlWindow(QMainWindow):
         if feeder_id:
             self._open_feeder_editor(feeder_id)
 
-    def _open_feeder_editor(self, feeder_id: str) -> None:
+    def _open_feeder_editor(self, feeder_id: str, force: bool = False) -> None:
         feeder = self._feeders_by_id.get(feeder_id)
         if feeder is None:
             return
@@ -1434,7 +1477,7 @@ class ControlWindow(QMainWindow):
 
         self._selected_feeder_id = feeder_id
         if feeder_type == "tray_feeder":
-            if self._tray_editor.is_dirty() and feeder_id == self._tray_editor.feeder_id():
+            if (not force) and self._tray_editor.is_dirty() and feeder_id == self._tray_editor.feeder_id():
                 return
             self._tray_editor.set_feeder(feeder)
 
@@ -1470,6 +1513,7 @@ class ControlWindow(QMainWindow):
     def _on_tray_saved(self, feeder_id: str, ok: bool, status: int, data: dict[str, Any]) -> None:
         if not ok:
             self._log_line(f"ERR {status}: feeder {feeder_id} save failed: {data.get('error', 'request_failed')}")
+            self._tray_editor.show_status(f"Save failed ({status}): {data.get('error', 'request_failed')}", ok=False)
             return
 
         feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
@@ -1477,27 +1521,66 @@ class ControlWindow(QMainWindow):
             fid = str(feeder.get("feeder_id", feeder_id)).upper()
             self._feeders_by_id[fid] = feeder
             self._selected_feeder_id = fid
+            self._tray_editor.set_feeder(feeder)
 
         if data.get("persisted", True):
             self._log_line(f"OK: feeder {feeder_id} saved")
+            self._tray_editor.show_status("Saved and persisted.", ok=True)
         else:
             self._log_line(f"WARN: feeder {feeder_id} updated but not persisted: {data.get('persist_error')}")
+            self._tray_editor.show_status("Updated in runtime, but persistence failed.", ok=False)
         self._poll_status()
 
     def _reset_feeder(self, feeder_id: str) -> None:
-        self._post_action(
+        self._api.post_json(
             f"/api/feeders/{feeder_id}/reset",
             None,
-            f"Reset feeder {feeder_id} picked count",
+            lambda ok, status, data, fid=feeder_id: self._on_feeder_reset(fid, ok, status, data),
         )
-        self._poll_status()
+        self._log_line(f"REQ: reset feeder {feeder_id}")
 
     def _advance_feeder_pick(self, feeder_id: str) -> None:
-        self._post_action(
+        self._api.post_json(
             f"/api/feeders/{feeder_id}/advance-pick",
             None,
-            f"Advance feeder {feeder_id} pick index",
+            lambda ok, status, data, fid=feeder_id: self._on_feeder_advanced(fid, ok, status, data),
         )
+        self._log_line(f"REQ: advance feeder {feeder_id} pick")
+
+    def _on_feeder_reset(self, feeder_id: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            err = data.get("error", "request_failed")
+            self._log_line(f"ERR {status}: reset feeder {feeder_id} failed: {err}")
+            self._tray_editor.show_status(f"Reset failed ({status}): {err}", ok=False)
+            return
+
+        feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
+        if feeder is not None:
+            fid = str(feeder.get("feeder_id", feeder_id)).upper()
+            self._feeders_by_id[fid] = feeder
+            self._selected_feeder_id = fid
+            self._open_feeder_editor(fid, force=True)
+
+        self._log_line(f"OK: feeder {feeder_id} reset")
+        self._tray_editor.show_status("Reset complete (picked count and indices set to zero).", ok=True)
+        self._poll_status()
+
+    def _on_feeder_advanced(self, feeder_id: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            err = data.get("error", "request_failed")
+            self._log_line(f"ERR {status}: advance feeder {feeder_id} failed: {err}")
+            self._tray_editor.show_status(f"Advance failed ({status}): {err}", ok=False)
+            return
+
+        feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
+        if feeder is not None:
+            fid = str(feeder.get("feeder_id", feeder_id)).upper()
+            self._feeders_by_id[fid] = feeder
+            self._selected_feeder_id = fid
+            self._open_feeder_editor(fid, force=True)
+
+        self._log_line(f"OK: feeder {feeder_id} advanced")
+        self._tray_editor.show_status("Advanced to next pick position.", ok=True)
         self._poll_status()
 
     def _set_tray_pick_from_camera(self, feeder_id: str) -> None:
@@ -1648,6 +1731,40 @@ class ControlWindow(QMainWindow):
             return f"{float(value):.3f}"
         except Exception:
             return "--"
+
+    def _update_machine_status_bar(self, positions: dict[str, Any], nozzles: list[dict[str, Any]]) -> None:
+        parts: list[str] = [
+            f"X={self._fmt(positions.get('X'))}",
+            f"Y={self._fmt(positions.get('Y'))}",
+        ]
+
+        indexed: list[tuple[int, dict[str, Any]]] = []
+        fallback: list[dict[str, Any]] = []
+        for nozzle in nozzles:
+            name = str(nozzle.get("name", "")).upper()
+            suffix = ""
+            for ch in reversed(name):
+                if ch.isdigit():
+                    suffix = ch + suffix
+                elif suffix:
+                    break
+            if suffix:
+                indexed.append((int(suffix), nozzle))
+            else:
+                fallback.append(nozzle)
+
+        indexed.sort(key=lambda t: t[0])
+        for idx, nozzle in indexed:
+            parts.append(f"Z{idx}={self._fmt(nozzle.get('z_position'))}")
+            parts.append(f"R{idx}={self._fmt(nozzle.get('r_position'))}")
+
+        next_idx = (indexed[-1][0] + 1) if indexed else 1
+        for nozzle in fallback:
+            parts.append(f"Z{next_idx}={self._fmt(nozzle.get('z_position'))}")
+            parts.append(f"R{next_idx}={self._fmt(nozzle.get('r_position'))}")
+            next_idx += 1
+
+        self._machine_status.setText("  |  ".join(parts))
 
 
 def run_qt_control(host: str, port: int) -> None:
