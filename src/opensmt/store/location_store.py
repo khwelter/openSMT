@@ -39,6 +39,12 @@ class LocationStore:
     def names(self) -> list[str]:
         return list(self._locations.keys())
 
+    def persist_path(self) -> str | None:
+        """Return persistence file path, if configured."""
+        if self._persist_path is None:
+            return None
+        return str(self._persist_path)
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
@@ -62,6 +68,7 @@ class LocationStore:
 
     def _persist(self) -> None:
         if self._persist_path:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
             self._persist_path.write_text(
                 json.dumps(self._locations, indent=2), encoding="utf-8"
             )

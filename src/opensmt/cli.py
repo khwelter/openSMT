@@ -25,6 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_monitor_gui.add_argument("--port", default=8765, type=int)
     p_monitor_gui.add_argument("--name", default="MONITOR_QT")
 
+    p_control_gui = sub.add_parser("control-gui", help="Start Qt control GUI (HTTP API)")
+    p_control_gui.add_argument("--host", default="127.0.0.1")
+    p_control_gui.add_argument("--port", default=8080, type=int)
+
     p_run = sub.add_parser("run", help="Run modules from configuration")
     p_run.add_argument("--config", required=True)
 
@@ -49,6 +53,12 @@ def main() -> None:
         from opensmt.monitor import run_qt_monitor
 
         run_qt_monitor(args.host, args.port, args.name)
+        return
+
+    if args.command == "control-gui":
+        from opensmt.monitor import run_qt_control
+
+        run_qt_control(args.host, args.port)
         return
 
     if args.command == "run":

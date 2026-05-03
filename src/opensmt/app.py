@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+from pathlib import Path
 from typing import Any
 
 from opensmt.config import load_config
@@ -11,6 +14,8 @@ from opensmt.store.location_store import LocationStore
 from opensmt.store.nozzle_config import NozzleConfig, NozzleConfigStore, ValveConfig
 from opensmt.store.position_store import PositionStore
 from opensmt.store.valve_store import ValveStore
+
+log = logging.getLogger(__name__)
 
 
 async def run_from_config(config_path: str) -> None:
@@ -46,12 +51,71 @@ async def run_from_config(config_path: str) -> None:
     # ------------------------------------------------------------------ #
     # Stores
     # ------------------------------------------------------------------ #
+    cfg_path = Path(config_path).expanduser().resolve()
+
+    # Optional override path in config; defaults to sidecar next to system.json.
+    # Persisted entries override in-file defaults at startup.
+    persist_path_raw = config.get("locations_persist_path")
+    if persist_path_raw is not None:
+        persist_path = Path(str(persist_path_raw)).expanduser()
+        if not persist_path.is_absolute():
+            persist_path = (cfg_path.parent / persist_path).resolve()
+    else:
+        persist_path = cfg_path.with_name(f"{cfg_path.stem}.locations.runtime.json")
+
+    merged_locations = dict(config.get("locations", {}))
+    if persist_path.is_file():
+        try:
+            persisted = json.loads(persist_path.read_text(encoding="utf-8"))
+            if isinstance(persisted, dict):
+                merged_locations.update(persisted)
+            else:
+                log.warning("Ignoring persisted locations at %s: root is not an object", persist_path)
+        except Exception as exc:
+            log.warning("Failed to load persisted locations from %s: %s", persist_path, exc)
+
     position_store = PositionStore()
-    location_store = LocationStore(config.get("locations", {}))
+    location_store = LocationStore(merged_locations, persist_path=str(persist_path))
+
+    camera_cfg_runtime: dict[str, Any] = dict(config.get("camera", {}))
+
+    # Optional override path in camera config; defaults to sidecar next to system.json.
+    offsets_persist_path_raw = camera_cfg_runtime.get("nozzle_offsets_persist_path")
+    if offsets_persist_path_raw is not None:
+        offsets_persist_path = Path(str(offsets_persist_path_raw)).expanduser()
+        if not offsets_persist_path.is_absolute():
+            offsets_persist_path = (cfg_path.parent / offsets_persist_path).resolve()
+    else:
+        offsets_persist_path = cfg_path.with_name(f"{cfg_path.stem}.nozzle_offsets.runtime.json")
+
+    camera_nozzles = list(camera_cfg_runtime.get("nozzles", []))
+
+    if offsets_persist_path.is_file():
+        try:
+            persisted_offsets = json.loads(offsets_persist_path.read_text(encoding="utf-8"))
+            if isinstance(persisted_offsets, dict):
+                for item in camera_nozzles:
+                    if not isinstance(item, dict):
+                        continue
+                    n_name = str(item.get("name", "")).upper()
+                    persisted = persisted_offsets.get(n_name)
+                    if not isinstance(persisted, dict):
+                        continue
+                    if "offset_x" in persisted:
+                        item["offset_x"] = float(persisted["offset_x"])
+                    if "offset_y" in persisted:
+                        item["offset_y"] = float(persisted["offset_y"])
+            else:
+                log.warning("Ignoring persisted nozzle offsets at %s: root is not an object", offsets_persist_path)
+        except Exception as exc:
+            log.warning("Failed to load persisted nozzle offsets from %s: %s", offsets_persist_path, exc)
+
+    camera_cfg_runtime["nozzles"] = camera_nozzles
+    camera_cfg_runtime["_nozzle_offsets_persist_path"] = str(offsets_persist_path)
 
     # Build NozzleConfigStore from camera config
     nozzle_configs: list[NozzleConfig] = []
-    for item in config.get("camera", {}).get("nozzles", []):
+    for item in camera_cfg_runtime.get("nozzles", []):
         vacuum_cfg_dict = item.get("vacuum_valve", {})
         vacuum_cfg = ValveConfig(
             board=str(vacuum_cfg_dict.get("board", "AB")),
@@ -98,7 +162,7 @@ async def run_from_config(config_path: str) -> None:
     # ------------------------------------------------------------------ #
     camera = CameraVisionModule(
         name="CAMERA",
-        config=config.get("camera", {}),
+        config=camera_cfg_runtime,
         driver=driver,
         position_store=position_store,
         location_store=location_store,

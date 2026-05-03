@@ -131,6 +131,8 @@ class CameraVisionModule:
         self._web_host = str(config.get("web_host", "0.0.0.0"))
         self._web_port = int(config.get("web_port", 8080))
         self._icons_dir = Path(__file__).resolve().parents[3] / "assets" / "icons" / "opensmt-ui" / "128"
+        offsets_persist_path_raw = config.get("_nozzle_offsets_persist_path")
+        self._nozzle_offsets_persist_path = Path(str(offsets_persist_path_raw)).expanduser() if offsets_persist_path_raw else None
 
         # Build nozzle runtime config table (limits only; current position lives in PositionStore)
         self._nozzles: dict[str, RuntimeNozzleConfig] = {}
@@ -443,10 +445,13 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/secondary-fiducial", self._api_coord_secondary_fiducial)
         app.router.add_post("/api/coord/nozzle-change", self._api_coord_nozzle_change)
         app.router.add_post("/api/coord/calibration-spot", self._api_coord_calibration_spot)
+        app.router.add_post("/api/coord/set-home-here", self._api_coord_set_home_here)
+        app.router.add_post("/api/coord/set-calibration-spot-here", self._api_coord_set_calibration_spot_here)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
         app.router.add_post("/api/nozzle/{name}/move-to-camera", self._api_nozzle_move_to_camera)
         app.router.add_post("/api/nozzle/{name}/move-to-bottom-camera", self._api_nozzle_move_to_bottom_camera)
         app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
+        app.router.add_post("/api/nozzle/{name}/calculate-offset-top", self._api_nozzle_calculate_offset_top)
         app.router.add_post("/api/nozzle/{name}/vacuum", self._api_nozzle_vacuum)
         app.router.add_post("/api/nozzle/{name}/air", self._api_nozzle_air)
         app.router.add_get("/api/status", self._api_status)
@@ -470,11 +475,11 @@ class CameraVisionModule:
             badge_txt = "Online" if state.cap is not None else "Offline"
             pipe_txt = state.active_pipeline or "—"
             cards += f"""
-            <div class="col-sm-6 col-xl-4">
+                        <div class="col-12 col-md-4 col-xl-3">
               <div class="card h-100 shadow-sm">
-                <div class="card-img-top overflow-hidden bg-dark text-center" style="height:180px">
+                                <div class="card-img-top overflow-hidden bg-dark text-center camera-thumb-wrap">
                   <img src="/stream/{cam_name}"
-                       class="h-100" style="object-fit:cover;width:100%"
+                                             class="camera-thumb"
                        onerror="this.style.opacity='0.2'" />
                 </div>
                 <div class="card-body d-flex flex-column">
@@ -500,19 +505,19 @@ class CameraVisionModule:
             </div>"""
 
         coord_card = """
-            <div class="col-sm-6 col-xl-4">
+            <div class="col-12 col-md-4 col-xl-3">
                 <div class="card shadow-sm h-100">
                     <div class="card-header fw-semibold">Current Coordinates</div>
                     <div class="card-body">
-                        <div class="row g-2 mb-2">
+                        <div class="row g-2 mb-1">
                             <div class="col-6">
-                                <div class="border rounded p-2 bg-light-subtle">
+                                <div class="border rounded p-1 bg-light-subtle">
                                     <div class="small text-muted">X</div>
                                     <div class="fw-semibold" id="coord-x">--</div>
                                 </div>
                             </div>
                             <div class="col-6">
-                                <div class="border rounded p-2 bg-light-subtle">
+                                <div class="border rounded p-1 bg-light-subtle">
                                     <div class="small text-muted">Y</div>
                                     <div class="fw-semibold" id="coord-y">--</div>
                                 </div>
@@ -521,29 +526,38 @@ class CameraVisionModule:
 
                         <div class="row g-2">
                             <div class="col-6">
-                                <div class="border rounded p-2">
+                                <div class="border rounded p-1">
                                     <div class="small text-muted">Z1 / R1</div>
                                     <div class="fw-semibold"><span id="coord-z1">--</span> / <span id="coord-r1">--</span></div>
                                 </div>
                             </div>
                             <div class="col-6">
-                                <div class="border rounded p-2">
+                                <div class="border rounded p-1">
                                     <div class="small text-muted">Z2 / R2</div>
                                     <div class="fw-semibold"><span id="coord-z2">--</span> / <span id="coord-r2">--</span></div>
                                 </div>
                             </div>
                             <div class="col-6">
-                                <div class="border rounded p-2">
+                                <div class="border rounded p-1">
                                     <div class="small text-muted">Z3 / R3</div>
                                     <div class="fw-semibold"><span id="coord-z3">--</span> / <span id="coord-r3">--</span></div>
                                 </div>
                             </div>
                             <div class="col-6">
-                                <div class="border rounded p-2">
+                                <div class="border rounded p-1">
                                     <div class="small text-muted">Z4 / R4</div>
                                     <div class="fw-semibold"><span id="coord-z4">--</span> / <span id="coord-r4">--</span></div>
                                 </div>
                             </div>
+                        </div>
+
+                        <div class="d-grid gap-1 mt-2" style="grid-template-columns: 1fr 1fr;">
+                            <button class="btn btn-sm btn-outline-secondary" onclick="setHomeHere()" title="Set current XY as the new home/park location">
+                                Set Home Here
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="setCalibrationSpotHere()" title="Set current XY as calibration spot">
+                                Set Cal Here
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -552,15 +566,15 @@ class CameraVisionModule:
         nozzle_controls = ""
         for nozzle in self._nozzles:
             nozzle_controls += f"""
-            <div class="col-12 col-sm-6 col-lg-4">
-                <div class="border rounded p-2 h-100 bg-light-subtle">
-                    <div class="fw-semibold mb-2 d-flex justify-content-between align-items-center">
+            <div class="col-12 col-sm-6 col-lg-3">
+                <div class="border rounded p-1 h-100 bg-light-subtle nozzle-card">
+                    <div class="fw-semibold mb-1 d-flex justify-content-between align-items-center">
                         <span>{nozzle}</span>
                         <span class="badge bg-secondary small" id="nozzle-status-{nozzle}">--</span>
                     </div>
                     
                     <!-- Position Display -->
-                    <div class="small mb-2 border-bottom pb-1">
+                    <div class="small mb-1 border-bottom pb-1">
                         <div class="text-muted">Position (offset from camera):</div>
                         <div class="font-monospace small">
                             X: <span id="nozzle-pos-x-{nozzle}">--</span> mm
@@ -569,7 +583,7 @@ class CameraVisionModule:
                     </div>
                     
                     <!-- Valve Controls -->
-                    <div class="small mb-2 border-bottom pb-1">
+                    <div class="small mb-1 border-bottom pb-1">
                         <div class="text-muted mb-1">Valves:</div>
                         <div class="d-flex gap-1">
                             <button class="btn btn-sm btn-outline-info flex-grow-1" id="vacuum-btn-{nozzle}" onclick="toggleNozzleVacuum('{nozzle}')">
@@ -607,12 +621,15 @@ class CameraVisionModule:
                     </div>
                     
                     <!-- Nozzle Sync Buttons -->
-                    <div class="d-grid gap-1 mt-2" style="grid-template-columns: 1fr 1fr;">
+                    <div class="d-grid gap-1 mt-1 nozzle-sync" style="grid-template-columns: 1fr 1fr;">
                         <button class="btn btn-sm btn-outline-success" onclick="moveNozzleToCamera('{nozzle}')" title="Align nozzle to camera position">
                             ↓ Align to Cam
                         </button>
                         <button class="btn btn-sm btn-outline-success" onclick="moveCameraToNozzle('{nozzle}')" title="Align camera to nozzle position">
                             ↑ Cam to Nozzle
+                        </button>
+                        <button class="btn btn-sm btn-outline-warning" style="grid-column: 1 / span 2;" onclick="calculateNozzleOffsetTop('{nozzle}')" title="Click when this nozzle is centered above Homing Fiducial Main">
+                            Cal Offset @ Fiducial
                         </button>
                         <button class="btn btn-sm btn-outline-primary" style="grid-column: 1 / span 2;" onclick="moveNozzleToBottomCamera('{nozzle}')" title="Move nozzle above configured BOTTOM camera position">
                             ◎ Above Bottom Cam
@@ -630,15 +647,98 @@ class CameraVisionModule:
   <title>openSMT Vision</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
     <style>
+        /* ── density variables ─────────────────────────────── */
+        :root {{
+            --icon-btn-size: 32px;
+            --icon-btn-pad:  3px;
+            --icon-grid-col: 40px;
+        }}
+        /* compact */
+        .compact-dashboard {{
+            --bs-body-font-size: 0.86rem;
+        }}
+        .compact-dashboard .container {{
+            max-width: 1680px;
+        }}
+        .compact-dashboard .card-header {{
+            padding: 0.3rem 0.5rem;
+            font-size: 0.84rem;
+        }}
+        .compact-dashboard .card-body {{
+            padding: 0.4rem;
+        }}
+        .compact-dashboard .btn-sm {{
+            --bs-btn-padding-y: 0.08rem;
+            --bs-btn-padding-x: 0.35rem;
+            --bs-btn-font-size: 0.7rem;
+        }}
+        .compact-dashboard .row.g-2 {{
+            --bs-gutter-x: 0.3rem;
+            --bs-gutter-y: 0.3rem;
+        }}
+        .compact-dashboard .form-label {{
+            margin-bottom: 0.15rem;
+            font-size: 0.75rem;
+        }}
+        /* ultra-compact — overrides compact */
+        .ultra-compact .card-header {{
+            padding: 0.15rem 0.35rem;
+            font-size: 0.76rem;
+        }}
+        .ultra-compact .card-body {{
+            padding: 0.25rem;
+        }}
+        .ultra-compact .btn-sm {{
+            --bs-btn-padding-y: 0.06rem;
+            --bs-btn-padding-x: 0.24rem;
+            --bs-btn-font-size: 0.66rem;
+        }}
+        .ultra-compact .row.g-2, .ultra-compact .row.g-1 {{
+            --bs-gutter-x: 0.2rem;
+            --bs-gutter-y: 0.2rem;
+        }}
+        .ultra-compact .small {{ font-size: 0.72em; }}
+        .ultra-compact {{ --bs-body-font-size: 0.78rem; }}
+        .ultra-compact h4 {{ font-size: 0.92rem; margin-bottom: 0.15rem !important; }}
+        .ultra-compact .container {{ padding-top: 0.2rem !important; padding-bottom: 0.2rem !important; }}
+        .ultra-compact {{
+            --icon-btn-size: 26px;
+            --icon-btn-pad:  2px;
+            --icon-grid-col: 32px;
+        }}
+        .camera-thumb-wrap {{
+            aspect-ratio: 4 / 3;
+            min-height: 120px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .camera-thumb {{
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }}
+        /* shared nozzle helpers */
+        .nozzle-card .font-monospace {{
+            line-height: 1.2;
+        }}
+        .nozzle-card {{
+            padding: 0.2rem !important;
+        }}
+        .nozzle-sync .btn {{
+            white-space: nowrap;
+            line-height: 1.1;
+        }}
+        /* icon buttons — size driven by CSS vars */
         .btn-icon {{
-            width: 28px;
-            height: 28px;
+            width: var(--icon-btn-size);
+            height: var(--icon-btn-size);
             object-fit: contain;
             display: inline-block;
             vertical-align: middle;
             background: #e9ecef;
             border-radius: 5px;
-            padding: 3px;
+            padding: var(--icon-btn-pad);
         }}
         .icon-btn {{
             border: 0;
@@ -654,22 +754,23 @@ class CameraVisionModule:
         }}
     </style>
 </head>
-<body class="bg-light">
-  <nav class="navbar navbar-dark bg-dark shadow-sm">
+<body class="bg-light compact-dashboard ultra-compact" id="app-body">
+  <nav class="navbar navbar-dark bg-dark shadow-sm py-1">
     <div class="container-fluid">
       <span class="navbar-brand fw-bold">&#128247; openSMT Vision</span>
+    <button class="btn btn-outline-light btn-sm ms-auto" id="density-btn" onclick="toggleDensity()" title="Toggle ultra-compact mode">&#9638; Normal</button>
     </div>
   </nav>
-  <div class="container py-4">
-    <h4 class="mb-3 text-secondary">Camera Dashboard</h4>
-        <div class="row g-4">{cards}{coord_card}</div>
+    <div class="container py-1">
+        <h4 class="mb-1 text-secondary">Camera Dashboard</h4>
+                <div class="row g-1">{cards}{coord_card}</div>
 
-        <div class="row g-4 mt-1">
+                <div class="row g-1 mt-1">
             <div class="col-12 col-xl-6">
                 <div class="card shadow-sm">
                     <div class="card-header fw-semibold">XY Positioning</div>
                     <div class="card-body">
-                        <div class="mb-3">
+                                                <div class="mb-2">
                             <label for="step-range" class="form-label small text-muted mb-1">Step Size (mm)</label>
                             <input type="range" class="form-range" min="0" max="8" step="1" id="step-range" value="3" oninput="updateStepLabel()">
                             <div class="d-flex justify-content-between small text-muted">
@@ -678,7 +779,7 @@ class CameraVisionModule:
                             <div class="small mt-2">Selected: <span class="badge bg-primary" id="step-label">1.0 mm</span></div>
                         </div>
 
-                        <div class="mb-2 d-flex justify-content-center gap-2">
+                        <div class="mb-1 d-flex justify-content-center gap-1">
                             <button class="icon-btn" onclick="goHome()" title="Home All">
                                 <img src="/assets/icons/home_all.png" alt="" class="btn-icon"><span class="visually-hidden">Home All</span>
                             </button>
@@ -690,7 +791,7 @@ class CameraVisionModule:
                             </button>
                         </div>
 
-                        <div class="d-grid gap-2 justify-content-center" style="grid-template-columns: 64px 64px 64px;">
+                        <div class="d-grid gap-1 justify-content-center" style="grid-template-columns: var(--icon-grid-col) var(--icon-grid-col) var(--icon-grid-col);">
                             <button class="icon-btn" onclick="goHomingFiducialMain()" title="Homing Fiducial Main">
                                 <img src="/assets/icons/fiducial_main.png" alt="" class="btn-icon"><span class="visually-hidden">Homing Fiducial Main</span>
                             </button>
@@ -722,7 +823,7 @@ class CameraVisionModule:
                             </button>
                         </div>
 
-                        <div class="d-flex align-items-center justify-content-between mt-3">
+                        <div class="d-flex align-items-center justify-content-between mt-1">
                             <div class="small text-muted" id="coord-status">Ready</div>
                             <button class="btn btn-outline-danger btn-sm" onclick="cancelCoordJob()">Stop</button>
                         </div>
@@ -733,7 +834,7 @@ class CameraVisionModule:
                 <div class="card shadow-sm">
                     <div class="card-header fw-semibold">Head Nozzles</div>
                     <div class="card-body">
-                        <div class="mb-3">
+                        <div class="mb-2">
                             <label for="nozzle-step-range" class="form-label small text-muted mb-1">Nozzle Step Size (Z mm / Rotation deg)</label>
                             <input type="range" class="form-range" min="0" max="4" step="1" id="nozzle-step-range" value="2" oninput="updateNozzleStepLabel()">
                             <div class="d-flex justify-content-between small text-muted">
@@ -742,8 +843,8 @@ class CameraVisionModule:
                             <div class="small mt-2">Selected: <span class="badge bg-primary" id="nozzle-step-label">1.0 mm</span></div>
                         </div>
 
-                        <div class="row g-2">{nozzle_controls}</div>
-                        <div class="d-flex align-items-center justify-content-between mt-3">
+                        <div class="row g-1">{nozzle_controls}</div>
+                        <div class="d-flex align-items-center justify-content-between mt-1">
                             <div class="small text-muted" id="head-status">Ready</div>
                             <button class="btn btn-outline-danger btn-sm" onclick="cancelHeadJob()">Stop</button>
                         </div>
@@ -826,7 +927,7 @@ class CameraVisionModule:
             var cls = 'text-muted';
             if (level === 'error') cls = 'text-danger';
             if (level === 'warning') cls = 'text-warning';
-            el.className = 'small mt-3 ' + cls;
+            el.className = 'small mt-1 ' + cls;
         }}
 
         function setHeadStatus(text, level) {{
@@ -835,7 +936,7 @@ class CameraVisionModule:
             var cls = 'text-muted';
             if (level === 'error') cls = 'text-danger';
             if (level === 'warning') cls = 'text-warning';
-            el.className = 'small mt-3 ' + cls;
+            el.className = 'small mt-1 ' + cls;
         }}
 
         function postJson(url, bodyObj) {{
@@ -1048,6 +1149,36 @@ class CameraVisionModule:
             submitTrackedCommand('/api/coord/calibration-spot', undefined, setCoordStatus, 'Moving to Calibration Spot...', function() {{ return 'Reached Calibration Spot'; }}, 'Calibration Spot failed');
         }}
 
+        function setHomeHere() {{
+            postJson('/api/coord/set-home-here')
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{
+                        setCoordStatus('Set Home failed: ' + (d.error || ('HTTP ' + res.status)), 'error');
+                        return;
+                    }}
+                    var msg = 'Home/Park set to X=' + Number(d.x).toFixed(2) + ', Y=' + Number(d.y).toFixed(2);
+                    if (d.persist_path) msg += ' (saved)';
+                    setCoordStatus(msg, 'info');
+                }})
+                .catch(function(e) {{ setCoordStatus('Set Home failed: ' + e.message, 'error'); }});
+        }}
+
+        function setCalibrationSpotHere() {{
+            postJson('/api/coord/set-calibration-spot-here')
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{
+                        setCoordStatus('Set Cal failed: ' + (d.error || ('HTTP ' + res.status)), 'error');
+                        return;
+                    }}
+                    var msg = 'Calibration spot set to X=' + Number(d.x).toFixed(2) + ', Y=' + Number(d.y).toFixed(2);
+                    if (d.persist_path) msg += ' (saved)';
+                    setCoordStatus(msg, 'info');
+                }})
+                .catch(function(e) {{ setCoordStatus('Set Cal failed: ' + e.message, 'error'); }});
+        }}
+
         // ===================================================================
         // NOZZLE CONTROL FUNCTIONS
         // ===================================================================
@@ -1083,6 +1214,28 @@ class CameraVisionModule:
                 function(d) {{ return 'Camera aligned to ' + nozzle + ' position'; }},
                 'Camera alignment failed'
             );
+        }}
+
+        function calculateNozzleOffsetTop(nozzle) {{
+            postJson('/api/nozzle/' + encodeURIComponent(nozzle) + '/calculate-offset-top')
+                .then(function(res) {{
+                    var d = res.data || {{}};
+                    if (!res.ok || d.error) {{
+                        setHeadStatus('Offset calibration failed for ' + nozzle + ': ' + (d.error || ('HTTP ' + res.status)), 'error');
+                        return;
+                    }}
+                    var msg = nozzle + ' offset set to X=' + Number(d.new_offset_x).toFixed(3) + ' mm, Y=' + Number(d.new_offset_y).toFixed(3) + ' mm';
+                    if (d.persisted === false) {{
+                        msg += ' (runtime only';
+                        if (d.persist_error) msg += ': ' + String(d.persist_error);
+                        msg += ')';
+                    }}
+                    setHeadStatus(msg, 'info');
+                    refreshNozzleStatus();
+                }})
+                .catch(function(e) {{
+                    setHeadStatus('Offset calibration failed for ' + nozzle + ': ' + e.message, 'error');
+                }});
         }}
 
         function toggleNozzleVacuum(nozzle) {{
@@ -1199,6 +1352,22 @@ class CameraVisionModule:
                 }})
                 .catch(function(e) {{ console.error('Failed to refresh nozzle status:', e); }});
         }}
+
+        function toggleDensity() {{
+            var body = document.getElementById('app-body');
+            var btn  = document.getElementById('density-btn');
+            var ultra = body.classList.toggle('ultra-compact');
+            btn.textContent = ultra ? '\u25a3 Normal' : '\u25a3 Ultra';
+            try {{ localStorage.setItem('smt-density', ultra ? 'ultra' : 'compact'); }} catch(e) {{}}
+        }}
+        (function() {{
+            try {{
+                if (localStorage.getItem('smt-density') === 'ultra') {{
+                    document.getElementById('app-body').classList.add('ultra-compact');
+                    document.getElementById('density-btn').textContent = '\u25a3 Normal';
+                }}
+            }} catch(e) {{}}
+        }})();
 
         updateStepLabel();
         updateNozzleStepLabel();
@@ -1790,6 +1959,37 @@ class CameraVisionModule:
         job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:calibration_spot", lambda: self._driver.move_to_location("calibration_spot"))
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
+    async def _api_coord_set_home_here(self, request: web.Request) -> web.Response:
+        x = self._position_store.get("X")
+        y = self._position_store.get("Y")
+        if x is None or y is None:
+            return web.json_response({"error": "xy_position_unknown", "message": "Home XY first"}, status=409)
+
+        # "Home location" in dashboard context maps to the Park preset location.
+        self._location_store.set("park", {"X": x, "Y": y})
+        return web.json_response({
+            "status": "ok",
+            "location": "park",
+            "x": x,
+            "y": y,
+            "persist_path": self._location_store.persist_path(),
+        })
+
+    async def _api_coord_set_calibration_spot_here(self, request: web.Request) -> web.Response:
+        x = self._position_store.get("X")
+        y = self._position_store.get("Y")
+        if x is None or y is None:
+            return web.json_response({"error": "xy_position_unknown", "message": "Home XY first"}, status=409)
+
+        self._location_store.set("calibration_spot", {"X": x, "Y": y})
+        return web.json_response({
+            "status": "ok",
+            "location": "calibration_spot",
+            "x": x,
+            "y": y,
+            "persist_path": self._location_store.persist_path(),
+        })
+
     async def _api_coord_positions(self, request: web.Request) -> web.Response:
         return web.json_response(self._position_store.all())
 
@@ -1842,7 +2042,7 @@ class CameraVisionModule:
         return web.json_response({"domain": domain, "result": "no_active_job"})
 
     # =========================================================================
-    # NOZZLE CONTROL (move-to-camera, valve control)
+    # NOZZLE CONTROL (move-to-camera, offset calibration, valve control)
     # =========================================================================
 
     def _get_bottom_camera_xy(self) -> tuple[float, float] | None:
@@ -1857,6 +2057,35 @@ class CameraVisionModule:
                 return float(x), float(y)
             except (TypeError, ValueError):
                 return None
+        return None
+
+    def _persist_nozzle_offsets(self) -> str | None:
+        """Persist current nozzle offsets to runtime sidecar file.
+
+        Returns None on success, or an error message.
+        """
+        if self._nozzle_offsets_persist_path is None or self._nozzle_config_store is None:
+            return "persistence_not_configured"
+
+        payload: dict[str, dict[str, float]] = {}
+        for nozzle_name in self._nozzle_config_store.names():
+            cfg = self._nozzle_config_store.get(nozzle_name)
+            if cfg is None:
+                continue
+            payload[nozzle_name.upper()] = {
+                "offset_x": float(cfg.offset_x),
+                "offset_y": float(cfg.offset_y),
+            }
+
+        try:
+            self._nozzle_offsets_persist_path.parent.mkdir(parents=True, exist_ok=True)
+            self._nozzle_offsets_persist_path.write_text(
+                json.dumps(payload, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            return str(exc)
+
         return None
 
     async def _api_nozzle_move_to_camera(self, request: web.Request) -> web.Response:
@@ -2012,6 +2241,89 @@ class CameraVisionModule:
             "camera_target": {"x": nozzle_x, "y": nozzle_y},
         })
 
+    async def _api_nozzle_calculate_offset_top(self, request: web.Request) -> web.Response:
+        """Calculate nozzle XY offset relative to TOP camera from fiducial alignment.
+
+        Workflow expectation:
+        1) Move to Homing Fiducial Main location.
+        2) Jog XY until nozzle tip is exactly centered over that fiducial.
+        3) Call this endpoint for the specific nozzle.
+
+        Since nozzle absolute XY equals fiducial XY in this pose:
+            nozzle = camera + offset
+            offset = fiducial - camera
+
+        Path: POST /api/nozzle/{name}/calculate-offset-top
+        """
+        raw_name = request.match_info.get("name", "")
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        nozzle_name = raw_name.upper()
+
+        if not self._nozzle_config_store:
+            return web.json_response({"error": "nozzle_config_not_available"}, status=500)
+
+        nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
+        if not nozzle_cfg:
+            return web.json_response({"error": "unknown_nozzle"}, status=400)
+
+        cam_x = self._position_store.get("X")
+        cam_y = self._position_store.get("Y")
+        if cam_x is None or cam_y is None:
+            return web.json_response(
+                {"error": "camera_position_unknown", "message": "Home XY first"},
+                status=409,
+            )
+
+        fiducial = self._location_store.get("fiducial_main")
+        if not fiducial:
+            return web.json_response(
+                {
+                    "error": "fiducial_main_not_configured",
+                    "message": "Configure locations.fiducial_main with X and Y",
+                },
+                status=409,
+            )
+
+        fid_x = fiducial.get("X")
+        fid_y = fiducial.get("Y")
+        if fid_x is None or fid_y is None:
+            return web.json_response(
+                {
+                    "error": "fiducial_main_xy_missing",
+                    "message": "locations.fiducial_main must include X and Y",
+                },
+                status=409,
+            )
+
+        old_offset_x = nozzle_cfg.offset_x
+        old_offset_y = nozzle_cfg.offset_y
+
+        new_offset_x = float(fid_x) - float(cam_x)
+        new_offset_y = float(fid_y) - float(cam_y)
+
+        nozzle_cfg.offset_x = new_offset_x
+        nozzle_cfg.offset_y = new_offset_y
+
+        persist_error = self._persist_nozzle_offsets()
+        persisted = persist_error is None
+
+        return web.json_response({
+            "status": "ok",
+            "nozzle": nozzle_name,
+            "camera_position": {"x": cam_x, "y": cam_y},
+            "fiducial_main": {"x": fid_x, "y": fid_y},
+            "old_offset_x": old_offset_x,
+            "old_offset_y": old_offset_y,
+            "new_offset_x": new_offset_x,
+            "new_offset_y": new_offset_y,
+            "persisted": persisted,
+            "persist_path": str(self._nozzle_offsets_persist_path) if self._nozzle_offsets_persist_path else None,
+            "persist_error": persist_error,
+            "message": "Offsets updated and persisted" if persisted else "Offsets updated in runtime memory only",
+        })
+
     async def _api_nozzle_vacuum(self, request: web.Request) -> web.Response:
         """Control vacuum valve on a nozzle.
         
@@ -2121,27 +2433,29 @@ class CameraVisionModule:
         nozzle_data = []
 
         if self._nozzle_config_store and self._valve_store:
-            cam_x = positions.get("X", 0.0)
-            cam_y = positions.get("Y", 0.0)
+            cam_x = positions.get("X")
+            cam_y = positions.get("Y")
+            cam_x_f = cam_x if cam_x is not None else 0.0
+            cam_y_f = cam_y if cam_y is not None else 0.0
 
             for nozzle_name in self._nozzle_config_store.names():
                 nozzle_cfg = self._nozzle_config_store.get(nozzle_name)
                 valve_state = self._valve_store.get(nozzle_name)
 
                 z_pos = positions.get(nozzle_cfg.z_axis)
-                
+
                 # Derive r_axis from z_axis (same logic as RuntimeNozzleConfig)
                 z_axis = nozzle_cfg.z_axis
                 if z_axis.startswith("Z") and len(z_axis) > 1:
                     r_axis = f"R{z_axis[1:]}"
                 else:
                     r_axis = "R1"
-                
+
                 r_pos = positions.get(r_axis)
 
-                # Calculate nozzle absolute position
-                nozzle_abs_x = cam_x + nozzle_cfg.offset_x
-                nozzle_abs_y = cam_y + nozzle_cfg.offset_y
+                # Calculate nozzle absolute position (None when machine not yet homed)
+                nozzle_abs_x = (cam_x_f + nozzle_cfg.offset_x) if cam_x is not None else None
+                nozzle_abs_y = (cam_y_f + nozzle_cfg.offset_y) if cam_y is not None else None
 
                 nozzle_data.append({
                     "name": nozzle_name,

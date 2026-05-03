@@ -10,4 +10,10 @@ def run_qt_monitor(*args, **kwargs):
 	return _run_qt_monitor(*args, **kwargs)
 
 
-__all__ = ["run_terminal_monitor", "run_qt_monitor"]
+def run_qt_control(*args, **kwargs):
+	from .qt_control import run_qt_control as _run_qt_control
+
+	return _run_qt_control(*args, **kwargs)
+
+
+__all__ = ["run_terminal_monitor", "run_qt_monitor", "run_qt_control"]
