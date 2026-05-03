@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,16 +19,17 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QSpinBox,
@@ -348,7 +349,8 @@ class CameraPreviewWidget(QWidget):
         self._drag_start = QPointF()
         self._drag_end = QPointF()
         self._drag_active = False
-        self.setMinimumSize(150, 95)
+        self.setMinimumSize(360, 270)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
 
     def set_zoom(self, value: float) -> None:
@@ -455,6 +457,7 @@ class CameraPreviewWidget(QWidget):
 
 class CameraTile(QFrame):
     vector_move_requested = Signal(str, float, float)
+    camera_selected = Signal(str)
 
     def __init__(self, camera_name: str) -> None:
         super().__init__()
@@ -462,48 +465,102 @@ class CameraTile(QFrame):
         self._resolution_dpcm_x = 0.0
         self._resolution_dpcm_y = 0.0
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(3)
-
-        cam_pm = _make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
 
         self._preview = CameraPreviewWidget()
         self._preview.setStyleSheet("background:#070b14; border:1px solid #2a3d66;")
         self._preview.vector_drawn.connect(self._on_vector_drawn)
+        self._preview.setMinimumHeight(300)
 
-        hdr = QHBoxLayout()
-        self._icon = QLabel()
-        self._icon.setPixmap(cam_pm)
+        self._camera_menu_btn = QToolButton(self._preview)
+        self._camera_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._camera_menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._camera_menu_btn.setAutoRaise(True)
+        self._camera_menu_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        self._camera_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._camera_menu_btn.setStyleSheet(
+            "QToolButton {"
+            "background: rgba(7, 11, 20, 185);"
+            "color: #d9e8ff;"
+            "border: 1px solid #2a3d66;"
+            "border-radius: 4px;"
+            "padding: 4px 8px;"
+            "}"
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+        )
+        self._camera_menu = QMenu(self._camera_menu_btn)
+        self._camera_actions: dict[str, QAction] = {}
+        self._camera_menu_btn.setMenu(self._camera_menu)
+        self._camera_menu_btn.raise_()
+
+        footer = QHBoxLayout()
+        footer.setSpacing(4)
         self._name = QLabel(camera_name)
         self._state = QLabel("offline")
-
-        hdr.addWidget(self._icon)
-        hdr.addWidget(self._name)
-        hdr.addStretch(1)
-        hdr.addWidget(self._state)
+        self._name.setStyleSheet("font-weight: 600;")
 
         controls = QHBoxLayout()
         controls.setSpacing(4)
         controls.addWidget(QLabel("Zoom"))
         self._zoom = QComboBox()
+        self._zoom.setMaximumWidth(92)
         for z in (1.0, 1.5, 2.0, 3.0, 4.0):
             self._zoom.addItem(f"{z:g}x", z)
         self._zoom.setCurrentIndex(0)
         self._zoom.currentIndexChanged.connect(self._on_zoom_changed)
         controls.addWidget(self._zoom)
-        controls.addStretch(1)
+        footer.addWidget(self._name)
+        footer.addStretch(1)
+        footer.addWidget(self._state)
+        footer.addSpacing(8)
+        footer.addLayout(controls)
 
-        layout.addWidget(self._preview)
-        layout.addLayout(controls)
-        layout.addLayout(hdr)
+        layout.addWidget(self._preview, 1)
+        layout.addLayout(footer)
 
     def apply_status(self, online: bool) -> None:
         self._state.setText("online" if online else "offline")
         self._state.setStyleSheet(
             "color: #1f8a1f;" if online else "color: #bb2b2b;"
         )
+
+    def sync_camera_choices(self, ordered: list[str], status_by_name: dict[str, bool], active_name: str) -> None:
+        known = set(self._camera_actions.keys())
+        desired = set(ordered)
+
+        for name in known - desired:
+            action = self._camera_actions.pop(name)
+            self._camera_menu.removeAction(action)
+            action.deleteLater()
+
+        for name in ordered:
+            action = self._camera_actions.get(name)
+            if action is None:
+                action = self._camera_menu.addAction("")
+                action.triggered.connect(lambda _checked=False, cam=name: self.camera_selected.emit(cam))
+                self._camera_actions[name] = action
+
+            state = "online" if status_by_name.get(name, False) else "offline"
+            action.setText(f"{name} ({state})")
+            action.setCheckable(True)
+            action.setChecked(name == active_name)
+
+        self._camera_menu_btn.setText(active_name or self.camera_name)
+        self._position_camera_menu_button()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._position_camera_menu_button()
+
+    def _position_camera_menu_button(self) -> None:
+        self._camera_menu_btn.adjustSize()
+        margin = 8
+        x = max(margin, self._preview.width() - self._camera_menu_btn.width() - margin)
+        self._camera_menu_btn.move(x, margin)
 
     def apply_frame(self, raw: bytes) -> None:
         pm = QPixmap()
@@ -1216,6 +1273,7 @@ class ControlWindow(QMainWindow):
 
         self._camera_tiles: dict[str, CameraTile] = {}
         self._camera_order: list[str] = []
+        self._camera_status_by_name: dict[str, bool] = {}
         self._active_camera_name: str = ""
         self._shown_camera_name: str = ""
         self._camera_placeholder: QLabel | None = None
@@ -1230,7 +1288,7 @@ class ControlWindow(QMainWindow):
         self._current_y: float | None = None
         self._machine_status = QLabel("X=--  Y=--")
         self._top_left_ratio_min = 0.2
-        self._top_left_ratio_max = 0.4
+        self._top_left_ratio_max = 0.65
         self._bottom_left_ratio_min = 0.2
         self._bottom_left_ratio_max = 0.5
         self._splitter_clamp_active: set[int] = set()
@@ -1271,19 +1329,12 @@ class ControlWindow(QMainWindow):
 
         cam_group = QGroupBox("Cameras")
         cam_group_layout = QVBoxLayout(cam_group)
-        cam_group_layout.setContentsMargins(4, 4, 4, 4)
+        cam_group_layout.setContentsMargins(2, 2, 2, 2)
         self._camera_host = QWidget()
         self._camera_host_layout = QVBoxLayout(self._camera_host)
-        self._camera_host_layout.setContentsMargins(2, 2, 2, 2)
+        self._camera_host_layout.setContentsMargins(0, 0, 0, 0)
         self._camera_host_layout.setSpacing(0)
         cam_group_layout.addWidget(self._camera_host, 1)
-
-        cam_group_layout.addWidget(QLabel("Available cameras"))
-        self._camera_selector = QListWidget()
-        self._camera_selector.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self._camera_selector.setMaximumHeight(96)
-        self._camera_selector.currentItemChanged.connect(self._on_camera_selected)
-        cam_group_layout.addWidget(self._camera_selector)
 
         gp_group = QGroupBox("General Purpose")
         gp_layout = QVBoxLayout(gp_group)
@@ -1505,7 +1556,7 @@ class ControlWindow(QMainWindow):
         self._poll_status()
 
     def _init_splitters(self) -> None:
-        self._set_splitter_ratio(self._top_splitter, 0.2)
+        self._set_splitter_ratio(self._top_splitter, 0.45)
         self._set_splitter_ratio(self._bottom_splitter, 0.2)
         self._top_splitter.splitterMoved.connect(lambda _pos, _index: self._clamp_splitter(self._top_splitter))
         self._bottom_splitter.splitterMoved.connect(lambda _pos, _index: self._clamp_splitter(self._bottom_splitter))
@@ -1661,6 +1712,7 @@ class ControlWindow(QMainWindow):
             if tile is None:
                 tile = CameraTile(name)
                 tile.vector_move_requested.connect(self._on_camera_vector_move)
+                tile.camera_selected.connect(self._on_camera_selected)
                 self._camera_tiles[name] = tile
 
             tile.apply_status(bool(camera.get("online", False)))
@@ -1676,16 +1728,17 @@ class ControlWindow(QMainWindow):
         if not self._camera_tiles:
             self._camera_order = []
             self._active_camera_name = ""
-            self._refresh_camera_selector([], {})
             self._show_selected_camera()
             return
 
         ordered = sorted(self._camera_tiles.keys())
         self._camera_order = ordered
+        self._camera_status_by_name = status_by_name
         if self._active_camera_name not in self._camera_tiles:
             self._active_camera_name = ordered[0]
 
-        self._refresh_camera_selector(ordered, status_by_name)
+        for tile in self._camera_tiles.values():
+            tile.sync_camera_choices(ordered, status_by_name, self._active_camera_name)
         self._show_selected_camera()
 
     def _refresh_camera_thumbs(self) -> None:
@@ -1714,34 +1767,6 @@ class ControlWindow(QMainWindow):
 
         reply.finished.connect(_finish)
 
-    def _refresh_camera_selector(self, ordered: list[str], status_by_name: dict[str, bool]) -> None:
-        self._camera_selector.blockSignals(True)
-        try:
-            while self._camera_selector.count() > len(ordered):
-                item = self._camera_selector.takeItem(self._camera_selector.count() - 1)
-                del item
-
-            while self._camera_selector.count() < len(ordered):
-                self._camera_selector.addItem("")
-
-            selected_row = -1
-            for row, name in enumerate(ordered):
-                state = "online" if status_by_name.get(name, False) else "offline"
-                item = self._camera_selector.item(row)
-                if item is None:
-                    continue
-                item.setText(f"{name} ({state})")
-                item.setData(Qt.ItemDataRole.UserRole, name)
-                if name == self._active_camera_name:
-                    selected_row = row
-
-            if selected_row >= 0:
-                self._camera_selector.setCurrentRow(selected_row)
-            elif self._camera_selector.count() > 0:
-                self._camera_selector.setCurrentRow(0)
-        finally:
-            self._camera_selector.blockSignals(False)
-
     def _show_selected_camera(self) -> None:
         selected = self._active_camera_name
         if selected == self._shown_camera_name:
@@ -1765,13 +1790,13 @@ class ControlWindow(QMainWindow):
         self._shown_camera_name = selected
         self._refresh_camera_thumbs()
 
-    def _on_camera_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
-        if current is None:
-            return
-        name = str(current.data(Qt.ItemDataRole.UserRole) or "").upper()
+    def _on_camera_selected(self, name: str) -> None:
+        name = str(name or "").upper()
         if not name or name == self._active_camera_name:
             return
         self._active_camera_name = name
+        for tile in self._camera_tiles.values():
+            tile.sync_camera_choices(self._camera_order, self._camera_status_by_name, self._active_camera_name)
         self._show_selected_camera()
 
     def _sync_nozzle_cards(self, nozzles: list[dict[str, Any]]) -> None:
