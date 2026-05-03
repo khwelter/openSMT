@@ -596,7 +596,7 @@ class TrayFeederEditor(QWidget):
 
         self._id_label = QLabel("--")
         self._part_number = QLineEdit()
-        self._part_number.setMinimumWidth(300)
+        self._part_number.setMinimumWidth(150)
         self._pick_x = QDoubleSpinBox()
         self._pick_y = QDoubleSpinBox()
         self._pick_h = QDoubleSpinBox()
@@ -605,22 +605,26 @@ class TrayFeederEditor(QWidget):
             w.setDecimals(3)
             w.setSingleStep(0.1)
 
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        row.addWidget(QLabel("ID"))
-        row.addWidget(self._id_label)
-        row.addSpacing(6)
-        row.addWidget(QLabel("Part"))
-        row.addWidget(self._part_number, 1)
-        row.addSpacing(6)
-        row.addWidget(QLabel("X"))
-        row.addWidget(self._pick_x)
-        row.addWidget(QLabel("Y"))
-        row.addWidget(self._pick_y)
-        row.addWidget(QLabel("Z"))
-        row.addWidget(self._pick_h)
+        row_top = QHBoxLayout()
+        row_top.setSpacing(6)
+        row_top.addWidget(QLabel("ID"))
+        row_top.addWidget(self._id_label)
+        row_top.addSpacing(6)
+        row_top.addWidget(QLabel("Part"))
+        row_top.addWidget(self._part_number, 1)
 
-        btn_row = QHBoxLayout()
+        row_bottom = QHBoxLayout()
+        row_bottom.setSpacing(6)
+        row_bottom.addWidget(QLabel("X"))
+        row_bottom.addWidget(self._pick_x)
+        row_bottom.addWidget(QLabel("Y"))
+        row_bottom.addWidget(self._pick_y)
+        row_bottom.addWidget(QLabel("Z"))
+        row_bottom.addWidget(self._pick_h)
+        row_bottom.addStretch(1)
+
+        btn_row_top = QHBoxLayout()
+        btn_row_bottom = QHBoxLayout()
         self._btn_move_base = QPushButton()
         self._btn_move_current = QPushButton()
         self._btn_move_base.setIcon(QIcon(_compose_pm(_make_camera_pm(), _make_target_marker_pm("B", color=_COLOR_BLUE))))
@@ -659,18 +663,22 @@ class TrayFeederEditor(QWidget):
         self._btn_reset.setFixedHeight(_BTN_SQ)
 
         self._btn_pick_from_camera.setToolTip("Use current top-camera location as base pick X/Y")
-        btn_row.addWidget(self._btn_move_base)
-        btn_row.addWidget(self._btn_move_current)
-        btn_row.addWidget(self._btn_pick_from_camera)
-        btn_row.addWidget(self._btn_advance)
-        btn_row.addWidget(self._btn_reset)
-        btn_row.addStretch(1)
-        btn_row.addWidget(self._btn_back)
-        btn_row.addWidget(self._btn_cancel)
-        btn_row.addWidget(self._btn_save)
+        btn_row_top.addWidget(self._btn_move_base)
+        btn_row_top.addWidget(self._btn_move_current)
+        btn_row_top.addWidget(self._btn_pick_from_camera)
+        btn_row_top.addStretch(1)
 
-        fixed_layout.addLayout(row)
-        fixed_layout.addLayout(btn_row)
+        btn_row_bottom.addWidget(self._btn_advance)
+        btn_row_bottom.addWidget(self._btn_reset)
+        btn_row_bottom.addWidget(self._btn_back)
+        btn_row_bottom.addStretch(1)
+        btn_row_bottom.addWidget(self._btn_cancel)
+        btn_row_bottom.addWidget(self._btn_save)
+
+        fixed_layout.addLayout(row_top)
+        fixed_layout.addLayout(row_bottom)
+        fixed_layout.addLayout(btn_row_top)
+        fixed_layout.addLayout(btn_row_bottom)
         fixed_layout.addWidget(self._status)
         root.addWidget(fixed_box)
 
@@ -1069,6 +1077,10 @@ class ControlWindow(QMainWindow):
         self._current_x: float | None = None
         self._current_y: float | None = None
         self._machine_status = QLabel("X=--  Y=--")
+        self._top_left_ratio_min = 0.2
+        self._top_left_ratio_max = 0.4
+        self._bottom_left_ratio_min = 0.2
+        self._bottom_left_ratio_max = 0.5
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -1159,7 +1171,16 @@ class ControlWindow(QMainWindow):
         self._feeder_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._feeder_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._feeder_table.verticalHeader().setVisible(False)
-        self._feeder_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        _fh = self._feeder_table.horizontalHeader()
+        _fh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        _fh.setStretchLastSection(True)
+        _fh.setMinimumSectionSize(70)
+        _fh.resizeSection(0, 170)
+        _fh.resizeSection(1, 120)
+        _fh.resizeSection(2, 170)
+        _fh.resizeSection(3, 90)
+        _fh.resizeSection(4, 90)
+        _fh.resizeSection(5, 100)
         self._feeder_table.cellDoubleClicked.connect(self._on_feeder_row_double_clicked)
         all_feeders_layout.addWidget(self._feeder_table)
         self._feeders_tabs.addTab(all_feeders_tab, "All Feeders")
@@ -1343,8 +1364,12 @@ class ControlWindow(QMainWindow):
         if total <= 0:
             return
 
-        desired_min_left = int(total * 0.2)
-        desired_max_left = int(total * 0.5)
+        if splitter is self._top_splitter:
+            desired_min_left = int(total * self._top_left_ratio_min)
+            desired_max_left = int(total * self._top_left_ratio_max)
+        else:
+            desired_min_left = int(total * self._bottom_left_ratio_min)
+            desired_max_left = int(total * self._bottom_left_ratio_max)
 
         left_w = splitter.widget(0)
         right_w = splitter.widget(1)
