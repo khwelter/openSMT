@@ -441,6 +441,8 @@ class CameraVisionModule:
         app.router.add_get("/api/feeders", self._api_feeders)
         app.router.add_get("/api/feeders/{feeder_id}", self._api_feeder_get)
         app.router.add_put("/api/feeders/{feeder_id}", self._api_feeder_put)
+        app.router.add_post("/api/feeders/{feeder_id}/reset", self._api_feeder_reset)
+        app.router.add_post("/api/feeders/{feeder_id}/advance-pick", self._api_feeder_advance_pick)
         app.router.add_post("/api/nozzle/{name}/move-to-camera", self._api_nozzle_move_to_camera)
         app.router.add_post("/api/nozzle/{name}/move-to-bottom-camera", self._api_nozzle_move_to_bottom_camera)
         app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
@@ -815,6 +817,144 @@ class CameraVisionModule:
             "persist_error": persist_error,
             "persist_dir": str(self._feeders_persist_dir) if self._feeders_persist_dir else None,
         })
+
+    async def _api_feeder_reset(self, request: web.Request) -> web.Response:
+        if self._feeder_config_store is None:
+            return web.json_response({"error": "feeders_not_available"}, status=404)
+
+        feeder_id = str(request.match_info.get("feeder_id", "")).upper().strip()
+        current = self._feeder_config_store.get(feeder_id)
+        if current is None:
+            return web.json_response({"error": "unknown_feeder"}, status=404)
+
+        merged = current.to_status()
+        actual = merged.get("actual_data")
+        if not isinstance(actual, dict):
+            actual = {}
+        actual["parts_picked"] = 0
+        merged["actual_data"] = actual
+
+        try:
+            updated = feeder_from_dict(merged)
+        except Exception as exc:
+            return web.json_response({"error": f"invalid_feeder_payload: {exc}"}, status=400)
+
+        self._feeder_config_store.upsert(updated)
+        persist_error = self._persist_feeder_config(updated.to_status())
+
+        return web.json_response({
+            "status": "ok",
+            "feeder": updated.to_status(),
+            "persisted": persist_error is None,
+            "persist_error": persist_error,
+            "persist_dir": str(self._feeders_persist_dir) if self._feeders_persist_dir else None,
+        })
+
+    async def _api_feeder_advance_pick(self, request: web.Request) -> web.Response:
+        if self._feeder_config_store is None:
+            return web.json_response({"error": "feeders_not_available"}, status=404)
+
+        feeder_id = str(request.match_info.get("feeder_id", "")).upper().strip()
+        current = self._feeder_config_store.get(feeder_id)
+        if current is None:
+            return web.json_response({"error": "unknown_feeder"}, status=404)
+
+        merged = current.to_status()
+        feeder_type = str(merged.get("feeder_type", "")).lower()
+        if feeder_type != "tray_feeder":
+            return web.json_response({"error": "advance_pick_only_supported_for_tray_feeder"}, status=400)
+
+        pick_location = merged.get("pick_location") if isinstance(merged.get("pick_location"), dict) else {}
+        type_data = merged.get("type_data") if isinstance(merged.get("type_data"), dict) else {}
+        actual = merged.get("actual_data") if isinstance(merged.get("actual_data"), dict) else {}
+
+        try:
+            base_x = float(pick_location.get("x", 0.0) or 0.0)
+            base_y = float(pick_location.get("y", 0.0) or 0.0)
+            x_step = float(type_data.get("x_step", 0.0) or 0.0)
+            y_step = float(type_data.get("y_step", 0.0) or 0.0)
+            x_count = int(type_data.get("parts_available_x", 0) or 0)
+            y_count = int(type_data.get("parts_available_y", 0) or 0)
+            ix = int(actual.get("current_index_x", 0) or 0)
+            iy = int(actual.get("current_index_y", 0) or 0)
+            parts_picked = int(actual.get("parts_picked", 0) or 0)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid_tray_feeder_data"}, status=400)
+
+        if x_count <= 0 or y_count <= 0:
+            return web.json_response({"error": "invalid_parts_available_dimensions"}, status=400)
+
+        max_ix = x_count - 1
+        max_iy = y_count - 1
+        ix = max(0, min(ix, max_ix))
+        iy = max(0, min(iy, max_iy))
+
+        pref = str(type_data.get("preferred_direction", "X")).upper().strip()
+        if pref not in {"X", "Y"}:
+            pref = "X"
+
+        next_ix = ix
+        next_iy = iy
+        exhausted = False
+
+        if pref == "X":
+            if ix < max_ix:
+                next_ix = ix + 1
+            elif iy < max_iy:
+                next_ix = 0
+                next_iy = iy + 1
+            else:
+                exhausted = True
+        else:
+            if iy < max_iy:
+                next_iy = iy + 1
+            elif ix < max_ix:
+                next_iy = 0
+                next_ix = ix + 1
+            else:
+                exhausted = True
+
+        if exhausted:
+            return web.json_response(
+                {
+                    "status": "exhausted",
+                    "error": "no_next_pick_position",
+                    "feeder": merged,
+                },
+                status=409,
+            )
+
+        current_pick = actual.get("current_pick") if isinstance(actual.get("current_pick"), dict) else {}
+        actual["last_pick"] = {
+            "x": float(current_pick.get("x", base_x) or base_x),
+            "y": float(current_pick.get("y", base_y) or base_y),
+        }
+        actual["current_index_x"] = next_ix
+        actual["current_index_y"] = next_iy
+        actual["parts_picked"] = max(0, parts_picked + 1)
+        actual["current_pick"] = {
+            "x": base_x + (next_ix * x_step),
+            "y": base_y + (next_iy * y_step),
+        }
+        merged["actual_data"] = actual
+
+        try:
+            updated = feeder_from_dict(merged)
+        except Exception as exc:
+            return web.json_response({"error": f"invalid_feeder_payload: {exc}"}, status=400)
+
+        self._feeder_config_store.upsert(updated)
+        persist_error = self._persist_feeder_config(updated.to_status())
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "feeder": updated.to_status(),
+                "persisted": persist_error is None,
+                "persist_error": persist_error,
+                "persist_dir": str(self._feeders_persist_dir) if self._feeders_persist_dir else None,
+            }
+        )
 
     def _get_bottom_camera_xy(self) -> tuple[float, float] | None:
         for cam_cfg in self.config.get("cameras", []):
