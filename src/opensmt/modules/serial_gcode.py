@@ -495,7 +495,7 @@ class SerialGCodeModule(ModuleBase):
             return
 
         async with state.command_lock:
-            gcode = f"M106 D{local_idx} S{value}"
+            gcode = f"M106 P{local_idx} S{value}"
             await self.node.send_working(command, target=target)
             await self._write_line(state, gcode)
 
@@ -521,7 +521,7 @@ class SerialGCodeModule(ModuleBase):
             return
 
         async with state.command_lock:
-            gcode = f"M106 D{local_idx} S{value}"
+            gcode = f"M106 P{local_idx} S{value}"
             await self.node.send_working(command, target=target)
             await self._write_line(state, gcode)
 

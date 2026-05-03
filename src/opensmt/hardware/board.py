@@ -155,12 +155,12 @@ class SerialBoard:
 
     async def set_digital_out(self, local_idx: int, value: int) -> None:
         async with self._lock:
-            await self._write_line(f"M106 D{local_idx} S{value}")
+            await self._write_line(f"M106 P{local_idx} S{value}")
             await self._wait_for_ok(timeout=5.0)
 
     async def set_analog_out(self, local_idx: int, value: int) -> None:
         async with self._lock:
-            await self._write_line(f"M106 D{local_idx} S{value}")
+            await self._write_line(f"M106 P{local_idx} S{value}")
             await self._wait_for_ok(timeout=5.0)
 
     async def set_io(self, pin: int, io_type: str, value: bool | int) -> bool:
