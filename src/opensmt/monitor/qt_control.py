@@ -1332,8 +1332,8 @@ class ControlWindow(QMainWindow):
         self._poll_status()
 
     def _init_splitters(self) -> None:
-        self._top_splitter.setSizes([2, 8])
-        self._bottom_splitter.setSizes([2, 8])
+        self._set_splitter_ratio(self._top_splitter, 0.2)
+        self._set_splitter_ratio(self._bottom_splitter, 0.2)
         self._top_splitter.splitterMoved.connect(lambda _pos, _index: self._clamp_splitter(self._top_splitter))
         self._bottom_splitter.splitterMoved.connect(lambda _pos, _index: self._clamp_splitter(self._bottom_splitter))
         self._clamp_splitter(self._top_splitter)
@@ -1343,7 +1343,7 @@ class ControlWindow(QMainWindow):
         sizes = splitter.sizes()
         if len(sizes) != 2:
             return
-        total = sizes[0] + sizes[1]
+        total = self._splitter_total_width(splitter)
         if total <= 0:
             return
 
@@ -1353,6 +1353,21 @@ class ControlWindow(QMainWindow):
         clamped = max(min_left, min(max_left, left))
         if clamped != left:
             splitter.setSizes([clamped, total - clamped])
+
+    def _set_splitter_ratio(self, splitter: QSplitter, left_ratio: float) -> None:
+        total = self._splitter_total_width(splitter)
+        if total <= 0:
+            return
+        left = int(total * left_ratio)
+        splitter.setSizes([left, total - left])
+
+    @staticmethod
+    def _splitter_total_width(splitter: QSplitter) -> int:
+        total = splitter.width() - splitter.handleWidth()
+        if total > 0:
+            return total
+        sizes = splitter.sizes()
+        return sum(sizes) if sizes else 0
 
     def _apply_host(self) -> None:
         host = self._host.text().strip() or "127.0.0.1"
