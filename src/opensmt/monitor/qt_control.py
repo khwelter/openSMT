@@ -10,6 +10,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -326,7 +327,7 @@ class CameraTile(QFrame):
 
 
 class NozzleCard(QFrame):
-    action_requested = Signal(str, str)
+    action_requested = Signal(str, str, float)
 
     _nozzle_pm: QPixmap | None = None
     _cam_top_pm: QPixmap | None = None
@@ -347,6 +348,7 @@ class NozzleCard(QFrame):
         super().__init__()
         NozzleCard._init_pms()
         self.nozzle_name = nozzle_name
+        self.setMinimumWidth(235)
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
 
@@ -372,6 +374,31 @@ class NozzleCard(QFrame):
         zr_row.addStretch(1)
         root.addLayout(zr_row)
 
+        jog_row = QHBoxLayout()
+        jog_row.setSpacing(2)
+        self._z_step = QDoubleSpinBox()
+        self._z_step.setDecimals(1)
+        self._z_step.setRange(0.1, 20.0)
+        self._z_step.setSingleStep(0.1)
+        self._z_step.setValue(1.0)
+        self._z_step.setSuffix(" mm")
+        self._z_step.setFixedWidth(86)
+
+        b_home = _sq_btn("home_axis", "Home nozzle Z axis")
+        b_z_up = _sq_btn("z_up", "Move nozzle Z up")
+        b_z_down = _sq_btn("z_down", "Move nozzle Z down")
+        b_rot_ccw = _sq_btn("rotate_ccw", "Rotate CCW")
+        b_rot_cw = _sq_btn("rotate_cw", "Rotate CW")
+
+        jog_row.addWidget(b_home)
+        jog_row.addWidget(b_z_up)
+        jog_row.addWidget(b_z_down)
+        jog_row.addWidget(b_rot_ccw)
+        jog_row.addWidget(b_rot_cw)
+        jog_row.addStretch(1)
+        jog_row.addWidget(self._z_step)
+        root.addLayout(jog_row)
+
         btn_grid = QGridLayout()
         btn_grid.setSpacing(2)
 
@@ -387,10 +414,15 @@ class NozzleCard(QFrame):
 
         root.addLayout(btn_grid)
 
-        b_align.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "align_to_cam"))
-        b_cam.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cam_to_nozzle"))
-        b_bottom.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "above_bottom"))
-        b_cal.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cal_offset"))
+        b_align.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "align_to_cam", 0.0))
+        b_cam.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cam_to_nozzle", 0.0))
+        b_bottom.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "above_bottom", 0.0))
+        b_cal.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "cal_offset", 0.0))
+        b_home.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "nozzle_home", 0.0))
+        b_z_up.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_up", float(self._z_step.value())))
+        b_z_down.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "z_down", float(self._z_step.value())))
+        b_rot_ccw.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "rot_ccw", 1.0))
+        b_rot_cw.clicked.connect(lambda: self.action_requested.emit(self.nozzle_name, "rot_cw", 1.0))
 
     def apply_status(self, nozzle: dict[str, Any]) -> None:
         ox = nozzle.get("offset_x")
@@ -399,15 +431,15 @@ class NozzleCard(QFrame):
         r = nozzle.get("r_position")
 
         self._offset.setText(f"Off X={self._fmt(ox)} Y={self._fmt(oy)}")
-        self._z.setText(f"Z={self._fmt(z)}")
+        self._z.setText(f"Z={self._fmt(z, 1)}")
         self._r.setText(f"R={self._fmt(r)}")
 
     @staticmethod
-    def _fmt(value: Any) -> str:
+    def _fmt(value: Any, decimals: int = 3) -> str:
         try:
             if value is None:
                 return "--"
-            return f"{float(value):.3f}"
+            return f"{float(value):.{decimals}f}"
         except Exception:
             return "--"
 
@@ -542,13 +574,15 @@ class ControlWindow(QMainWindow):
         noz_layout = QVBoxLayout(noz_group)
         noz_layout.setContentsMargins(4, 4, 4, 4)
         noz_scroll = QScrollArea()
-        noz_scroll.setWidgetResizable(True)
-        noz_container = QWidget()
-        self._nozzle_layout = QGridLayout(noz_container)
+        noz_scroll.setWidgetResizable(False)
+        noz_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        noz_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nozzle_container = QWidget()
+        self._nozzle_layout = QGridLayout(self._nozzle_container)
         self._nozzle_layout.setContentsMargins(2, 2, 2, 2)
         self._nozzle_layout.setHorizontalSpacing(4)
         self._nozzle_layout.setVerticalSpacing(4)
-        noz_scroll.setWidget(noz_container)
+        noz_scroll.setWidget(self._nozzle_container)
         noz_layout.addWidget(noz_scroll)
 
         pane_grid.addWidget(cam_group, 0, 0)
@@ -758,11 +792,16 @@ class ControlWindow(QMainWindow):
             return
 
         for idx, name in enumerate(sorted(self._nozzle_cards.keys())):
-            row = idx // 2
-            col = idx % 2
-            self._nozzle_layout.addWidget(self._nozzle_cards[name], row, col)
+            self._nozzle_layout.addWidget(self._nozzle_cards[name], 0, idx)
 
-    def _on_nozzle_action(self, nozzle: str, action: str) -> None:
+        card_count = len(self._nozzle_cards)
+        if card_count > 0:
+            card_w = next(iter(self._nozzle_cards.values())).minimumWidth()
+            spacing = self._nozzle_layout.horizontalSpacing()
+            total_w = (card_w * card_count) + (spacing * max(0, card_count - 1)) + 16
+            self._nozzle_container.setMinimumWidth(total_w)
+
+    def _on_nozzle_action(self, nozzle: str, action: str, value: float) -> None:
         if action == "align_to_cam":
             self._post_action(f"/api/nozzle/{nozzle}/move-to-camera", None, f"{nozzle}: Align to camera")
             return
@@ -785,6 +824,43 @@ class ControlWindow(QMainWindow):
                 None,
                 lambda ok, status, data: self._handle_calibration_result(nozzle, ok, status, data),
             )
+            return
+
+        if action == "nozzle_home":
+            self._post_action(f"/api/head/nozzle/{nozzle}/home", None, f"{nozzle}: Home Z")
+            return
+
+        if action == "z_up":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/move",
+                {"delta": float(value)},
+                f"{nozzle}: Z up +{value:.1f}",
+            )
+            return
+
+        if action == "z_down":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/move",
+                {"delta": -float(value)},
+                f"{nozzle}: Z down -{value:.1f}",
+            )
+            return
+
+        if action == "rot_ccw":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/rotate",
+                {"delta": -float(value)},
+                f"{nozzle}: Rotate CCW {value:.1f}",
+            )
+            return
+
+        if action == "rot_cw":
+            self._post_action(
+                f"/api/head/nozzle/{nozzle}/rotate",
+                {"delta": float(value)},
+                f"{nozzle}: Rotate CW {value:.1f}",
+            )
+            return
 
     def _handle_calibration_result(self, nozzle: str, ok: bool, status: int, data: dict[str, Any]) -> None:
         if not ok:
