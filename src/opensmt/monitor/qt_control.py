@@ -1395,6 +1395,23 @@ class ControlWindow(QMainWindow):
         all_feeders_tab = QWidget()
         all_feeders_layout = QVBoxLayout(all_feeders_tab)
         all_feeders_layout.setContentsMargins(6, 6, 6, 6)
+
+        all_actions = QHBoxLayout()
+        self._add_feeder_btn = QToolButton()
+        self._add_feeder_btn.setText("Add Feeder")
+        self._add_feeder_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._add_feeder_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._add_feeder_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        add_menu = QMenu(self._add_feeder_btn)
+        for feeder_type, title in _FEEDER_TYPE_TITLES:
+            label = title[:-1] if title.endswith("s") else title
+            action = add_menu.addAction(f"Add {label}")
+            action.triggered.connect(lambda _checked=False, t=feeder_type: self._create_feeder(t))
+        self._add_feeder_btn.setMenu(add_menu)
+        all_actions.addWidget(self._add_feeder_btn)
+        all_actions.addStretch(1)
+        all_feeders_layout.addLayout(all_actions)
+
         self._feeder_table = QTableWidget(0, 6)
         self._feeder_table.setHorizontalHeaderLabels([
             "Feeder ID",
@@ -1914,6 +1931,40 @@ class ControlWindow(QMainWindow):
         feeder_id = item.text().strip().upper()
         if feeder_id:
             self._open_feeder_editor(feeder_id)
+
+    def _create_feeder(self, feeder_type: str) -> None:
+        payload = {"feeder_type": feeder_type}
+        self._api.post_json(
+            "/api/feeders",
+            payload,
+            lambda ok, status, data, ft=feeder_type: self._on_feeder_created(ft, ok, status, data),
+        )
+        self._log_line(f"REQ: create {self._human_feeder_type(feeder_type)}")
+
+    def _on_feeder_created(self, feeder_type: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"ERR {status}: create {self._human_feeder_type(feeder_type)} failed: {data.get('error', 'request_failed')}")
+            return
+
+        feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
+        if feeder is None:
+            self._log_line("ERR: feeder create failed: invalid feeder payload")
+            return
+
+        feeder_id = str(feeder.get("feeder_id", "")).upper()
+        if not feeder_id:
+            self._log_line("ERR: feeder create failed: missing feeder_id")
+            return
+
+        self._feeders_by_id[feeder_id] = feeder
+        self._selected_feeder_id = feeder_id
+        self._open_feeder_editor(feeder_id, force=True)
+
+        if data.get("persisted", True):
+            self._log_line(f"OK: feeder {feeder_id} created")
+        else:
+            self._log_line(f"WARN: feeder {feeder_id} created but not persisted: {data.get('persist_error')}")
+        self._poll_status()
 
     def _open_feeder_editor(self, feeder_id: str, force: bool = False, activate_tab: bool = True) -> None:
         feeder = self._feeders_by_id.get(feeder_id)

@@ -3,7 +3,7 @@
   "feeder_type": "tray_feeder",
   "pick_location": {
     "x": 9.1,
-    "y": 99.8
+    "y": 99.5
   },
   "pick_height": -1.1,
   "manufacturer_part_number": "EXAMPLE-TRAY-011",
@@ -19,11 +19,11 @@
     "current_index_y": 0,
     "current_pick": {
       "x": 9.1,
-      "y": 99.8
+      "y": 99.5
     },
     "last_pick": {
       "x": 89.1,
-      "y": 99.8
+      "y": 99.5
     },
     "parts_picked": 0
   }

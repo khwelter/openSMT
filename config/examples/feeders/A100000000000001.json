@@ -3,7 +3,7 @@
   "feeder_type": "tray_feeder",
   "pick_location": {
     "x": 21.7,
-    "y": 99.5
+    "y": 99.2
   },
   "pick_height": -1.1,
   "manufacturer_part_number": "Mein Teil I",
@@ -19,11 +19,11 @@
     "current_index_y": 0,
     "current_pick": {
       "x": 21.7,
-      "y": 99.5
+      "y": 99.2
     },
     "last_pick": {
       "x": 21.7,
-      "y": 59.5
+      "y": 59.2
     },
     "parts_picked": 0
   }

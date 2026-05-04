@@ -5,6 +5,7 @@ import copy
 import json
 import logging
 import re
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -452,6 +453,7 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/move-xy", self._api_coord_move_xy)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
         app.router.add_get("/api/feeders", self._api_feeders)
+        app.router.add_post("/api/feeders", self._api_feeder_create)
         app.router.add_get("/api/feeders/{feeder_id}", self._api_feeder_get)
         app.router.add_put("/api/feeders/{feeder_id}", self._api_feeder_put)
         app.router.add_post("/api/feeders/{feeder_id}/reset", self._api_feeder_reset)
@@ -768,6 +770,81 @@ class CameraVisionModule:
         feeders = [feeder.to_status() for feeder in self._feeder_config_store.all()]
         feeders.sort(key=lambda feeder: (str(feeder.get("feeder_type", "")), str(feeder.get("feeder_id", ""))))
         return web.json_response({"feeders": feeders})
+
+    async def _api_feeder_create(self, request: web.Request) -> web.Response:
+        if self._feeder_config_store is None:
+            return web.json_response({"error": "feeders_not_available"}, status=404)
+
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        feeder_type = str(body.get("feeder_type", "")).strip().lower()
+        if not feeder_type:
+            return web.json_response({"error": "missing_feeder_type"}, status=400)
+
+        # Generate a unique 16-hex feeder id for new entries.
+        feeder_id = ""
+        for _ in range(100):
+            candidate = secrets.token_hex(8).upper()
+            if self._feeder_config_store.get(candidate) is None:
+                feeder_id = candidate
+                break
+        if not feeder_id:
+            return web.json_response({"error": "unable_to_allocate_feeder_id"}, status=500)
+
+        part_number = str(body.get("manufacturer_part_number", "NEW_PART")).strip() or "NEW_PART"
+        pick_x = float(body.get("pick_x", 0.0) or 0.0)
+        pick_y = float(body.get("pick_y", 0.0) or 0.0)
+        pick_h = float(body.get("pick_height", 0.0) or 0.0)
+
+        merged: dict[str, Any] = {
+            "feeder_id": feeder_id,
+            "feeder_type": feeder_type,
+            "pick_location": {"x": pick_x, "y": pick_y},
+            "pick_height": pick_h,
+            "manufacturer_part_number": part_number,
+            "type_data": {},
+            "actual_data": {},
+        }
+
+        if feeder_type == "tray_feeder":
+            merged["type_data"] = {
+                "x_step": 0.0,
+                "y_step": 0.0,
+                "parts_available_x": 1,
+                "parts_available_y": 1,
+                "preferred_direction": "X",
+            }
+            merged["actual_data"] = {
+                "parts_picked": 0,
+                "current_index_x": 0,
+                "current_index_y": 0,
+                "current_pick": {"x": pick_x, "y": pick_y},
+                "last_pick": {"x": pick_x, "y": pick_y},
+            }
+
+        try:
+            created = feeder_from_dict(merged)
+        except Exception as exc:
+            return web.json_response({"error": f"invalid_feeder_payload: {exc}"}, status=400)
+
+        self._feeder_config_store.upsert(created)
+        persist_error = self._persist_feeder_config(created.to_status())
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "feeder": created.to_status(),
+                "persisted": persist_error is None,
+                "persist_error": persist_error,
+                "persist_dir": str(self._feeders_persist_dir) if self._feeders_persist_dir else None,
+            },
+            status=201,
+        )
 
     async def _api_feeder_get(self, request: web.Request) -> web.Response:
         if self._feeder_config_store is None:
