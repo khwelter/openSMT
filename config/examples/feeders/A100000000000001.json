@@ -2,8 +2,8 @@
   "feeder_id": "A100000000000001",
   "feeder_type": "tray_feeder",
   "pick_location": {
-    "x": 21.5,
-    "y": 99.3
+    "x": 21.7,
+    "y": 99.5
   },
   "pick_height": -1.1,
   "manufacturer_part_number": "Mein Teil I",
@@ -18,12 +18,12 @@
     "current_index_x": 0,
     "current_index_y": 0,
     "current_pick": {
-      "x": 21.5,
-      "y": 99.3
+      "x": 21.7,
+      "y": 99.5
     },
     "last_pick": {
-      "x": 21.5,
-      "y": 99.3
+      "x": 21.7,
+      "y": 59.5
     },
     "parts_picked": 0
   }

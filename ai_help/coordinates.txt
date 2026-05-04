@@ -15,4 +15,21 @@ Die Nozzles haben relative Koordinaten zu der TopCamera:
 - Nozzle 3  X(nozRel3), Y(nozRel3)
 - Nozzle 4  X(nozRel4), Y(nozRel4)
 
+Bestückungsebene
+================
+
+Die Bestückungsebene des PCB, Z(pcb) liegt bei -39,0.
+
+Bauteilpickup
+=============
+
+Die Z-Koordinate Z(feed) der Feeder ist die relative Höhe zur Bestückungsebene.
+Die Pickupebene Z(pick) eines Feeders errechnet sich zu Z(pick) = Z(pcb) + Z(feed)
+
+Bauteilplatzierung
+==================
+
+Die Absetzebene Z(place) eines Bauteils ist abhängig von der Bauteilhöhe h(comp)
+und errechnet sich zu Z(place) = Z(pcb) + h(comp)
+
 

@@ -1,0 +1,30 @@
+{
+  "feeder_id": "A100000000000011",
+  "feeder_type": "tray_feeder",
+  "pick_location": {
+    "x": 9.1,
+    "y": 99.8
+  },
+  "pick_height": -1.1,
+  "manufacturer_part_number": "EXAMPLE-TRAY-011",
+  "type_data": {
+    "parts_available_x": 20,
+    "parts_available_y": 5,
+    "preferred_direction": "X",
+    "x_step": 4.0,
+    "y_step": 0.0
+  },
+  "actual_data": {
+    "current_index_x": 0,
+    "current_index_y": 0,
+    "current_pick": {
+      "x": 9.1,
+      "y": 99.8
+    },
+    "last_pick": {
+      "x": 89.1,
+      "y": 99.8
+    },
+    "parts_picked": 0
+  }
+}
