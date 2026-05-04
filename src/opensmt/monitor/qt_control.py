@@ -688,23 +688,47 @@ class NozzleCard(QFrame):
         step_cols = QVBoxLayout()
         step_cols.setSpacing(3)
 
+        self._z_step_val: float = self._Z_STEPS[3]   # default 1 mm
+        self._r_step_val: float = self._R_STEPS[2]   # default 5°
+
+        _btn_style = (
+            "QToolButton {"
+            "background:#12243a; color:#d9e8ff;"
+            "border:1px solid #2a3d66; border-radius:3px;"
+            "padding:2px 6px;"
+            "}"
+            "QToolButton::menu-indicator { image:none; width:0px; }"
+        )
+
         z_row = QHBoxLayout()
         z_row.addWidget(QLabel("Z:"))
-        self._z_step_combo = QComboBox()
+        self._z_step_btn = QToolButton()
+        self._z_step_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._z_step_btn.setStyleSheet(_btn_style)
+        self._z_step_btn.setFixedWidth(70)
+        z_menu = QMenu(self._z_step_btn)
         for mm in self._Z_STEPS:
-            self._z_step_combo.addItem(f"{mm:g} mm", mm)
-        self._z_step_combo.setCurrentIndex(3)  # default 1 mm
-        self._z_step_combo.setFixedWidth(70)
-        z_row.addWidget(self._z_step_combo)
+            action = z_menu.addAction(f"{mm:g} mm")
+            action.setData(mm)
+            action.triggered.connect(lambda _checked=False, v=mm: self._set_z_step(v))
+        self._z_step_btn.setMenu(z_menu)
+        self._z_step_btn.setText(f"{self._z_step_val:g} mm")
+        z_row.addWidget(self._z_step_btn)
 
         r_row = QHBoxLayout()
         r_row.addWidget(QLabel("R:"))
-        self._r_step_combo = QComboBox()
+        self._r_step_btn = QToolButton()
+        self._r_step_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._r_step_btn.setStyleSheet(_btn_style)
+        self._r_step_btn.setFixedWidth(70)
+        r_menu = QMenu(self._r_step_btn)
         for deg in self._R_STEPS:
-            self._r_step_combo.addItem(f"{deg:g}\u00b0", deg)
-        self._r_step_combo.setCurrentIndex(2)  # default 5°
-        self._r_step_combo.setFixedWidth(70)
-        r_row.addWidget(self._r_step_combo)
+            action = r_menu.addAction(f"{deg:g}\u00b0")
+            action.setData(deg)
+            action.triggered.connect(lambda _checked=False, v=deg: self._set_r_step(v))
+        self._r_step_btn.setMenu(r_menu)
+        self._r_step_btn.setText(f"{self._r_step_val:g}\u00b0")
+        r_row.addWidget(self._r_step_btn)
 
         step_cols.addLayout(z_row)
         step_cols.addLayout(r_row)
@@ -763,13 +787,19 @@ class NozzleCard(QFrame):
         except Exception:
             return "--"
 
+    def _set_z_step(self, v: float) -> None:
+        self._z_step_val = float(v)
+        self._z_step_btn.setText(f"{v:g} mm")
+
+    def _set_r_step(self, v: float) -> None:
+        self._r_step_val = float(v)
+        self._r_step_btn.setText(f"{v:g}\u00b0")
+
     def _z_step_mm(self) -> float:
-        v = self._z_step_combo.currentData()
-        return float(v) if v is not None else 1.0
+        return self._z_step_val
 
     def _angle_step_deg(self) -> float:
-        v = self._r_step_combo.currentData()
-        return float(v) if v is not None else 5.0
+        return self._r_step_val
 
 
 class TrayFeederEditor(QWidget):

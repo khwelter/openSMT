@@ -1,0 +1,18 @@
+Koordinatensystem
+
+Alle Koordinaten werden in mm angegeben.
+
+Das Koordinatensystem hat seinen Ursprung in der vorderen linke Ecke.
+
+Der bewegliche Punkt im Koordinatensystem ist die Kamera auf der Gantry, TopCamera.
+Die optische Achse dieser Kamera ist immer auf dem Punkt X/Y.
+Nach dem Homing steht die TopCamera über dem Koordinatenpunkt X=2,0/Y=2,0,
+die Nozzles N1-N4 auf der Koordinatenhöhe Z=0,0.
+
+Die Nozzles haben relative Koordinaten zu der TopCamera:
+- Nozzle 1  X(nozRel1), Y(nozRel1)
+- Nozzle 2  X(nozRel2), Y(nozRel2)
+- Nozzle 3  X(nozRel3), Y(nozRel3)
+- Nozzle 4  X(nozRel4), Y(nozRel4)
+
+
