@@ -217,6 +217,7 @@ class SerialBoard:
         self.last_tx = line
         self._writer.write((line + "\n").encode("utf-8"))
         await self._writer.drain()
+        print(f"[{self._config.board_id}] TX: {line}")
         log.debug("[%s] TX: %s", self._config.board_id, line)
 
     async def _read_loop(self) -> None:

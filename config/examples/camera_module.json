@@ -29,11 +29,6 @@
       "flip_horizontal": false,
       "flip_vertical": false,
       "rotation_deg": 0,
-      "lights": {
-        "standard": ":GCODE:ANOUT:2 2",
-        "spec1":    ":GCODE:ANOUT:16 128",
-        "spec2":    ":GCODE:ANOUT:4 48"
-      },
       "pipelines": ["DETECT_FIDUCIAL", "MEASURE_COMPONENT"]
     },
     {
@@ -45,11 +40,6 @@
       "flip_horizontal": false,
       "flip_vertical": false,
       "rotation_deg": 89.5,
-      "lights": {
-        "standard": ":GCODE:ANOUT:16 2",
-        "spec1":    ":GCODE:ANOUT:17 64",
-        "spec2":    ":GCODE:ANOUT:18 32"
-      },
       "pipelines": ["PASSTHROUGH"]
     }
   ],

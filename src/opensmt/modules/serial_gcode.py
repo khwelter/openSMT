@@ -217,7 +217,9 @@ class SerialGCodeModule(ModuleBase):
     async def _write_line(self, state: SerialPortState, line: str) -> None:
         if not state.writer:
             raise RuntimeError("Serial writer is not connected")
+        iface = state.config.device.rsplit("/", maxsplit=1)[-1] or state.config.name
         state.last_tx = line
+        print(f"[{iface}] TX: {line}")
         state.writer.write((line + "\n").encode("utf-8"))
         await state.writer.drain()
 

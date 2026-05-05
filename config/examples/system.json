@@ -155,9 +155,9 @@
         "flip_vertical": false,
         "rotation_deg": 0,
         "lights": {
-          "standard": { "board": "XY", "index": 102, "on_value": 2   },
-          "spec1":    { "board": "AB", "index": 0, "on_value": 128 },
-          "spec2":    { "board": "XY", "index": 104, "on_value": 48  }
+          "standard": { "board": "XY", "index": 0, "on_value": 1 },
+          "spec1":    { "board": "XY", "index": 7, "on_value": 1 },
+          "spec2":    { "board": "XY", "index": 8, "on_value": 1 }
         },
         "pipelines": ["DETECT_FIDUCIAL", "MEASURE_COMPONENT"]
       },
@@ -171,9 +171,9 @@
         "flip_vertical": false,
         "rotation_deg": 90,
         "lights": {
-          "standard": { "board": "AB", "index": 1, "on_value": 2  },
-          "spec1":    { "board": "AB", "index": 2, "on_value": 64 },
-          "spec2":    { "board": "AB", "index": 3, "on_value": 32 }
+          "standard": { "board": "AB", "index": 0, "on_value": 1 },
+          "spec1":    { "board": "AB", "index": 1, "on_value": 1 },
+          "spec2":    { "board": "CD", "index": 0, "on_value": 1 }
         },
         "pipelines": ["PASSTHROUGH"]
       }
