@@ -494,6 +494,7 @@ class CameraTile(QFrame):
     vector_move_requested = Signal(str, float, float)
     camera_selected = Signal(str)
     calibrate_requested = Signal(str, float, float)
+    light_set_requested = Signal(str, str, int)
 
     def __init__(self, camera_name: str) -> None:
         super().__init__()
@@ -502,6 +503,7 @@ class CameraTile(QFrame):
         self._resolution_dpcm_y = 0.0
         self._pending_square_px_x = 0.0
         self._pending_square_px_y = 0.0
+        self._visible_light_keys: list[str] = []
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -535,6 +537,27 @@ class CameraTile(QFrame):
         self._camera_actions: dict[str, QAction] = {}
         self._camera_menu_btn.setMenu(self._camera_menu)
         self._camera_menu_btn.raise_()
+
+        self._light_dot_buttons: list[QToolButton] = []
+        for _ in range(3):
+            dot = QToolButton(self._preview)
+            dot.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            dot.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            dot.setAutoRaise(True)
+            dot.setCursor(Qt.CursorShape.PointingHandCursor)
+            dot.setFixedSize(14, 14)
+            dot.setText("")
+            dot.setStyleSheet(self._light_dot_style(0))
+            dot_menu = QMenu(dot)
+            for level in (0, 1, 2):
+                action = dot_menu.addAction(str(level))
+                action.triggered.connect(
+                    lambda _checked=False, btn=dot, v=level: self._emit_light_set(btn, v)
+                )
+            dot.setMenu(dot_menu)
+            dot.hide()
+            dot.raise_()
+            self._light_dot_buttons.append(dot)
 
         footer = QHBoxLayout()
         footer.setSpacing(4)
@@ -605,17 +628,45 @@ class CameraTile(QFrame):
             action.setChecked(name == active_name)
 
         self._camera_menu_btn.setText(active_name or self.camera_name)
-        self._position_camera_menu_button()
+        self._position_overlay_buttons()
+
+    def sync_lights(self, lights: dict[str, int]) -> None:
+        keys = sorted(str(k).strip().lower() for k in lights.keys() if str(k).strip())[:3]
+        self._visible_light_keys = keys
+
+        for idx, dot in enumerate(self._light_dot_buttons):
+            if idx >= len(keys):
+                dot.hide()
+                dot.setProperty("light_key", "")
+                continue
+
+            key = keys[idx]
+            value = int(lights.get(key, 0) or 0)
+            value = max(0, min(2, value))
+            dot.setProperty("light_key", key)
+            dot.setToolTip(f"{key}: {value}")
+            dot.setStyleSheet(self._light_dot_style(value))
+            dot.show()
+
+        self._position_overlay_buttons()
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
-        self._position_camera_menu_button()
+        self._position_overlay_buttons()
 
-    def _position_camera_menu_button(self) -> None:
+    def _position_overlay_buttons(self) -> None:
         self._camera_menu_btn.adjustSize()
         margin = 8
         x = max(margin, self._preview.width() - self._camera_menu_btn.width() - margin)
         self._camera_menu_btn.move(x, margin)
+
+        dot_x = margin
+        dot_y = margin
+        spacing = 4
+        for dot in self._light_dot_buttons:
+            if dot.isVisible():
+                dot.move(dot_x, dot_y)
+                dot_x += dot.width() + spacing
 
     def apply_frame(self, raw: bytes) -> None:
         pm = QPixmap()
@@ -655,6 +706,31 @@ class CameraTile(QFrame):
             return
         # 10 mm equals 1 cm, so pixel count over the drawn side equals dots per cm.
         self.calibrate_requested.emit(self.camera_name, self._pending_square_px_x, self._pending_square_px_y)
+
+    def _emit_light_set(self, dot: QToolButton, value: int) -> None:
+        key = str(dot.property("light_key") or "").strip().lower()
+        if not key:
+            return
+        value = max(0, min(2, int(value)))
+        self.light_set_requested.emit(self.camera_name, key, value)
+
+    @staticmethod
+    def _light_dot_style(value: int) -> str:
+        palette = {
+            0: "#4b5563",
+            1: "#f59e0b",
+            2: "#22c55e",
+        }
+        color = palette.get(int(value), "#4b5563")
+        return (
+            "QToolButton {"
+            f"background:{color};"
+            "border:1px solid #1f2937;"
+            "border-radius:7px;"
+            "padding:0px;"
+            "}"
+            "QToolButton:hover { border:1px solid #dbeafe; }"
+        )
 
 
 class NozzleCard(QFrame):
@@ -1828,6 +1904,7 @@ class ControlWindow(QMainWindow):
                 tile = CameraTile(name)
                 tile.vector_move_requested.connect(self._on_camera_vector_move)
                 tile.calibrate_requested.connect(self._on_camera_calibrate)
+                tile.light_set_requested.connect(self._on_camera_light_set)
                 tile.camera_selected.connect(self._on_camera_selected)
                 self._camera_tiles[name] = tile
 
@@ -1836,6 +1913,7 @@ class ControlWindow(QMainWindow):
                 float(camera.get("resolution_dpcm_x", 0.0) or 0.0),
                 float(camera.get("resolution_dpcm_y", 0.0) or 0.0),
             )
+            tile.sync_lights(camera.get("lights") if isinstance(camera.get("lights"), dict) else {})
 
         for name in known - incoming:
             tile = self._camera_tiles.pop(name)
@@ -2204,6 +2282,29 @@ class ControlWindow(QMainWindow):
             self._log_line(
                 f"WARN: {camera_name} calibrated in runtime only: {data.get('persist_error', 'persistence_not_configured')}"
             )
+        self._poll_status()
+
+    def _on_camera_light_set(self, camera_name: str, light_key: str, value: int) -> None:
+        self._api.post_json(
+            f"/api/camera/{camera_name}/light",
+            {"light": light_key, "value": int(value)},
+            lambda ok, status, data, cam=camera_name, key=light_key, v=int(value): self._on_camera_light_set_done(cam, key, v, ok, status, data),
+        )
+        self._log_line(f"REQ: {camera_name} light {light_key} -> {int(value)}")
+
+    def _on_camera_light_set_done(
+        self,
+        camera_name: str,
+        light_key: str,
+        value: int,
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+    ) -> None:
+        if not ok:
+            self._log_line(f"ERR {status}: {camera_name} light {light_key} failed: {data.get('error', 'request_failed')}")
+            return
+        self._log_line(f"OK: {camera_name} light {light_key} set to {value}")
         self._poll_status()
 
     def _go_to_feeder_survey(self) -> None:

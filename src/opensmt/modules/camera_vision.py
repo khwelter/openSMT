@@ -38,6 +38,7 @@ _PIPELINE_REGISTRY: dict[str, type[VisionPipelineBase]] = {
 _COORD_AXES = ["X", "Y", "Z1", "R1", "Z2", "R2", "Z3", "R3", "Z4", "R4"]
 _LIGHT_MIN = 0
 _LIGHT_MAX = 3
+_UI_LIGHT_MAX = 2
 
 
 def register_pipeline(type_name: str):
@@ -215,6 +216,8 @@ class CameraVisionModule:
             )
             state = CameraState(config=cfg)
             state.current_rotation_deg = cfg.rotation_deg
+            for light_key in cfg.lights:
+                state.light_values[light_key] = 0
             self._cameras[cam_name] = state
 
     # ------------------------------------------------------------------
@@ -465,6 +468,7 @@ class CameraVisionModule:
         app.router.add_post("/api/nozzle/{name}/move-to-bottom-camera", self._api_nozzle_move_to_bottom_camera)
         app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
         app.router.add_post("/api/nozzle/{name}/calculate-offset-top", self._api_nozzle_calculate_offset_top)
+        app.router.add_post("/api/camera/{name}/light", self._api_camera_light)
         app.router.add_post("/api/camera/{name}/calibrate-resolution", self._api_camera_calibrate_resolution)
         app.router.add_get("/api/status", self._api_status)
 
@@ -1149,6 +1153,46 @@ class CameraVisionModule:
             }
         )
 
+    async def _api_camera_light(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        cam_name = raw_name.upper()
+        state = self._cameras.get(cam_name)
+        if state is None:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        try:
+            body = await request.json()
+            light_key = str(body.get("light", "")).strip().lower()
+            value = int(body.get("value"))
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if light_key not in state.config.lights:
+            return web.json_response({"error": "unknown_light"}, status=404)
+        if value < _LIGHT_MIN or value > _UI_LIGHT_MAX:
+            return web.json_response({"error": "invalid_light_value", "allowed": [_LIGHT_MIN, 1, _UI_LIGHT_MAX]}, status=400)
+
+        light_cfg = state.config.lights[light_key]
+        try:
+            await self._driver.set_analog_out(light_cfg.board_id, light_cfg.index, value)
+        except Exception as exc:
+            return web.json_response({"error": "driver_set_analog_failed", "detail": str(exc)}, status=500)
+
+        state.light_values[light_key] = value
+        return web.json_response(
+            {
+                "status": "ok",
+                "camera": cam_name,
+                "light": light_key,
+                "value": value,
+                "board": light_cfg.board_id,
+                "index": light_cfg.index,
+            }
+        )
+
     async def _api_head_move_absolute(self, request: web.Request) -> web.Response:
         raw_name = request.match_info["name"]
         if not _NAME_RE.match(raw_name):
@@ -1528,6 +1572,10 @@ class CameraVisionModule:
                 "stream_path": f"/camera/{cam_name}",
                 "resolution_dpcm_x": float(cam_state.config.resolution_dpcm_x),
                 "resolution_dpcm_y": float(cam_state.config.resolution_dpcm_y),
+                "lights": {
+                    key: int(cam_state.light_values.get(key, 0))
+                    for key in sorted(cam_state.config.lights.keys())
+                },
             })
 
         camera_data.sort(key=lambda c: str(c.get("name", "")))
