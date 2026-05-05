@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import re
 import secrets
 from dataclasses import dataclass, field
@@ -140,6 +141,8 @@ class CameraVisionModule:
         self._icons_dir = Path(__file__).resolve().parents[3] / "assets" / "icons" / "opensmt-ui" / "128"
         offsets_persist_path_raw = config.get("_nozzle_offsets_persist_path")
         self._nozzle_offsets_persist_path = Path(str(offsets_persist_path_raw)).expanduser() if offsets_persist_path_raw else None
+        camera_res_persist_path_raw = config.get("_camera_resolutions_persist_path")
+        self._camera_resolutions_persist_path = Path(str(camera_res_persist_path_raw)).expanduser() if camera_res_persist_path_raw else None
 
         # Build nozzle runtime config table (limits only; current position lives in PositionStore)
         self._nozzles: dict[str, RuntimeNozzleConfig] = {}
@@ -462,6 +465,7 @@ class CameraVisionModule:
         app.router.add_post("/api/nozzle/{name}/move-to-bottom-camera", self._api_nozzle_move_to_bottom_camera)
         app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
         app.router.add_post("/api/nozzle/{name}/calculate-offset-top", self._api_nozzle_calculate_offset_top)
+        app.router.add_post("/api/camera/{name}/calibrate-resolution", self._api_camera_calibrate_resolution)
         app.router.add_get("/api/status", self._api_status)
 
         self._runner = web.AppRunner(app)
@@ -1088,6 +1092,62 @@ class CameraVisionModule:
             return str(exc)
 
         return None
+
+    def _persist_camera_resolutions(self) -> str | None:
+        if self._camera_resolutions_persist_path is None:
+            return "persistence_not_configured"
+
+        payload: dict[str, dict[str, float]] = {}
+        for cam_name, state in self._cameras.items():
+            payload[cam_name] = {
+                "resolution_dpcm_x": float(state.config.resolution_dpcm_x),
+                "resolution_dpcm_y": float(state.config.resolution_dpcm_y),
+            }
+        try:
+            self._camera_resolutions_persist_path.parent.mkdir(parents=True, exist_ok=True)
+            self._camera_resolutions_persist_path.write_text(
+                json.dumps(payload, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    async def _api_camera_calibrate_resolution(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        cam_name = raw_name.upper()
+        state = self._cameras.get(cam_name)
+        if state is None:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        try:
+            body = await request.json()
+            dpcm_x = float(body.get("resolution_dpcm_x"))
+            dpcm_y = float(body.get("resolution_dpcm_y"))
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not (math.isfinite(dpcm_x) and math.isfinite(dpcm_y) and dpcm_x > 0.0 and dpcm_y > 0.0):
+            return web.json_response({"error": "invalid_resolution_values"}, status=400)
+
+        state.config.resolution_dpcm_x = dpcm_x
+        state.config.resolution_dpcm_y = dpcm_y
+
+        persist_error = self._persist_camera_resolutions()
+        return web.json_response(
+            {
+                "status": "ok",
+                "camera": cam_name,
+                "resolution_dpcm_x": dpcm_x,
+                "resolution_dpcm_y": dpcm_y,
+                "persisted": persist_error is None,
+                "persist_error": persist_error,
+                "persist_path": str(self._camera_resolutions_persist_path) if self._camera_resolutions_persist_path else None,
+            }
+        )
 
     async def _api_head_move_absolute(self, request: web.Request) -> web.Response:
         raw_name = request.match_info["name"]

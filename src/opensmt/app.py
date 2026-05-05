@@ -118,6 +118,38 @@ async def run_from_config(config_path: str) -> None:
     camera_cfg_runtime["nozzles"] = camera_nozzles
     camera_cfg_runtime["_nozzle_offsets_persist_path"] = str(offsets_persist_path)
 
+    camera_res_persist_path_raw = camera_cfg_runtime.get("camera_resolutions_persist_path")
+    if camera_res_persist_path_raw is not None:
+        camera_res_persist_path = Path(str(camera_res_persist_path_raw)).expanduser()
+        if not camera_res_persist_path.is_absolute():
+            camera_res_persist_path = (cfg_path.parent / camera_res_persist_path).resolve()
+    else:
+        camera_res_persist_path = cfg_path.with_name(f"{cfg_path.stem}.camera_resolutions.runtime.json")
+
+    camera_items = list(camera_cfg_runtime.get("cameras", []))
+    if camera_res_persist_path.is_file():
+        try:
+            persisted_res = json.loads(camera_res_persist_path.read_text(encoding="utf-8"))
+            if isinstance(persisted_res, dict):
+                for item in camera_items:
+                    if not isinstance(item, dict):
+                        continue
+                    cam_name = str(item.get("name", "")).upper()
+                    persisted_cam = persisted_res.get(cam_name)
+                    if not isinstance(persisted_cam, dict):
+                        continue
+                    if "resolution_dpcm_x" in persisted_cam:
+                        item["resolution_dpcm_x"] = float(persisted_cam["resolution_dpcm_x"])
+                    if "resolution_dpcm_y" in persisted_cam:
+                        item["resolution_dpcm_y"] = float(persisted_cam["resolution_dpcm_y"])
+            else:
+                log.warning("Ignoring persisted camera resolutions at %s: root is not an object", camera_res_persist_path)
+        except Exception as exc:
+            log.warning("Failed to load persisted camera resolutions from %s: %s", camera_res_persist_path, exc)
+
+    camera_cfg_runtime["cameras"] = camera_items
+    camera_cfg_runtime["_camera_resolutions_persist_path"] = str(camera_res_persist_path)
+
     # Build NozzleConfigStore from camera config
     nozzle_configs: list[NozzleConfig] = []
     for item in camera_cfg_runtime.get("nozzles", []):

@@ -339,6 +339,7 @@ class ControlApiClient(QObject):
 
 class CameraPreviewWidget(QWidget):
     vector_drawn = Signal(float, float)
+    square_drawn = Signal(float, float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -349,9 +350,14 @@ class CameraPreviewWidget(QWidget):
         self._drag_start = QPointF()
         self._drag_end = QPointF()
         self._drag_active = False
+        self._square_mode = False
         self.setMinimumSize(360, 270)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
+
+    def set_square_mode(self, enabled: bool) -> None:
+        self._square_mode = bool(enabled)
+        self.update()
 
     def set_zoom(self, value: float) -> None:
         self._zoom = max(1.0, min(4.0, float(value)))
@@ -379,16 +385,25 @@ class CameraPreviewWidget(QWidget):
 
         if self._drag_active:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(QPen(QColor("#ff3b3b"), 2))
-            p.drawLine(self._drag_start, self._drag_end)
             dx = self._drag_end.x() - self._drag_start.x()
             dy = self._drag_end.y() - self._drag_start.y()
-            p.setPen(QPen(QColor("#8ba3cf"), 1))
-            p.drawText(
-                int(self._drag_end.x()) + 6,
-                int(self._drag_end.y()) - 6,
-                f"dx={dx:.1f}px dy={dy:.1f}px",
-            )
+            if self._square_mode:
+                side = max(abs(dx), abs(dy))
+                x0 = self._drag_start.x() if dx >= 0 else self._drag_start.x() - side
+                y0 = self._drag_start.y() if dy >= 0 else self._drag_start.y() - side
+                p.setPen(QPen(QColor("#ffc000"), 2))
+                p.drawRect(int(x0), int(y0), int(side), int(side))
+                p.setPen(QPen(QColor("#8ba3cf"), 1))
+                p.drawText(int(x0) + 6, int(y0) - 6, f"10x10mm sample: {side:.1f}px")
+            else:
+                p.setPen(QPen(QColor("#ff3b3b"), 2))
+                p.drawLine(self._drag_start, self._drag_end)
+                p.setPen(QPen(QColor("#8ba3cf"), 1))
+                p.drawText(
+                    int(self._drag_end.x()) + 6,
+                    int(self._drag_end.y()) - 6,
+                    f"dx={dx:.1f}px dy={dy:.1f}px",
+                )
 
     def mousePressEvent(self, event: Any) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -404,20 +419,40 @@ class CameraPreviewWidget(QWidget):
     def mouseMoveEvent(self, event: Any) -> None:
         if not self._drag_active:
             return
-        self._drag_end = QPointF(event.position())
+        p = QPointF(event.position())
+        if self._square_mode:
+            self._drag_end = self._constrain_square_point(self._drag_start, p)
+        else:
+            self._drag_end = p
         self.update()
 
     def mouseReleaseEvent(self, event: Any) -> None:
         if event.button() != Qt.MouseButton.LeftButton or not self._drag_active:
             return
-        self._drag_end = QPointF(event.position())
+        p = QPointF(event.position())
+        if self._square_mode:
+            self._drag_end = self._constrain_square_point(self._drag_start, p)
+        else:
+            self._drag_end = p
         self._drag_active = False
 
         s0 = self._widget_to_source(self._drag_start)
         s1 = self._widget_to_source(self._drag_end)
         if s0 is not None and s1 is not None:
-            self.vector_drawn.emit(s1.x() - s0.x(), s1.y() - s0.y())
+            if self._square_mode:
+                self.square_drawn.emit(abs(s1.x() - s0.x()), abs(s1.y() - s0.y()))
+            else:
+                self.vector_drawn.emit(s1.x() - s0.x(), s1.y() - s0.y())
         self.update()
+
+    @staticmethod
+    def _constrain_square_point(start: QPointF, current: QPointF) -> QPointF:
+        dx = current.x() - start.x()
+        dy = current.y() - start.y()
+        side = max(abs(dx), abs(dy))
+        sx = 1.0 if dx >= 0.0 else -1.0
+        sy = 1.0 if dy >= 0.0 else -1.0
+        return QPointF(start.x() + sx * side, start.y() + sy * side)
 
     def _compute_source_rect(self) -> QRectF:
         fw = float(self._frame.width())
@@ -458,12 +493,15 @@ class CameraPreviewWidget(QWidget):
 class CameraTile(QFrame):
     vector_move_requested = Signal(str, float, float)
     camera_selected = Signal(str)
+    calibrate_requested = Signal(str, float, float)
 
     def __init__(self, camera_name: str) -> None:
         super().__init__()
         self.camera_name = camera_name
         self._resolution_dpcm_x = 0.0
         self._resolution_dpcm_y = 0.0
+        self._pending_square_px_x = 0.0
+        self._pending_square_px_y = 0.0
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -474,6 +512,7 @@ class CameraTile(QFrame):
         self._preview = CameraPreviewWidget()
         self._preview.setStyleSheet("background:#070b14; border:1px solid #2a3d66;")
         self._preview.vector_drawn.connect(self._on_vector_drawn)
+        self._preview.square_drawn.connect(self._on_square_drawn)
         self._preview.setMinimumHeight(300)
 
         self._camera_menu_btn = QToolButton(self._preview)
@@ -513,6 +552,22 @@ class CameraTile(QFrame):
         self._zoom.setCurrentIndex(0)
         self._zoom.currentIndexChanged.connect(self._on_zoom_changed)
         controls.addWidget(self._zoom)
+
+        self._btn_draw_square = QToolButton()
+        self._btn_draw_square.setText("Draw 10mm")
+        self._btn_draw_square.setCheckable(True)
+        self._btn_draw_square.toggled.connect(self._preview.set_square_mode)
+        controls.addWidget(self._btn_draw_square)
+
+        self._btn_apply_cal = QPushButton("Apply Cal")
+        self._btn_apply_cal.setEnabled(False)
+        self._btn_apply_cal.clicked.connect(self._emit_apply_calibration)
+        controls.addWidget(self._btn_apply_cal)
+
+        self._cal_info = QLabel("")
+        self._cal_info.setStyleSheet("color:#8ba3cf;")
+        controls.addWidget(self._cal_info)
+
         footer.addWidget(self._name)
         footer.addStretch(1)
         footer.addWidget(self._state)
@@ -587,6 +642,19 @@ class CameraTile(QFrame):
         if abs(dx_mm) < 1e-9 and abs(dy_mm) < 1e-9:
             return
         self.vector_move_requested.emit(self.camera_name, dx_mm, dy_mm)
+
+    def _on_square_drawn(self, side_px_x: float, side_px_y: float) -> None:
+        self._pending_square_px_x = float(side_px_x)
+        self._pending_square_px_y = float(side_px_y)
+        self._btn_apply_cal.setEnabled(self._pending_square_px_x > 1.0 and self._pending_square_px_y > 1.0)
+        self._cal_info.setText(f"{self._pending_square_px_x:.1f}px x {self._pending_square_px_y:.1f}px")
+        self._btn_draw_square.setChecked(False)
+
+    def _emit_apply_calibration(self) -> None:
+        if self._pending_square_px_x <= 1.0 or self._pending_square_px_y <= 1.0:
+            return
+        # 10 mm equals 1 cm, so pixel count over the drawn side equals dots per cm.
+        self.calibrate_requested.emit(self.camera_name, self._pending_square_px_x, self._pending_square_px_y)
 
 
 class NozzleCard(QFrame):
@@ -1759,6 +1827,7 @@ class ControlWindow(QMainWindow):
             if tile is None:
                 tile = CameraTile(name)
                 tile.vector_move_requested.connect(self._on_camera_vector_move)
+                tile.calibrate_requested.connect(self._on_camera_calibrate)
                 tile.camera_selected.connect(self._on_camera_selected)
                 self._camera_tiles[name] = tile
 
@@ -2109,6 +2178,33 @@ class ControlWindow(QMainWindow):
             f"REQ: {camera_name} vector move dx={dx_mm:.3f}mm dy={dy_mm:.3f}mm -> X={target_x:.3f} Y={target_y:.3f}"
         )
         self._move_camera_to_xy(target_x, target_y)
+
+    def _on_camera_calibrate(self, camera_name: str, dpcm_x: float, dpcm_y: float) -> None:
+        self._api.post_json(
+            f"/api/camera/{camera_name}/calibrate-resolution",
+            {"resolution_dpcm_x": dpcm_x, "resolution_dpcm_y": dpcm_y},
+            lambda ok, status, data, cam=camera_name: self._on_camera_calibrated(cam, ok, status, data),
+        )
+        self._log_line(f"REQ: {camera_name} calibrate resolution ({dpcm_x:.2f}, {dpcm_y:.2f}) dpcm")
+
+    def _on_camera_calibrated(self, camera_name: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"ERR {status}: {camera_name} calibration failed: {data.get('error', 'request_failed')}")
+            return
+
+        dpcm_x = float(data.get("resolution_dpcm_x", 0.0) or 0.0)
+        dpcm_y = float(data.get("resolution_dpcm_y", 0.0) or 0.0)
+        tile = self._camera_tiles.get(camera_name.upper())
+        if tile is not None:
+            tile.set_resolution_dpcm(dpcm_x, dpcm_y)
+
+        if data.get("persisted", True):
+            self._log_line(f"OK: {camera_name} calibrated to {dpcm_x:.2f}/{dpcm_y:.2f} dpcm")
+        else:
+            self._log_line(
+                f"WARN: {camera_name} calibrated in runtime only: {data.get('persist_error', 'persistence_not_configured')}"
+            )
+        self._poll_status()
 
     def _go_to_feeder_survey(self) -> None:
         self._feeders_tabs.setCurrentIndex(0)

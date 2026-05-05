@@ -1,29 +1,29 @@
 {
-  "feeder_id": "A100000000000001",
+  "feeder_id": "53D64C75B3F152EA",
   "feeder_type": "tray_feeder",
   "pick_location": {
-    "x": 120.2,
-    "y": 99.3
+    "x": 107.8,
+    "y": 100.0
   },
-  "pick_height": -1.1,
-  "manufacturer_part_number": "Mein Teil I",
+  "pick_height": 0.0,
+  "manufacturer_part_number": "NEW_PART",
   "type_data": {
     "parts_available_x": 1,
-    "parts_available_y": 10,
-    "preferred_direction": "Y",
+    "parts_available_y": 1,
+    "preferred_direction": "X",
     "x_step": 0.0,
-    "y_step": -4.0
+    "y_step": 0.0
   },
   "actual_data": {
     "current_index_x": 0,
     "current_index_y": 0,
     "current_pick": {
-      "x": 120.2,
-      "y": 99.3
+      "x": 107.8,
+      "y": 100.0
     },
     "last_pick": {
-      "x": 120.2,
-      "y": 59.3
+      "x": 107.8,
+      "y": 100.0
     },
     "parts_picked": 0
   }
