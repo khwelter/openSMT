@@ -9,6 +9,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPoly
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -1502,6 +1503,9 @@ class ControlWindow(QMainWindow):
         self._selected_feeder_id: str = ""
         self._packages_by_name: dict[str, dict[str, Any]] = {}
         self._parts_by_id: dict[str, dict[str, Any]] = {}
+        self._setup_cameras: list[dict[str, Any]] = []
+        self._setup_camera_current_row = -1
+        self._setup_camera_config_path = Path(__file__).resolve().parents[3] / "config" / "examples" / "system.json"
         self._current_x: float | None = None
         self._current_y: float | None = None
         self._machine_status = QLabel("X=--  Y=--")
@@ -1562,10 +1566,85 @@ class ControlWindow(QMainWindow):
         setup_tab = QWidget()
         setup_layout = QVBoxLayout(setup_tab)
         setup_layout.setContentsMargins(6, 6, 6, 6)
-        setup_note = QLabel("Reserved for setup and machine configuration workflows.")
-        setup_note.setWordWrap(True)
-        setup_layout.addWidget(setup_note)
-        setup_layout.addStretch(1)
+        self._setup_tabs = QTabWidget()
+
+        setup_cameras_tab = QWidget()
+        setup_cameras_layout = QVBoxLayout(setup_cameras_tab)
+        setup_cameras_layout.setContentsMargins(6, 6, 6, 6)
+
+        setup_cam_actions = QHBoxLayout()
+        self._setup_camera_add_btn = QPushButton("Add Camera")
+        self._setup_camera_add_btn.clicked.connect(self._on_setup_camera_add)
+        self._setup_camera_save_btn = QPushButton("Save Cameras")
+        self._setup_camera_save_btn.clicked.connect(self._on_setup_camera_save)
+        setup_cam_actions.addWidget(self._setup_camera_add_btn)
+        setup_cam_actions.addWidget(self._setup_camera_save_btn)
+        setup_cam_actions.addStretch(1)
+        setup_cameras_layout.addLayout(setup_cam_actions)
+
+        self._setup_camera_table = QTableWidget(0, 5)
+        self._setup_camera_table.setHorizontalHeaderLabels([
+            "Name",
+            "Device",
+            "FPS",
+            "Resolution (dpcm)",
+            "Rotation (deg)",
+        ])
+        self._setup_camera_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._setup_camera_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._setup_camera_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._setup_camera_table.verticalHeader().setVisible(False)
+        sch = self._setup_camera_table.horizontalHeader()
+        sch.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        sch.setStretchLastSection(True)
+        sch.setMinimumSectionSize(70)
+        sch.resizeSection(0, 120)
+        sch.resizeSection(1, 170)
+        sch.resizeSection(2, 70)
+        sch.resizeSection(3, 160)
+        sch.resizeSection(4, 110)
+        self._setup_camera_table.cellClicked.connect(self._on_setup_camera_row_selected)
+        setup_cameras_layout.addWidget(self._setup_camera_table)
+
+        setup_cam_form = QFormLayout()
+        self._setup_cam_name = QLineEdit()
+        self._setup_cam_device = QLineEdit()
+        self._setup_cam_fps = QDoubleSpinBox()
+        self._setup_cam_fps.setRange(0.1, 240.0)
+        self._setup_cam_fps.setDecimals(2)
+        self._setup_cam_res_x = QDoubleSpinBox()
+        self._setup_cam_res_x.setRange(0.0, 5000.0)
+        self._setup_cam_res_x.setDecimals(3)
+        self._setup_cam_res_y = QDoubleSpinBox()
+        self._setup_cam_res_y.setRange(0.0, 5000.0)
+        self._setup_cam_res_y.setDecimals(3)
+        self._setup_cam_flip_h = QCheckBox("Flip Horizontal")
+        self._setup_cam_flip_v = QCheckBox("Flip Vertical")
+        self._setup_cam_rotation = QDoubleSpinBox()
+        self._setup_cam_rotation.setRange(-360.0, 360.0)
+        self._setup_cam_rotation.setDecimals(3)
+
+        setup_cam_form.addRow("Name", self._setup_cam_name)
+        setup_cam_form.addRow("Device", self._setup_cam_device)
+        setup_cam_form.addRow("FPS", self._setup_cam_fps)
+        setup_cam_form.addRow("Resolution X (dpcm)", self._setup_cam_res_x)
+        setup_cam_form.addRow("Resolution Y (dpcm)", self._setup_cam_res_y)
+        setup_cam_form.addRow("", self._setup_cam_flip_h)
+        setup_cam_form.addRow("", self._setup_cam_flip_v)
+        setup_cam_form.addRow("Rotation (deg)", self._setup_cam_rotation)
+        setup_cameras_layout.addLayout(setup_cam_form)
+
+        setup_other_tab = QWidget()
+        setup_other_layout = QVBoxLayout(setup_other_tab)
+        setup_other_layout.setContentsMargins(6, 6, 6, 6)
+        setup_other_note = QLabel("Reserved for additional setup configuration groups.")
+        setup_other_note.setWordWrap(True)
+        setup_other_layout.addWidget(setup_other_note)
+        setup_other_layout.addStretch(1)
+
+        self._setup_tabs.addTab(setup_cameras_tab, "Cameras")
+        self._setup_tabs.addTab(setup_other_tab, "Other Configurations")
+        setup_layout.addWidget(self._setup_tabs)
 
         production_tab = QWidget()
         production_layout = QVBoxLayout(production_tab)
@@ -1926,6 +2005,7 @@ class ControlWindow(QMainWindow):
         self._poll_timer.start()
 
         self._load_packages_from_config()
+        self._load_setup_cameras_from_config()
         self._refresh_parts_table()
 
         QTimer.singleShot(0, self._init_splitters)
@@ -2285,6 +2365,119 @@ class ControlWindow(QMainWindow):
                 self._log_line(f"WARN: failed to load package config {path.name}: {exc}")
 
         self._refresh_package_table()
+
+    def _load_setup_cameras_from_config(self) -> None:
+        self._setup_cameras = []
+        try:
+            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
+            cameras = raw.get("cameras", []) if isinstance(raw, dict) else []
+            if isinstance(cameras, list):
+                for item in cameras:
+                    if isinstance(item, dict):
+                        self._setup_cameras.append(dict(item))
+        except Exception as exc:
+            self._log_line(f"WARN: failed to load setup cameras: {exc}")
+
+        self._refresh_setup_camera_table()
+        if self._setup_cameras:
+            self._setup_camera_table.selectRow(0)
+            self._on_setup_camera_row_selected(0, 0)
+        else:
+            self._setup_camera_current_row = -1
+
+    def _refresh_setup_camera_table(self) -> None:
+        self._setup_camera_table.setRowCount(len(self._setup_cameras))
+        for row, cam in enumerate(self._setup_cameras):
+            name = str(cam.get("name", "")).strip().upper()
+            device = str(cam.get("device", "")).strip()
+            fps = self._fmt(cam.get("fps"))
+            res_x = self._fmt(cam.get("resolution_dpcm_x"))
+            res_y = self._fmt(cam.get("resolution_dpcm_y"))
+            rot = self._fmt(cam.get("rotation_deg"))
+            cells = [name, device, fps, f"{res_x} / {res_y}", rot]
+            for col, value in enumerate(cells):
+                self._setup_camera_table.setItem(row, col, QTableWidgetItem(value))
+
+    def _store_current_setup_camera_editor(self) -> None:
+        row = self._setup_camera_current_row
+        if row < 0 or row >= len(self._setup_cameras):
+            return
+        target = self._setup_cameras[row]
+        target["name"] = self._setup_cam_name.text().strip().upper()
+        target["device"] = self._setup_cam_device.text().strip()
+        target["fps"] = float(self._setup_cam_fps.value())
+        target["resolution_dpcm_x"] = float(self._setup_cam_res_x.value())
+        target["resolution_dpcm_y"] = float(self._setup_cam_res_y.value())
+        target["flip_horizontal"] = bool(self._setup_cam_flip_h.isChecked())
+        target["flip_vertical"] = bool(self._setup_cam_flip_v.isChecked())
+        target["rotation_deg"] = float(self._setup_cam_rotation.value())
+
+    def _on_setup_camera_row_selected(self, row: int, _col: int) -> None:
+        self._store_current_setup_camera_editor()
+        self._refresh_setup_camera_table()
+        self._setup_camera_current_row = int(row)
+        if row < 0 or row >= len(self._setup_cameras):
+            return
+
+        cam = self._setup_cameras[row]
+        self._setup_cam_name.setText(str(cam.get("name", "")).strip().upper())
+        self._setup_cam_device.setText(str(cam.get("device", "")).strip())
+        self._setup_cam_fps.setValue(float(cam.get("fps", 10.0) or 10.0))
+        self._setup_cam_res_x.setValue(float(cam.get("resolution_dpcm_x", 0.0) or 0.0))
+        self._setup_cam_res_y.setValue(float(cam.get("resolution_dpcm_y", 0.0) or 0.0))
+        self._setup_cam_flip_h.setChecked(bool(cam.get("flip_horizontal", False)))
+        self._setup_cam_flip_v.setChecked(bool(cam.get("flip_vertical", False)))
+        self._setup_cam_rotation.setValue(float(cam.get("rotation_deg", 0.0) or 0.0))
+
+    def _on_setup_camera_add(self) -> None:
+        self._store_current_setup_camera_editor()
+        idx = len(self._setup_cameras) + 1
+        existing = {str(c.get("name", "")).strip().upper() for c in self._setup_cameras}
+        while True:
+            name = f"CAM{idx}"
+            if name not in existing:
+                break
+            idx += 1
+        self._setup_cameras.append(
+            {
+                "name": name,
+                "device": "/dev/video0",
+                "fps": 10.0,
+                "resolution_dpcm_x": 0.0,
+                "resolution_dpcm_y": 0.0,
+                "flip_horizontal": False,
+                "flip_vertical": False,
+                "rotation_deg": 0.0,
+                "lights": {},
+                "pipelines": [],
+            }
+        )
+        self._refresh_setup_camera_table()
+        new_row = len(self._setup_cameras) - 1
+        self._setup_camera_table.selectRow(new_row)
+        self._on_setup_camera_row_selected(new_row, 0)
+
+    def _on_setup_camera_save(self) -> None:
+        self._store_current_setup_camera_editor()
+
+        names = [str(c.get("name", "")).strip().upper() for c in self._setup_cameras]
+        if any(not n for n in names):
+            self._log_line("ERR: camera save failed: camera name must not be empty")
+            return
+        if len(set(names)) != len(names):
+            self._log_line("ERR: camera save failed: duplicate camera names")
+            return
+
+        try:
+            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("system config root must be an object")
+            raw["cameras"] = self._setup_cameras
+            self._setup_camera_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+            self._refresh_setup_camera_table()
+            self._log_line(f"OK: saved camera config to {self._setup_camera_config_path}")
+        except Exception as exc:
+            self._log_line(f"ERR: camera save failed: {exc}")
 
     def _refresh_package_table(self) -> None:
         rows = sorted(self._packages_by_name.values(), key=lambda item: str(item.get("name", "")))
