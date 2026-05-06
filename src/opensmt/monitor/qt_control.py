@@ -351,12 +351,17 @@ class CameraPreviewWidget(QWidget):
         self._drag_end = QPointF()
         self._drag_active = False
         self._square_mode = False
+        self._square_reference_mm = 10.0
         self.setMinimumSize(360, 270)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
 
     def set_square_mode(self, enabled: bool) -> None:
         self._square_mode = bool(enabled)
+        self.update()
+
+    def set_square_reference_mm(self, value_mm: float) -> None:
+        self._square_reference_mm = 20.0 if float(value_mm) >= 20.0 else 10.0
         self.update()
 
     def set_zoom(self, value: float) -> None:
@@ -383,18 +388,26 @@ class CameraPreviewWidget(QWidget):
 
         p.drawPixmap(target, self._frame, src)
 
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = self._target_rect.center().x()
+        cy = self._target_rect.center().y()
+        cross_len = 10
+        p.setPen(QPen(QColor("#49b3ff"), 1))
+        p.drawLine(int(cx - cross_len), int(cy), int(cx + cross_len), int(cy))
+        p.drawLine(int(cx), int(cy - cross_len), int(cx), int(cy + cross_len))
+
         if self._drag_active:
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
             dx = self._drag_end.x() - self._drag_start.x()
             dy = self._drag_end.y() - self._drag_start.y()
             if self._square_mode:
-                side = max(abs(dx), abs(dy))
-                x0 = self._drag_start.x() if dx >= 0 else self._drag_start.x() - side
-                y0 = self._drag_start.y() if dy >= 0 else self._drag_start.y() - side
+                side = 2.0 * max(abs(dx), abs(dy))
+                x0 = self._drag_start.x() - (side / 2.0)
+                y0 = self._drag_start.y() - (side / 2.0)
                 p.setPen(QPen(QColor("#ffc000"), 2))
                 p.drawRect(int(x0), int(y0), int(side), int(side))
                 p.setPen(QPen(QColor("#8ba3cf"), 1))
-                p.drawText(int(x0) + 6, int(y0) - 6, f"10x10mm sample: {side:.1f}px")
+                sample_mm = int(self._square_reference_mm)
+                p.drawText(int(x0) + 6, int(y0) - 6, f"{sample_mm}x{sample_mm}mm sample: {side:.1f}px")
             else:
                 p.setPen(QPen(QColor("#ff3b3b"), 2))
                 p.drawLine(self._drag_start, self._drag_end)
@@ -411,8 +424,13 @@ class CameraPreviewWidget(QWidget):
         pos = QPointF(event.position())
         if not self._target_rect.contains(pos):
             return
-        self._drag_start = pos
-        self._drag_end = pos
+        if self._square_mode:
+            center = self._target_rect.center()
+            self._drag_start = QPointF(center.x(), center.y())
+            self._drag_end = self._constrain_square_corner(self._drag_start, pos)
+        else:
+            self._drag_start = pos
+            self._drag_end = pos
         self._drag_active = True
         self.update()
 
@@ -421,7 +439,7 @@ class CameraPreviewWidget(QWidget):
             return
         p = QPointF(event.position())
         if self._square_mode:
-            self._drag_end = self._constrain_square_point(self._drag_start, p)
+            self._drag_end = self._constrain_square_corner(self._drag_start, p)
         else:
             self._drag_end = p
         self.update()
@@ -431,22 +449,27 @@ class CameraPreviewWidget(QWidget):
             return
         p = QPointF(event.position())
         if self._square_mode:
-            self._drag_end = self._constrain_square_point(self._drag_start, p)
+            self._drag_end = self._constrain_square_corner(self._drag_start, p)
         else:
             self._drag_end = p
         self._drag_active = False
 
-        s0 = self._widget_to_source(self._drag_start)
-        s1 = self._widget_to_source(self._drag_end)
-        if s0 is not None and s1 is not None:
-            if self._square_mode:
-                self.square_drawn.emit(abs(s1.x() - s0.x()), abs(s1.y() - s0.y()))
-            else:
+        if self._square_mode:
+            center_src = self._widget_to_source(self._drag_start)
+            corner_src = self._widget_to_source(self._drag_end)
+            if center_src is not None and corner_src is not None:
+                side_px_x = 2.0 * abs(corner_src.x() - center_src.x())
+                side_px_y = 2.0 * abs(corner_src.y() - center_src.y())
+                self.square_drawn.emit(side_px_x, side_px_y)
+        else:
+            s0 = self._widget_to_source(self._drag_start)
+            s1 = self._widget_to_source(self._drag_end)
+            if s0 is not None and s1 is not None:
                 self.vector_drawn.emit(s1.x() - s0.x(), s1.y() - s0.y())
         self.update()
 
     @staticmethod
-    def _constrain_square_point(start: QPointF, current: QPointF) -> QPointF:
+    def _constrain_square_corner(start: QPointF, current: QPointF) -> QPointF:
         dx = current.x() - start.x()
         dy = current.y() - start.y()
         side = max(abs(dx), abs(dy))
@@ -499,6 +522,7 @@ class CameraTile(QFrame):
     def __init__(self, camera_name: str) -> None:
         super().__init__()
         self.camera_name = camera_name
+        self._square_reference_mm = 10.0
         self._resolution_dpcm_x = 0.0
         self._resolution_dpcm_y = 0.0
         self._pending_square_px_x = 0.0
@@ -577,10 +601,17 @@ class CameraTile(QFrame):
         controls.addWidget(self._zoom)
 
         self._btn_draw_square = QToolButton()
-        self._btn_draw_square.setText("Draw 10mm")
+        self._btn_draw_square.setText("Draw Center 10mm")
         self._btn_draw_square.setCheckable(True)
         self._btn_draw_square.toggled.connect(self._preview.set_square_mode)
         controls.addWidget(self._btn_draw_square)
+
+        self._square_size = QComboBox()
+        self._square_size.setMaximumWidth(84)
+        self._square_size.addItem("10 mm", 10.0)
+        self._square_size.addItem("20 mm", 20.0)
+        self._square_size.currentIndexChanged.connect(self._on_square_size_changed)
+        controls.addWidget(self._square_size)
 
         self._btn_apply_cal = QPushButton("Apply Cal")
         self._btn_apply_cal.setEnabled(False)
@@ -698,14 +729,25 @@ class CameraTile(QFrame):
         self._pending_square_px_x = float(side_px_x)
         self._pending_square_px_y = float(side_px_y)
         self._btn_apply_cal.setEnabled(self._pending_square_px_x > 1.0 and self._pending_square_px_y > 1.0)
-        self._cal_info.setText(f"{self._pending_square_px_x:.1f}px x {self._pending_square_px_y:.1f}px")
+        ref_mm = int(self._square_reference_mm)
+        self._cal_info.setText(
+            f"{self._pending_square_px_x:.1f}px x {self._pending_square_px_y:.1f}px ({ref_mm}mm)"
+        )
         self._btn_draw_square.setChecked(False)
 
     def _emit_apply_calibration(self) -> None:
         if self._pending_square_px_x <= 1.0 or self._pending_square_px_y <= 1.0:
             return
-        # 10 mm equals 1 cm, so pixel count over the drawn side equals dots per cm.
-        self.calibrate_requested.emit(self.camera_name, self._pending_square_px_x, self._pending_square_px_y)
+        sample_cm = self._square_reference_mm / 10.0
+        dpcm_x = self._pending_square_px_x / sample_cm
+        dpcm_y = self._pending_square_px_y / sample_cm
+        self.calibrate_requested.emit(self.camera_name, dpcm_x, dpcm_y)
+
+    def _on_square_size_changed(self, _idx: int) -> None:
+        value = self._square_size.currentData()
+        self._square_reference_mm = 20.0 if float(value or 10.0) >= 20.0 else 10.0
+        self._preview.set_square_reference_mm(self._square_reference_mm)
+        self._btn_draw_square.setText(f"Draw Center {int(self._square_reference_mm)}mm")
 
     def _emit_light_set(self, dot: QToolButton, value: int) -> None:
         key = str(dot.property("light_key") or "").strip().lower()
