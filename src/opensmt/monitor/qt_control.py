@@ -2370,7 +2370,13 @@ class ControlWindow(QMainWindow):
         self._setup_cameras = []
         try:
             raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
-            cameras = raw.get("cameras", []) if isinstance(raw, dict) else []
+            cameras: Any = []
+            if isinstance(raw, dict):
+                camera_block = raw.get("camera")
+                if isinstance(camera_block, dict):
+                    cameras = camera_block.get("cameras", [])
+                else:
+                    cameras = raw.get("cameras", [])
             if isinstance(cameras, list):
                 for item in cameras:
                     if isinstance(item, dict):
@@ -2472,7 +2478,14 @@ class ControlWindow(QMainWindow):
             raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("system config root must be an object")
-            raw["cameras"] = self._setup_cameras
+
+            camera_block = raw.get("camera")
+            if isinstance(camera_block, dict):
+                camera_block["cameras"] = self._setup_cameras
+            else:
+                # Backward compatibility fallback if a flat schema is used.
+                raw["cameras"] = self._setup_cameras
+
             self._setup_camera_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
             self._refresh_setup_camera_table()
             self._log_line(f"OK: saved camera config to {self._setup_camera_config_path}")
