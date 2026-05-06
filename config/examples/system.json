@@ -145,14 +145,14 @@
     "cameras": [
       {
         "name": "BOTTOM",
-        "x": 297.4,
-        "y": 66.5,
+        "x": 296.6,
+        "y": 65.0,
         "device": "/dev/video0",
         "fps": 10,
         "resolution_dpcm_x": 95.0,
         "resolution_dpcm_y": 95.0,
         "flip_horizontal": false,
-        "flip_vertical": false,
+        "flip_vertical": true,
         "rotation_deg": 0,
         "lights": {
           "standard": { "board": "XY", "index": 0, "on_value": 1 },

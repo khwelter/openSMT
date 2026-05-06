@@ -1,0 +1,8 @@
+{
+  "name": "R0402",
+  "footprint": "R_0402_1005Metric",
+  "length_mm": 1.0,
+  "width_mm": 0.5,
+  "height_mm": 0.35,
+  "pin_count": 2
+}

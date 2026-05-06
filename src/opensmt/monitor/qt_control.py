@@ -1500,6 +1500,8 @@ class ControlWindow(QMainWindow):
         self._feeders_by_id: dict[str, dict[str, Any]] = {}
         self._feeder_tab_index: dict[str, int] = {}
         self._selected_feeder_id: str = ""
+        self._packages_by_name: dict[str, dict[str, Any]] = {}
+        self._parts_by_id: dict[str, dict[str, Any]] = {}
         self._current_x: float | None = None
         self._current_y: float | None = None
         self._machine_status = QLabel("X=--  Y=--")
@@ -1572,6 +1574,144 @@ class ControlWindow(QMainWindow):
         production_note.setWordWrap(True)
         production_layout.addWidget(production_note)
         production_layout.addStretch(1)
+
+        parts_packages_tab = QWidget()
+        parts_packages_layout = QVBoxLayout(parts_packages_tab)
+        parts_packages_layout.setContentsMargins(6, 6, 6, 6)
+        self._parts_packages_tabs = QTabWidget()
+
+        package_survey_tab = QWidget()
+        package_survey_layout = QVBoxLayout(package_survey_tab)
+        package_survey_layout.setContentsMargins(6, 6, 6, 6)
+
+        package_actions = QHBoxLayout()
+        self._add_package_btn = QPushButton("Add Package")
+        self._add_package_btn.clicked.connect(self._on_add_package)
+        package_actions.addWidget(self._add_package_btn)
+        package_actions.addStretch(1)
+        package_survey_layout.addLayout(package_actions)
+
+        self._package_table = QTableWidget(0, 6)
+        self._package_table.setHorizontalHeaderLabels([
+            "Name",
+            "Footprint",
+            "Length (mm)",
+            "Width (mm)",
+            "Height (mm)",
+            "Pins",
+        ])
+        self._package_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._package_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._package_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._package_table.verticalHeader().setVisible(False)
+        pkg_header = self._package_table.horizontalHeader()
+        pkg_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        pkg_header.setStretchLastSection(True)
+        pkg_header.setMinimumSectionSize(70)
+        pkg_header.resizeSection(0, 120)
+        pkg_header.resizeSection(1, 190)
+        pkg_header.resizeSection(2, 95)
+        pkg_header.resizeSection(3, 95)
+        pkg_header.resizeSection(4, 95)
+        pkg_header.resizeSection(5, 70)
+        self._package_table.cellDoubleClicked.connect(self._on_package_row_double_clicked)
+        package_survey_layout.addWidget(self._package_table)
+
+        package_details_tab = QWidget()
+        package_details_layout = QVBoxLayout(package_details_tab)
+        package_details_layout.setContentsMargins(6, 6, 6, 6)
+
+        package_detail_form = QFormLayout()
+        self._package_detail_name = QLineEdit()
+        self._package_detail_name.setReadOnly(True)
+        self._package_detail_footprint = QLineEdit()
+        self._package_detail_footprint.setReadOnly(True)
+        self._package_detail_length = QLineEdit()
+        self._package_detail_length.setReadOnly(True)
+        self._package_detail_width = QLineEdit()
+        self._package_detail_width.setReadOnly(True)
+        self._package_detail_height = QLineEdit()
+        self._package_detail_height.setReadOnly(True)
+        self._package_detail_pins = QLineEdit()
+        self._package_detail_pins.setReadOnly(True)
+        package_detail_form.addRow("Name", self._package_detail_name)
+        package_detail_form.addRow("Footprint", self._package_detail_footprint)
+        package_detail_form.addRow("Length (mm)", self._package_detail_length)
+        package_detail_form.addRow("Width (mm)", self._package_detail_width)
+        package_detail_form.addRow("Height (mm)", self._package_detail_height)
+        package_detail_form.addRow("Pin Count", self._package_detail_pins)
+        package_details_layout.addLayout(package_detail_form)
+        package_back_row = QHBoxLayout()
+        package_back_row.addStretch(1)
+        self._package_back_btn = QPushButton("Back to Packages")
+        self._package_back_btn.clicked.connect(lambda: self._parts_packages_tabs.setCurrentIndex(0))
+        package_back_row.addWidget(self._package_back_btn)
+        package_details_layout.addLayout(package_back_row)
+        package_details_layout.addStretch(1)
+
+        parts_survey_tab = QWidget()
+        parts_survey_layout = QVBoxLayout(parts_survey_tab)
+        parts_survey_layout.setContentsMargins(6, 6, 6, 6)
+
+        part_actions = QHBoxLayout()
+        self._add_part_btn = QPushButton("Add Part")
+        self._add_part_btn.clicked.connect(self._on_add_part)
+        part_actions.addWidget(self._add_part_btn)
+        part_actions.addStretch(1)
+        parts_survey_layout.addLayout(part_actions)
+
+        self._part_table = QTableWidget(0, 4)
+        self._part_table.setHorizontalHeaderLabels([
+            "Part ID",
+            "Description",
+            "Package",
+            "Quantity",
+        ])
+        self._part_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._part_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._part_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._part_table.verticalHeader().setVisible(False)
+        part_header = self._part_table.horizontalHeader()
+        part_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        part_header.setStretchLastSection(True)
+        part_header.setMinimumSectionSize(70)
+        part_header.resizeSection(0, 120)
+        part_header.resizeSection(1, 220)
+        part_header.resizeSection(2, 110)
+        part_header.resizeSection(3, 90)
+        self._part_table.cellDoubleClicked.connect(self._on_part_row_double_clicked)
+        parts_survey_layout.addWidget(self._part_table)
+
+        part_details_tab = QWidget()
+        part_details_layout = QVBoxLayout(part_details_tab)
+        part_details_layout.setContentsMargins(6, 6, 6, 6)
+        part_detail_form = QFormLayout()
+        self._part_detail_id = QLineEdit()
+        self._part_detail_id.setReadOnly(True)
+        self._part_detail_description = QLineEdit()
+        self._part_detail_description.setReadOnly(True)
+        self._part_detail_package = QLineEdit()
+        self._part_detail_package.setReadOnly(True)
+        self._part_detail_quantity = QLineEdit()
+        self._part_detail_quantity.setReadOnly(True)
+        part_detail_form.addRow("Part ID", self._part_detail_id)
+        part_detail_form.addRow("Description", self._part_detail_description)
+        part_detail_form.addRow("Package", self._part_detail_package)
+        part_detail_form.addRow("Quantity", self._part_detail_quantity)
+        part_details_layout.addLayout(part_detail_form)
+        part_back_row = QHBoxLayout()
+        part_back_row.addStretch(1)
+        self._part_back_btn = QPushButton("Back to Parts")
+        self._part_back_btn.clicked.connect(lambda: self._parts_packages_tabs.setCurrentIndex(2))
+        part_back_row.addWidget(self._part_back_btn)
+        part_details_layout.addLayout(part_back_row)
+        part_details_layout.addStretch(1)
+
+        self._parts_packages_tabs.addTab(package_survey_tab, "Packages")
+        self._parts_packages_tabs.addTab(package_details_tab, "Package Details")
+        self._parts_packages_tabs.addTab(parts_survey_tab, "Parts")
+        self._parts_packages_tabs.addTab(part_details_tab, "Part Details")
+        parts_packages_layout.addWidget(self._parts_packages_tabs)
 
         feeders_tab = QWidget()
         feeders_layout = QVBoxLayout(feeders_tab)
@@ -1665,6 +1805,7 @@ class ControlWindow(QMainWindow):
 
         gp_tabs.addTab(setup_tab, "Setup & Configuration")
         gp_tabs.addTab(production_tab, "Production")
+        gp_tabs.addTab(parts_packages_tab, "Parts & Packages")
         gp_tabs.addTab(feeders_tab, "Feeders")
         gp_tabs.addTab(diagnostics_tab, "Diagnostics Log")
         gp_layout.addWidget(gp_tabs)
@@ -1783,6 +1924,9 @@ class ControlWindow(QMainWindow):
         self._poll_timer.setInterval(800)
         self._poll_timer.timeout.connect(self._poll_status)
         self._poll_timer.start()
+
+        self._load_packages_from_config()
+        self._refresh_parts_table()
 
         QTimer.singleShot(0, self._init_splitters)
 
@@ -2112,6 +2256,141 @@ class ControlWindow(QMainWindow):
             if str(selected.get("feeder_type", "")).strip().lower() == "tray_feeder" and self._tray_editor.is_dirty():
                 return
             self._open_feeder_editor(self._selected_feeder_id, activate_tab=False)
+
+    def _load_packages_from_config(self) -> None:
+        self._packages_by_name = {}
+        cfg_root = Path(__file__).resolve().parents[3] / "config" / "examples" / "packages"
+        if not cfg_root.exists() or not cfg_root.is_dir():
+            self._log_line(f"WARN: package config directory not found: {cfg_root}")
+            self._refresh_package_table()
+            return
+
+        for path in sorted(cfg_root.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raise ValueError("expected JSON object")
+                name = str(raw.get("name", "")).strip().upper()
+                if not name:
+                    raise ValueError("missing package name")
+                self._packages_by_name[name] = {
+                    "name": name,
+                    "footprint": str(raw.get("footprint", "")).strip(),
+                    "length_mm": float(raw.get("length_mm", 0.0) or 0.0),
+                    "width_mm": float(raw.get("width_mm", 0.0) or 0.0),
+                    "height_mm": float(raw.get("height_mm", 0.0) or 0.0),
+                    "pin_count": int(raw.get("pin_count", 0) or 0),
+                }
+            except Exception as exc:
+                self._log_line(f"WARN: failed to load package config {path.name}: {exc}")
+
+        self._refresh_package_table()
+
+    def _refresh_package_table(self) -> None:
+        rows = sorted(self._packages_by_name.values(), key=lambda item: str(item.get("name", "")))
+        self._package_table.setRowCount(len(rows))
+        for row, pkg in enumerate(rows):
+            cells = [
+                str(pkg.get("name", "")),
+                str(pkg.get("footprint", "")),
+                self._fmt(pkg.get("length_mm")),
+                self._fmt(pkg.get("width_mm")),
+                self._fmt(pkg.get("height_mm")),
+                str(int(pkg.get("pin_count", 0) or 0)),
+            ]
+            for col, value in enumerate(cells):
+                self._package_table.setItem(row, col, QTableWidgetItem(value))
+
+    def _on_add_package(self) -> None:
+        idx = len(self._packages_by_name) + 1
+        while True:
+            name = f"NEW_PKG_{idx:03d}"
+            if name not in self._packages_by_name:
+                break
+            idx += 1
+
+        self._packages_by_name[name] = {
+            "name": name,
+            "footprint": "",
+            "length_mm": 1.0,
+            "width_mm": 1.0,
+            "height_mm": 0.5,
+            "pin_count": 2,
+        }
+        self._refresh_package_table()
+        self._open_package_details(name)
+
+    def _on_package_row_double_clicked(self, row: int, _col: int) -> None:
+        item = self._package_table.item(row, 0)
+        if item is None:
+            return
+        name = item.text().strip().upper()
+        if name:
+            self._open_package_details(name)
+
+    def _open_package_details(self, name: str) -> None:
+        pkg = self._packages_by_name.get(str(name).strip().upper())
+        if pkg is None:
+            return
+        self._package_detail_name.setText(str(pkg.get("name", "")))
+        self._package_detail_footprint.setText(str(pkg.get("footprint", "")))
+        self._package_detail_length.setText(self._fmt(pkg.get("length_mm")))
+        self._package_detail_width.setText(self._fmt(pkg.get("width_mm")))
+        self._package_detail_height.setText(self._fmt(pkg.get("height_mm")))
+        self._package_detail_pins.setText(str(int(pkg.get("pin_count", 0) or 0)))
+        self._parts_packages_tabs.setCurrentIndex(1)
+
+    def _refresh_parts_table(self) -> None:
+        rows = sorted(self._parts_by_id.values(), key=lambda item: str(item.get("part_id", "")))
+        self._part_table.setRowCount(len(rows))
+        for row, part in enumerate(rows):
+            cells = [
+                str(part.get("part_id", "")),
+                str(part.get("description", "")),
+                str(part.get("package", "")),
+                str(int(part.get("quantity", 0) or 0)),
+            ]
+            for col, value in enumerate(cells):
+                self._part_table.setItem(row, col, QTableWidgetItem(value))
+
+    def _on_add_part(self) -> None:
+        idx = len(self._parts_by_id) + 1
+        while True:
+            part_id = f"PART-{idx:03d}"
+            if part_id not in self._parts_by_id:
+                break
+            idx += 1
+
+        package_name = ""
+        if self._packages_by_name:
+            package_name = sorted(self._packages_by_name.keys())[0]
+
+        self._parts_by_id[part_id] = {
+            "part_id": part_id,
+            "description": "",
+            "package": package_name,
+            "quantity": 1,
+        }
+        self._refresh_parts_table()
+        self._open_part_details(part_id)
+
+    def _on_part_row_double_clicked(self, row: int, _col: int) -> None:
+        item = self._part_table.item(row, 0)
+        if item is None:
+            return
+        part_id = item.text().strip().upper()
+        if part_id:
+            self._open_part_details(part_id)
+
+    def _open_part_details(self, part_id: str) -> None:
+        part = self._parts_by_id.get(str(part_id).strip().upper())
+        if part is None:
+            return
+        self._part_detail_id.setText(str(part.get("part_id", "")))
+        self._part_detail_description.setText(str(part.get("description", "")))
+        self._part_detail_package.setText(str(part.get("package", "")))
+        self._part_detail_quantity.setText(str(int(part.get("quantity", 0) or 0)))
+        self._parts_packages_tabs.setCurrentIndex(3)
 
     def _on_feeder_row_double_clicked(self, row: int, _col: int) -> None:
         item = self._feeder_table.item(row, 0)
