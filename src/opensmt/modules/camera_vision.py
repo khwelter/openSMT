@@ -256,16 +256,7 @@ class CameraVisionModule:
 
     async def stop(self) -> None:
         for state in self._cameras.values():
-            if state.capture_task:
-                state.capture_task.cancel()
-                try:
-                    await state.capture_task
-                except asyncio.CancelledError:
-                    pass
-            if state.cap:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, state.cap.release)
-                state.cap = None
+            await self._close_camera(state)
 
         if self._runner:
             await self._runner.cleanup()
@@ -274,6 +265,20 @@ class CameraVisionModule:
     # ------------------------------------------------------------------
     # Camera capture
     # ------------------------------------------------------------------
+
+    async def _close_camera(self, state: CameraState) -> None:
+        if state.capture_task:
+            state.capture_task.cancel()
+            try:
+                await state.capture_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                state.capture_task = None
+        if state.cap:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, state.cap.release)
+            state.cap = None
 
     async def _open_camera(self, state: CameraState) -> None:
         loop = asyncio.get_running_loop()
@@ -469,6 +474,7 @@ class CameraVisionModule:
         app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
         app.router.add_post("/api/nozzle/{name}/calculate-offset-top", self._api_nozzle_calculate_offset_top)
         app.router.add_post("/api/camera/{name}/light", self._api_camera_light)
+        app.router.add_post("/api/camera/{name}/settings", self._api_camera_settings)
         app.router.add_post("/api/camera/{name}/calibrate-resolution", self._api_camera_calibrate_resolution)
         app.router.add_get("/api/status", self._api_status)
 
@@ -1150,6 +1156,72 @@ class CameraVisionModule:
                 "persisted": persist_error is None,
                 "persist_error": persist_error,
                 "persist_path": str(self._camera_resolutions_persist_path) if self._camera_resolutions_persist_path else None,
+            }
+        )
+
+    async def _api_camera_settings(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        cam_name = raw_name.upper()
+        state = self._cameras.get(cam_name)
+        if state is None:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        try:
+            body = await request.json()
+            device = str(body.get("device", state.config.device)).strip()
+            fps = float(body.get("fps", state.config.fps))
+            resolution_dpcm_x = float(body.get("resolution_dpcm_x"))
+            resolution_dpcm_y = float(body.get("resolution_dpcm_y"))
+            rotation_deg = float(body.get("rotation_deg", 0.0))
+            flip_horizontal = bool(body.get("flip_horizontal", False))
+            flip_vertical = bool(body.get("flip_vertical", False))
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not (
+            math.isfinite(resolution_dpcm_x)
+            and math.isfinite(resolution_dpcm_y)
+            and math.isfinite(fps)
+            and math.isfinite(rotation_deg)
+            and resolution_dpcm_x > 0.0
+            and resolution_dpcm_y > 0.0
+            and fps > 0.0
+        ):
+            return web.json_response({"error": "invalid_camera_settings"}, status=400)
+
+        if not device.startswith("/dev/"):
+            return web.json_response({"error": "invalid_device_path"}, status=400)
+
+        reopen_required = device != state.config.device
+
+        state.config.device = device
+        state.config.fps = fps
+        state.config.resolution_dpcm_x = resolution_dpcm_x
+        state.config.resolution_dpcm_y = resolution_dpcm_y
+        state.config.flip_horizontal = flip_horizontal
+        state.config.flip_vertical = flip_vertical
+        state.config.rotation_deg = rotation_deg
+        state.current_rotation_deg = rotation_deg
+
+        if reopen_required:
+            await self._close_camera(state)
+            await self._open_camera(state)
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "camera": cam_name,
+                "device": device,
+                "fps": fps,
+                "resolution_dpcm_x": resolution_dpcm_x,
+                "resolution_dpcm_y": resolution_dpcm_y,
+                "flip_horizontal": flip_horizontal,
+                "flip_vertical": flip_vertical,
+                "rotation_deg": rotation_deg,
+                "reopened": reopen_required,
             }
         )
 

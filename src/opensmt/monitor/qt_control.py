@@ -2489,8 +2489,57 @@ class ControlWindow(QMainWindow):
             self._setup_camera_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
             self._refresh_setup_camera_table()
             self._log_line(f"OK: saved camera config to {self._setup_camera_config_path}")
+            for camera in self._setup_cameras:
+                self._apply_setup_camera_runtime(camera)
         except Exception as exc:
             self._log_line(f"ERR: camera save failed: {exc}")
+
+    def _apply_setup_camera_runtime(self, camera: dict[str, Any]) -> None:
+        name = str(camera.get("name", "")).strip().upper()
+        if not name:
+            return
+
+        payload = {
+            "device": str(camera.get("device", "")).strip(),
+            "fps": float(camera.get("fps", 0.0) or 0.0),
+            "resolution_dpcm_x": float(camera.get("resolution_dpcm_x", 0.0) or 0.0),
+            "resolution_dpcm_y": float(camera.get("resolution_dpcm_y", 0.0) or 0.0),
+            "flip_horizontal": bool(camera.get("flip_horizontal", False)),
+            "flip_vertical": bool(camera.get("flip_vertical", False)),
+            "rotation_deg": float(camera.get("rotation_deg", 0.0) or 0.0),
+        }
+        self._api.post_json(
+            f"/api/camera/{name}/settings",
+            payload,
+            lambda ok, status, data, cam=name, applied=payload: self._on_setup_camera_runtime_applied(cam, applied, ok, status, data),
+        )
+
+    def _on_setup_camera_runtime_applied(
+        self,
+        camera_name: str,
+        payload: dict[str, Any],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+    ) -> None:
+        if not ok:
+            self._log_line(
+                f"WARN {status}: {camera_name} runtime camera settings not applied: {data.get('error', 'request_failed')}"
+            )
+            return
+
+        tile = self._camera_tiles.get(camera_name)
+        if tile is not None:
+            tile.set_resolution_dpcm(
+                float(payload.get("resolution_dpcm_x", 0.0) or 0.0),
+                float(payload.get("resolution_dpcm_y", 0.0) or 0.0),
+            )
+        reopened = bool(data.get("reopened", False))
+        if reopened:
+            self._log_line(f"OK: {camera_name} runtime camera settings applied and device reopened")
+        else:
+            self._log_line(f"OK: {camera_name} runtime camera settings applied")
+        self._poll_status()
 
     def _refresh_package_table(self) -> None:
         rows = sorted(self._packages_by_name.values(), key=lambda item: str(item.get("name", "")))
