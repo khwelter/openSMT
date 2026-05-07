@@ -463,6 +463,7 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/set-calibration-spot-here", self._api_coord_set_calibration_spot_here)
         app.router.add_post("/api/coord/move-xy", self._api_coord_move_xy)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
+        app.router.add_post("/api/config/location/{name}", self._api_config_location_set)
         app.router.add_get("/api/feeders", self._api_feeders)
         app.router.add_post("/api/feeders", self._api_feeder_create)
         app.router.add_get("/api/feeders/{feeder_id}", self._api_feeder_get)
@@ -1073,6 +1074,15 @@ class CameraVisionModule:
                 return None
         return None
 
+    def _set_camera_xy(self, camera_name: str, x: float, y: float) -> bool:
+        for cam_cfg in self.config.get("cameras", []):
+            if str(cam_cfg.get("name", "")).upper() != str(camera_name).upper():
+                continue
+            cam_cfg["x"] = float(x)
+            cam_cfg["y"] = float(y)
+            return True
+        return False
+
     def _persist_nozzle_offsets(self) -> str | None:
         """Persist current nozzle offsets to runtime sidecar file.
 
@@ -1178,8 +1188,23 @@ class CameraVisionModule:
             rotation_deg = float(body.get("rotation_deg", 0.0))
             flip_horizontal = bool(body.get("flip_horizontal", False))
             flip_vertical = bool(body.get("flip_vertical", False))
+            x_raw = body.get("x")
+            y_raw = body.get("y")
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             return web.json_response({"error": "invalid_body"}, status=400)
+
+        pos_x: float | None = None
+        pos_y: float | None = None
+        if x_raw is not None or y_raw is not None:
+            if x_raw is None or y_raw is None:
+                return web.json_response({"error": "incomplete_camera_position"}, status=400)
+            try:
+                pos_x = float(x_raw)
+                pos_y = float(y_raw)
+            except (TypeError, ValueError):
+                return web.json_response({"error": "invalid_camera_position"}, status=400)
+            if not (math.isfinite(pos_x) and math.isfinite(pos_y)):
+                return web.json_response({"error": "invalid_camera_position"}, status=400)
 
         if not (
             math.isfinite(resolution_dpcm_x)
@@ -1206,6 +1231,9 @@ class CameraVisionModule:
         state.config.rotation_deg = rotation_deg
         state.current_rotation_deg = rotation_deg
 
+        if pos_x is not None and pos_y is not None:
+            self._set_camera_xy(cam_name, pos_x, pos_y)
+
         if reopen_required:
             await self._close_camera(state)
             await self._open_camera(state)
@@ -1221,7 +1249,36 @@ class CameraVisionModule:
                 "flip_horizontal": flip_horizontal,
                 "flip_vertical": flip_vertical,
                 "rotation_deg": rotation_deg,
+                "x": pos_x,
+                "y": pos_y,
                 "reopened": reopen_required,
+            }
+        )
+
+    async def _api_config_location_set(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        try:
+            body = await request.json()
+            x = float(body.get("x"))
+            y = float(body.get("y"))
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return web.json_response({"error": "invalid_coordinates"}, status=400)
+
+        name = raw_name.lower()
+        self._location_store.set(name, {"X": x, "Y": y})
+        return web.json_response(
+            {
+                "status": "ok",
+                "name": name,
+                "x": x,
+                "y": y,
+                "persist_path": self._location_store.persist_path(),
             }
         )
 

@@ -1505,6 +1505,8 @@ class ControlWindow(QMainWindow):
         self._parts_by_id: dict[str, dict[str, Any]] = {}
         self._setup_cameras: list[dict[str, Any]] = []
         self._setup_camera_current_row = -1
+        self._setup_positions: list[dict[str, Any]] = []
+        self._setup_position_current_row = -1
         self._setup_camera_config_path = Path(__file__).resolve().parents[3] / "config" / "examples" / "system.json"
         self._current_x: float | None = None
         self._current_y: float | None = None
@@ -1634,6 +1636,58 @@ class ControlWindow(QMainWindow):
         setup_cam_form.addRow("Rotation (deg)", self._setup_cam_rotation)
         setup_cameras_layout.addLayout(setup_cam_form)
 
+        setup_positions_tab = QWidget()
+        setup_positions_layout = QVBoxLayout(setup_positions_tab)
+        setup_positions_layout.setContentsMargins(6, 6, 6, 6)
+
+        setup_pos_actions = QHBoxLayout()
+        self._setup_position_add_btn = QPushButton("Add Position")
+        self._setup_position_add_btn.clicked.connect(self._on_setup_position_add)
+        self._setup_position_save_btn = QPushButton("Save Positions")
+        self._setup_position_save_btn.clicked.connect(self._on_setup_position_save)
+        setup_pos_actions.addWidget(self._setup_position_add_btn)
+        setup_pos_actions.addWidget(self._setup_position_save_btn)
+        setup_pos_actions.addStretch(1)
+        setup_positions_layout.addLayout(setup_pos_actions)
+
+        self._setup_position_table = QTableWidget(0, 4)
+        self._setup_position_table.setHorizontalHeaderLabels([
+            "Name",
+            "Type",
+            "X",
+            "Y",
+        ])
+        self._setup_position_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._setup_position_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._setup_position_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._setup_position_table.verticalHeader().setVisible(False)
+        sph = self._setup_position_table.horizontalHeader()
+        sph.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        sph.setStretchLastSection(True)
+        sph.setMinimumSectionSize(70)
+        sph.resizeSection(0, 180)
+        sph.resizeSection(1, 130)
+        sph.resizeSection(2, 110)
+        sph.resizeSection(3, 110)
+        self._setup_position_table.cellClicked.connect(self._on_setup_position_row_selected)
+        setup_positions_layout.addWidget(self._setup_position_table)
+
+        setup_pos_form = QFormLayout()
+        self._setup_position_name = QLineEdit()
+        self._setup_position_kind = QLineEdit()
+        self._setup_position_kind.setReadOnly(True)
+        self._setup_position_x = QDoubleSpinBox()
+        self._setup_position_x.setRange(-100000.0, 100000.0)
+        self._setup_position_x.setDecimals(3)
+        self._setup_position_y = QDoubleSpinBox()
+        self._setup_position_y.setRange(-100000.0, 100000.0)
+        self._setup_position_y.setDecimals(3)
+        setup_pos_form.addRow("Name", self._setup_position_name)
+        setup_pos_form.addRow("Type", self._setup_position_kind)
+        setup_pos_form.addRow("X", self._setup_position_x)
+        setup_pos_form.addRow("Y", self._setup_position_y)
+        setup_positions_layout.addLayout(setup_pos_form)
+
         setup_other_tab = QWidget()
         setup_other_layout = QVBoxLayout(setup_other_tab)
         setup_other_layout.setContentsMargins(6, 6, 6, 6)
@@ -1643,6 +1697,7 @@ class ControlWindow(QMainWindow):
         setup_other_layout.addStretch(1)
 
         self._setup_tabs.addTab(setup_cameras_tab, "Cameras")
+        self._setup_tabs.addTab(setup_positions_tab, "Special Positions")
         self._setup_tabs.addTab(setup_other_tab, "Other Configurations")
         setup_layout.addWidget(self._setup_tabs)
 
@@ -2006,6 +2061,7 @@ class ControlWindow(QMainWindow):
 
         self._load_packages_from_config()
         self._load_setup_cameras_from_config()
+        self._load_setup_positions_from_config()
         self._refresh_parts_table()
 
         QTimer.singleShot(0, self._init_splitters)
@@ -2390,6 +2446,205 @@ class ControlWindow(QMainWindow):
             self._on_setup_camera_row_selected(0, 0)
         else:
             self._setup_camera_current_row = -1
+
+    def _load_setup_positions_from_config(self) -> None:
+        self._setup_positions = []
+        try:
+            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                locations = raw.get("locations", {})
+                if isinstance(locations, dict):
+                    for name, coords in locations.items():
+                        if not isinstance(coords, dict):
+                            continue
+                        self._setup_positions.append(
+                            {
+                                "name": str(name).strip().lower(),
+                                "kind": "location",
+                                "x": float(coords.get("X", 0.0) or 0.0),
+                                "y": float(coords.get("Y", 0.0) or 0.0),
+                            }
+                        )
+
+                camera_block = raw.get("camera")
+                cameras = camera_block.get("cameras", []) if isinstance(camera_block, dict) else []
+                if isinstance(cameras, list):
+                    for item in cameras:
+                        if not isinstance(item, dict):
+                            continue
+                        if str(item.get("name", "")).strip().upper() != "BOTTOM":
+                            continue
+                        if item.get("x") is None or item.get("y") is None:
+                            continue
+                        self._setup_positions.append(
+                            {
+                                "name": "bottom_camera",
+                                "kind": "camera",
+                                "camera_name": "BOTTOM",
+                                "x": float(item.get("x", 0.0) or 0.0),
+                                "y": float(item.get("y", 0.0) or 0.0),
+                            }
+                        )
+                        break
+        except Exception as exc:
+            self._log_line(f"WARN: failed to load setup positions: {exc}")
+
+        self._refresh_setup_position_table()
+        if self._setup_positions:
+            self._setup_position_table.selectRow(0)
+            self._on_setup_position_row_selected(0, 0)
+        else:
+            self._setup_position_current_row = -1
+
+    def _refresh_setup_position_table(self) -> None:
+        rows = sorted(self._setup_positions, key=lambda item: (str(item.get("kind", "")), str(item.get("name", ""))))
+        self._setup_positions = rows
+        self._setup_position_table.setRowCount(len(rows))
+        for row, pos in enumerate(rows):
+            name = str(pos.get("name", ""))
+            kind = str(pos.get("kind", ""))
+            cells = [
+                name,
+                kind,
+                self._fmt(pos.get("x")),
+                self._fmt(pos.get("y")),
+            ]
+            for col, value in enumerate(cells):
+                self._setup_position_table.setItem(row, col, QTableWidgetItem(value))
+
+    def _store_current_setup_position_editor(self) -> None:
+        row = self._setup_position_current_row
+        if row < 0 or row >= len(self._setup_positions):
+            return
+        target = self._setup_positions[row]
+        target["name"] = self._setup_position_name.text().strip().lower()
+        target["x"] = float(self._setup_position_x.value())
+        target["y"] = float(self._setup_position_y.value())
+
+    def _on_setup_position_row_selected(self, row: int, _col: int) -> None:
+        self._store_current_setup_position_editor()
+        self._refresh_setup_position_table()
+        self._setup_position_current_row = int(row)
+        if row < 0 or row >= len(self._setup_positions):
+            return
+
+        pos = self._setup_positions[row]
+        self._setup_position_name.setText(str(pos.get("name", "")))
+        self._setup_position_kind.setText(str(pos.get("kind", "")))
+        self._setup_position_x.setValue(float(pos.get("x", 0.0) or 0.0))
+        self._setup_position_y.setValue(float(pos.get("y", 0.0) or 0.0))
+
+    def _on_setup_position_add(self) -> None:
+        self._store_current_setup_position_editor()
+        idx = 1
+        existing = {str(item.get("name", "")).strip().lower() for item in self._setup_positions}
+        while True:
+            name = f"location_{idx}"
+            if name not in existing:
+                break
+            idx += 1
+        self._setup_positions.append({"name": name, "kind": "location", "x": 0.0, "y": 0.0})
+        self._refresh_setup_position_table()
+        new_row = next((i for i, item in enumerate(self._setup_positions) if str(item.get("name", "")) == name), len(self._setup_positions) - 1)
+        self._setup_position_table.selectRow(new_row)
+        self._on_setup_position_row_selected(new_row, 0)
+
+    def _on_setup_position_save(self) -> None:
+        self._store_current_setup_position_editor()
+
+        names = [str(item.get("name", "")).strip().lower() for item in self._setup_positions]
+        if any(not name for name in names):
+            self._log_line("ERR: position save failed: position name must not be empty")
+            return
+        if len(set(names)) != len(names):
+            self._log_line("ERR: position save failed: duplicate position names")
+            return
+
+        try:
+            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("system config root must be an object")
+
+            locations_out: dict[str, dict[str, float]] = {}
+            bottom_xy: tuple[float, float] | None = None
+            for item in self._setup_positions:
+                kind = str(item.get("kind", "")).strip().lower()
+                name = str(item.get("name", "")).strip().lower()
+                x = float(item.get("x", 0.0) or 0.0)
+                y = float(item.get("y", 0.0) or 0.0)
+                if kind == "camera" and name == "bottom_camera":
+                    bottom_xy = (x, y)
+                    continue
+                locations_out[name] = {"X": x, "Y": y}
+
+            raw["locations"] = locations_out
+
+            camera_block = raw.get("camera")
+            if bottom_xy is not None and isinstance(camera_block, dict):
+                cameras = camera_block.get("cameras", [])
+                if isinstance(cameras, list):
+                    for cam in cameras:
+                        if not isinstance(cam, dict):
+                            continue
+                        if str(cam.get("name", "")).strip().upper() != "BOTTOM":
+                            continue
+                        cam["x"] = bottom_xy[0]
+                        cam["y"] = bottom_xy[1]
+                        break
+
+            self._setup_camera_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+            self._refresh_setup_position_table()
+            self._log_line(f"OK: saved position config to {self._setup_camera_config_path}")
+            for item in self._setup_positions:
+                self._apply_setup_position_runtime(item)
+        except Exception as exc:
+            self._log_line(f"ERR: position save failed: {exc}")
+
+    def _apply_setup_position_runtime(self, item: dict[str, Any]) -> None:
+        kind = str(item.get("kind", "")).strip().lower()
+        name = str(item.get("name", "")).strip().lower()
+        x = float(item.get("x", 0.0) or 0.0)
+        y = float(item.get("y", 0.0) or 0.0)
+        if kind == "camera" and name == "bottom_camera":
+            camera = next((cam for cam in self._setup_cameras if str(cam.get("name", "")).strip().upper() == "BOTTOM"), None)
+            if camera is None:
+                self._log_line("WARN: bottom camera runtime position not applied: BOTTOM camera not configured")
+                return
+            payload = {
+                "device": str(camera.get("device", "")).strip(),
+                "fps": float(camera.get("fps", 0.0) or 0.0),
+                "resolution_dpcm_x": float(camera.get("resolution_dpcm_x", 0.0) or 0.0),
+                "resolution_dpcm_y": float(camera.get("resolution_dpcm_y", 0.0) or 0.0),
+                "flip_horizontal": bool(camera.get("flip_horizontal", False)),
+                "flip_vertical": bool(camera.get("flip_vertical", False)),
+                "rotation_deg": float(camera.get("rotation_deg", 0.0) or 0.0),
+                "x": x,
+                "y": y,
+            }
+            self._api.post_json(
+                "/api/camera/BOTTOM/settings",
+                payload,
+                lambda ok, status, data: self._on_setup_bottom_camera_position_applied(ok, status, data),
+            )
+            return
+
+        self._api.post_json(
+            f"/api/config/location/{name}",
+            {"x": x, "y": y},
+            lambda ok, status, data, loc=name: self._on_setup_position_runtime_applied(loc, ok, status, data),
+        )
+
+    def _on_setup_position_runtime_applied(self, name: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: location {name} not applied at runtime: {data.get('error', 'request_failed')}")
+            return
+        self._log_line(f"OK: location {name} applied at runtime")
+
+    def _on_setup_bottom_camera_position_applied(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: bottom camera position not applied at runtime: {data.get('error', 'request_failed')}")
+            return
+        self._log_line("OK: bottom camera position applied at runtime")
 
     def _refresh_setup_camera_table(self) -> None:
         self._setup_camera_table.setRowCount(len(self._setup_cameras))
