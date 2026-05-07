@@ -1,0 +1,60 @@
+{
+  "camera": {
+    "nozzle_tips": [
+      { "id": "500", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "501", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "502", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "503", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "504", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "505", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "506", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "507", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "508", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "509", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "510", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
+      { "id": "511", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null }
+    ],
+    "nozzles": [
+      {
+        "name": "N1",
+        "z_axis": "Z1",
+        "min_z": -50.0,
+        "max_z": 0.0,
+        "tip_id": "501",
+        "standard_down_z": null,
+        "offset_x": -45.0,
+        "offset_y": -100.0
+      },
+      {
+        "name": "N2",
+        "z_axis": "Z2",
+        "min_z": -50.0,
+        "max_z": 0.0,
+        "tip_id": "502",
+        "standard_down_z": null,
+        "offset_x": -15.0,
+        "offset_y": -100.0
+      },
+      {
+        "name": "N3",
+        "z_axis": "Z3",
+        "min_z": -50.0,
+        "max_z": 0.0,
+        "tip_id": "511",
+        "standard_down_z": null,
+        "offset_x": 15.0,
+        "offset_y": -100.0
+      },
+      {
+        "name": "N4",
+        "z_axis": "Z4",
+        "min_z": -50.0,
+        "max_z": 0.0,
+        "tip_id": "500",
+        "standard_down_z": null,
+        "offset_x": 45.0,
+        "offset_y": -100.0
+      }
+    ]
+  }
+}

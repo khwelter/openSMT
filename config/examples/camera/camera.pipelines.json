@@ -1,0 +1,9 @@
+{
+  "camera": {
+    "pipelines": [
+      { "name": "PASSTHROUGH", "type": "passthrough" },
+      { "name": "DETECT_FIDUCIAL", "type": "passthrough" },
+      { "name": "MEASURE_COMPONENT", "type": "passthrough" }
+    ]
+  }
+}

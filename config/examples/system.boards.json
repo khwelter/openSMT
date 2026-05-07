@@ -1,0 +1,34 @@
+{
+  "boards": {
+    "XY": {
+      "device": "/dev/marlinXY",
+      "baudrate": 250000,
+      "bytesize": 8,
+      "parity": "N",
+      "stopbits": 1,
+      "xonxoff": false,
+      "rtscts": false,
+      "dsrdtr": false
+    },
+    "AB": {
+      "device": "/dev/marlinAB",
+      "baudrate": 250000,
+      "bytesize": 8,
+      "parity": "N",
+      "stopbits": 1,
+      "xonxoff": false,
+      "rtscts": false,
+      "dsrdtr": false
+    },
+    "CD": {
+      "device": "/dev/marlinCD",
+      "baudrate": 250000,
+      "bytesize": 8,
+      "parity": "N",
+      "stopbits": 1,
+      "xonxoff": false,
+      "rtscts": false,
+      "dsrdtr": false
+    }
+  }
+}
