@@ -1671,6 +1671,7 @@ class ControlWindow(QMainWindow):
         sph.resizeSection(3, 110)
         self._setup_position_table.cellClicked.connect(self._on_setup_position_row_selected)
         setup_positions_layout.addWidget(self._setup_position_table)
+        self._set_table_visible_rows(self._setup_position_table, 4)
 
         setup_pos_form = QFormLayout()
         self._setup_position_name = QLineEdit()
@@ -1687,6 +1688,16 @@ class ControlWindow(QMainWindow):
         setup_pos_form.addRow("X", self._setup_position_x)
         setup_pos_form.addRow("Y", self._setup_position_y)
         setup_positions_layout.addLayout(setup_pos_form)
+
+        setup_pos_detail_actions = QHBoxLayout()
+        self._setup_position_move_btn = QPushButton("Move Camera There")
+        self._setup_position_move_btn.clicked.connect(self._on_setup_position_move_camera_there)
+        self._setup_position_capture_btn = QPushButton("Use Actual Camera Position")
+        self._setup_position_capture_btn.clicked.connect(self._on_setup_position_capture_current)
+        setup_pos_detail_actions.addWidget(self._setup_position_move_btn)
+        setup_pos_detail_actions.addWidget(self._setup_position_capture_btn)
+        setup_pos_detail_actions.addStretch(1)
+        setup_positions_layout.addLayout(setup_pos_detail_actions)
 
         setup_other_tab = QWidget()
         setup_other_layout = QVBoxLayout(setup_other_tab)
@@ -2549,6 +2560,35 @@ class ControlWindow(QMainWindow):
         self._setup_position_table.selectRow(new_row)
         self._on_setup_position_row_selected(new_row, 0)
 
+    def _on_setup_position_move_camera_there(self) -> None:
+        row = self._setup_position_current_row
+        if row < 0 or row >= len(self._setup_positions):
+            self._log_line("ERR: move failed: no special position selected")
+            return
+        self._store_current_setup_position_editor()
+        item = self._setup_positions[row]
+        x = float(item.get("x", 0.0) or 0.0)
+        y = float(item.get("y", 0.0) or 0.0)
+        self._move_camera_to_xy(x, y)
+
+    def _on_setup_position_capture_current(self) -> None:
+        row = self._setup_position_current_row
+        if row < 0 or row >= len(self._setup_positions):
+            self._log_line("ERR: capture failed: no special position selected")
+            return
+        if self._current_x is None or self._current_y is None:
+            self._log_line("ERR: capture failed: actual camera XY position unknown")
+            return
+
+        self._setup_position_x.setValue(float(self._current_x))
+        self._setup_position_y.setValue(float(self._current_y))
+        self._store_current_setup_position_editor()
+        self._refresh_setup_position_table()
+        self._setup_position_table.selectRow(row)
+        self._log_line(
+            f"OK: updated {self._setup_positions[row].get('name', 'position')} to X={float(self._current_x):.3f}, Y={float(self._current_y):.3f}"
+        )
+
     def _on_setup_position_save(self) -> None:
         self._store_current_setup_position_editor()
 
@@ -3147,6 +3187,16 @@ class ControlWindow(QMainWindow):
             {"x": float(x), "y": float(y)},
             f"Move top camera to X={x:.3f}, Y={y:.3f}",
         )
+
+    @staticmethod
+    def _set_table_visible_rows(table: QTableWidget, visible_rows: int) -> None:
+        rows = max(1, int(visible_rows))
+        header_h = table.horizontalHeader().height()
+        row_h = table.verticalHeader().defaultSectionSize()
+        frame_h = table.frameWidth() * 2
+        target_h = header_h + (row_h * rows) + frame_h
+        table.setMinimumHeight(target_h)
+        table.setMaximumHeight(target_h)
 
     def _on_nozzle_action(self, nozzle: str, action: str, value: float) -> None:
         if action == "align_to_cam":
