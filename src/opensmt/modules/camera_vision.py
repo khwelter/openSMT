@@ -1084,25 +1084,44 @@ class CameraVisionModule:
         return False
 
     def _persist_nozzle_offsets(self) -> str | None:
-        """Persist current nozzle offsets to runtime sidecar file.
-
-        Returns None on success, or an error message.
-        """
+        """Persist current nozzle offset/tip values into nozzle config chunk file."""
         if self._nozzle_offsets_persist_path is None or self._nozzle_config_store is None:
             return "persistence_not_configured"
 
-        payload: dict[str, dict[str, float | str | None]] = {}
-        for nozzle_name in self._nozzle_config_store.names():
-            cfg = self._nozzle_config_store.get(nozzle_name)
-            if cfg is None:
-                continue
-            payload[nozzle_name.upper()] = {
-                "offset_x": float(cfg.offset_x),
-                "offset_y": float(cfg.offset_y),
-                "tip_id": cfg.tip_id,
-                "standard_down_z": float(cfg.standard_down_z) if cfg.standard_down_z is not None else None,
-            }
         try:
+            payload: dict[str, Any] = {}
+            if self._nozzle_offsets_persist_path.is_file():
+                loaded = json.loads(self._nozzle_offsets_persist_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload = loaded
+
+            camera_obj = payload.get("camera")
+            if not isinstance(camera_obj, dict):
+                camera_obj = {}
+                payload["camera"] = camera_obj
+
+            nozzles_list = camera_obj.get("nozzles")
+            if not isinstance(nozzles_list, list):
+                return "invalid_persist_file:no_camera.nozzles_list"
+
+            cfg_by_name: dict[str, Any] = {}
+            for nozzle_name in self._nozzle_config_store.names():
+                cfg = self._nozzle_config_store.get(nozzle_name)
+                if cfg is not None:
+                    cfg_by_name[nozzle_name.upper()] = cfg
+
+            for item in nozzles_list:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).upper().strip()
+                cfg = cfg_by_name.get(name)
+                if cfg is None:
+                    continue
+                item["offset_x"] = float(cfg.offset_x)
+                item["offset_y"] = float(cfg.offset_y)
+                item["tip_id"] = cfg.tip_id
+                item["standard_down_z"] = float(cfg.standard_down_z) if cfg.standard_down_z is not None else None
+
             self._nozzle_offsets_persist_path.parent.mkdir(parents=True, exist_ok=True)
             self._nozzle_offsets_persist_path.write_text(
                 json.dumps(payload, indent=2),
@@ -1117,13 +1136,33 @@ class CameraVisionModule:
         if self._camera_resolutions_persist_path is None:
             return "persistence_not_configured"
 
-        payload: dict[str, dict[str, float]] = {}
-        for cam_name, state in self._cameras.items():
-            payload[cam_name] = {
-                "resolution_dpcm_x": float(state.config.resolution_dpcm_x),
-                "resolution_dpcm_y": float(state.config.resolution_dpcm_y),
-            }
         try:
+            payload: dict[str, Any] = {}
+            if self._camera_resolutions_persist_path.is_file():
+                loaded = json.loads(self._camera_resolutions_persist_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload = loaded
+
+            camera_obj = payload.get("camera")
+            if not isinstance(camera_obj, dict):
+                camera_obj = {}
+                payload["camera"] = camera_obj
+
+            cameras_list = camera_obj.get("cameras")
+            if not isinstance(cameras_list, list):
+                return "invalid_persist_file:no_camera.cameras_list"
+
+            states_by_name = {name.upper(): state for name, state in self._cameras.items()}
+            for item in cameras_list:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).upper().strip()
+                state = states_by_name.get(name)
+                if state is None:
+                    continue
+                item["resolution_dpcm_x"] = float(state.config.resolution_dpcm_x)
+                item["resolution_dpcm_y"] = float(state.config.resolution_dpcm_y)
+
             self._camera_resolutions_persist_path.parent.mkdir(parents=True, exist_ok=True)
             self._camera_resolutions_persist_path.write_text(
                 json.dumps(payload, indent=2),

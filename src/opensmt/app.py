@@ -54,100 +54,40 @@ async def run_from_config(config_path: str) -> None:
     # ------------------------------------------------------------------ #
     cfg_path = Path(config_path).expanduser().resolve()
 
-    # Optional override path in config; defaults to sidecar next to system.json.
-    # Persisted entries override in-file defaults at startup.
+    # Persist location changes directly into the base locations config chunk.
     persist_path_raw = config.get("locations_persist_path")
     if persist_path_raw is not None:
         persist_path = Path(str(persist_path_raw)).expanduser()
         if not persist_path.is_absolute():
             persist_path = (cfg_path.parent / persist_path).resolve()
     else:
-        persist_path = cfg_path.with_name(f"{cfg_path.stem}.locations.runtime.json")
-
-    merged_locations = dict(config.get("locations", {}))
-    if persist_path.is_file():
-        try:
-            persisted = json.loads(persist_path.read_text(encoding="utf-8"))
-            if isinstance(persisted, dict):
-                merged_locations.update(persisted)
-            else:
-                log.warning("Ignoring persisted locations at %s: root is not an object", persist_path)
-        except Exception as exc:
-            log.warning("Failed to load persisted locations from %s: %s", persist_path, exc)
+        persist_path = cfg_path.with_name(f"{cfg_path.stem}.locations.json")
 
     position_store = PositionStore()
-    location_store = LocationStore(merged_locations, persist_path=str(persist_path))
+    location_store = LocationStore(dict(config.get("locations", {})), persist_path=str(persist_path))
 
     camera_cfg_runtime: dict[str, Any] = dict(config.get("camera", {}))
 
-    # Optional override path in camera config; defaults to sidecar next to system.json.
+    # Persist nozzle offset/tip runtime corrections directly into base nozzle config chunk.
     offsets_persist_path_raw = camera_cfg_runtime.get("nozzle_offsets_persist_path")
     if offsets_persist_path_raw is not None:
         offsets_persist_path = Path(str(offsets_persist_path_raw)).expanduser()
         if not offsets_persist_path.is_absolute():
             offsets_persist_path = (cfg_path.parent / offsets_persist_path).resolve()
     else:
-        offsets_persist_path = cfg_path.with_name(f"{cfg_path.stem}.nozzle_offsets.runtime.json")
+        offsets_persist_path = (cfg_path.parent / "nozzles.json").resolve()
 
-    camera_nozzles = list(camera_cfg_runtime.get("nozzles", []))
-
-    if offsets_persist_path.is_file():
-        try:
-            persisted_offsets = json.loads(offsets_persist_path.read_text(encoding="utf-8"))
-            if isinstance(persisted_offsets, dict):
-                for item in camera_nozzles:
-                    if not isinstance(item, dict):
-                        continue
-                    n_name = str(item.get("name", "")).upper()
-                    persisted = persisted_offsets.get(n_name)
-                    if not isinstance(persisted, dict):
-                        continue
-                    if "offset_x" in persisted:
-                        item["offset_x"] = float(persisted["offset_x"])
-                    if "offset_y" in persisted:
-                        item["offset_y"] = float(persisted["offset_y"])
-                    if "tip_id" in persisted:
-                        item["tip_id"] = str(persisted["tip_id"])
-                    if "standard_down_z" in persisted and persisted["standard_down_z"] is not None:
-                        item["standard_down_z"] = float(persisted["standard_down_z"])
-            else:
-                log.warning("Ignoring persisted nozzle offsets at %s: root is not an object", offsets_persist_path)
-        except Exception as exc:
-            log.warning("Failed to load persisted nozzle offsets from %s: %s", offsets_persist_path, exc)
-
-    camera_cfg_runtime["nozzles"] = camera_nozzles
     camera_cfg_runtime["_nozzle_offsets_persist_path"] = str(offsets_persist_path)
 
+    # Persist camera resolution calibrations directly into base camera list chunk.
     camera_res_persist_path_raw = camera_cfg_runtime.get("camera_resolutions_persist_path")
     if camera_res_persist_path_raw is not None:
         camera_res_persist_path = Path(str(camera_res_persist_path_raw)).expanduser()
         if not camera_res_persist_path.is_absolute():
             camera_res_persist_path = (cfg_path.parent / camera_res_persist_path).resolve()
     else:
-        camera_res_persist_path = cfg_path.with_name(f"{cfg_path.stem}.camera_resolutions.runtime.json")
+        camera_res_persist_path = (cfg_path.parent / "camera" / "camera.cameras.json").resolve()
 
-    camera_items = list(camera_cfg_runtime.get("cameras", []))
-    if camera_res_persist_path.is_file():
-        try:
-            persisted_res = json.loads(camera_res_persist_path.read_text(encoding="utf-8"))
-            if isinstance(persisted_res, dict):
-                for item in camera_items:
-                    if not isinstance(item, dict):
-                        continue
-                    cam_name = str(item.get("name", "")).upper()
-                    persisted_cam = persisted_res.get(cam_name)
-                    if not isinstance(persisted_cam, dict):
-                        continue
-                    if "resolution_dpcm_x" in persisted_cam:
-                        item["resolution_dpcm_x"] = float(persisted_cam["resolution_dpcm_x"])
-                    if "resolution_dpcm_y" in persisted_cam:
-                        item["resolution_dpcm_y"] = float(persisted_cam["resolution_dpcm_y"])
-            else:
-                log.warning("Ignoring persisted camera resolutions at %s: root is not an object", camera_res_persist_path)
-        except Exception as exc:
-            log.warning("Failed to load persisted camera resolutions from %s: %s", camera_res_persist_path, exc)
-
-    camera_cfg_runtime["cameras"] = camera_items
     camera_cfg_runtime["_camera_resolutions_persist_path"] = str(camera_res_persist_path)
 
     # Build NozzleConfigStore from camera config

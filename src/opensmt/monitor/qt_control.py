@@ -1507,7 +1507,9 @@ class ControlWindow(QMainWindow):
         self._setup_camera_current_row = -1
         self._setup_positions: list[dict[str, Any]] = []
         self._setup_position_current_row = -1
-        self._setup_camera_config_path = Path(__file__).resolve().parents[3] / "config" / "examples" / "system.json"
+        self._setup_config_dir = Path(__file__).resolve().parents[3] / "config" / "examples"
+        self._setup_camera_config_path = self._setup_config_dir / "camera" / "camera.cameras.json"
+        self._setup_locations_config_path = self._setup_config_dir / "system.locations.json"
         self._current_x: float | None = None
         self._current_y: float | None = None
         self._machine_status = QLabel("X=--  Y=--")
@@ -2479,9 +2481,9 @@ class ControlWindow(QMainWindow):
     def _load_setup_positions_from_config(self) -> None:
         self._setup_positions = []
         try:
-            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                locations = raw.get("locations", {})
+            loc_raw = json.loads(self._setup_locations_config_path.read_text(encoding="utf-8"))
+            if isinstance(loc_raw, dict):
+                locations = loc_raw.get("locations", {})
                 if isinstance(locations, dict):
                     for name, coords in locations.items():
                         if not isinstance(coords, dict):
@@ -2495,7 +2497,9 @@ class ControlWindow(QMainWindow):
                             }
                         )
 
-                camera_block = raw.get("camera")
+            cam_raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
+            if isinstance(cam_raw, dict):
+                camera_block = cam_raw.get("camera")
                 cameras = camera_block.get("cameras", []) if isinstance(camera_block, dict) else []
                 if isinstance(cameras, list):
                     for item in cameras:
@@ -2619,10 +2623,6 @@ class ControlWindow(QMainWindow):
             return
 
         try:
-            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ValueError("system config root must be an object")
-
             locations_out: dict[str, dict[str, float]] = {}
             bottom_xy: tuple[float, float] | None = None
             for item in self._setup_positions:
@@ -2635,24 +2635,35 @@ class ControlWindow(QMainWindow):
                     continue
                 locations_out[name] = {"X": x, "Y": y}
 
-            raw["locations"] = locations_out
+            loc_raw = json.loads(self._setup_locations_config_path.read_text(encoding="utf-8"))
+            if not isinstance(loc_raw, dict):
+                raise ValueError("locations config root must be an object")
+            loc_raw["locations"] = locations_out
+            self._setup_locations_config_path.write_text(json.dumps(loc_raw, indent=2) + "\n", encoding="utf-8")
 
-            camera_block = raw.get("camera")
-            if bottom_xy is not None and isinstance(camera_block, dict):
-                cameras = camera_block.get("cameras", [])
-                if isinstance(cameras, list):
-                    for cam in cameras:
-                        if not isinstance(cam, dict):
-                            continue
-                        if str(cam.get("name", "")).strip().upper() != "BOTTOM":
-                            continue
-                        cam["x"] = bottom_xy[0]
-                        cam["y"] = bottom_xy[1]
-                        break
+            if bottom_xy is not None:
+                cam_raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
+                if not isinstance(cam_raw, dict):
+                    raise ValueError("camera config root must be an object")
+                camera_block = cam_raw.get("camera")
+                if isinstance(camera_block, dict):
+                    cameras = camera_block.get("cameras", [])
+                    if isinstance(cameras, list):
+                        for cam in cameras:
+                            if not isinstance(cam, dict):
+                                continue
+                            if str(cam.get("name", "")).strip().upper() != "BOTTOM":
+                                continue
+                            cam["x"] = bottom_xy[0]
+                            cam["y"] = bottom_xy[1]
+                            break
+                        self._setup_camera_config_path.write_text(json.dumps(cam_raw, indent=2) + "\n", encoding="utf-8")
 
-            self._setup_camera_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
             self._refresh_setup_position_table()
-            self._log_line(f"OK: saved position config to {self._setup_camera_config_path}")
+            self._log_line(
+                f"OK: saved positions to {self._setup_locations_config_path}"
+                + (f" and BOTTOM camera XY to {self._setup_camera_config_path}" if bottom_xy is not None else "")
+            )
             for item in self._setup_positions:
                 self._apply_setup_position_runtime(item)
         except Exception as exc:
@@ -2790,14 +2801,13 @@ class ControlWindow(QMainWindow):
         try:
             raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
-                raise ValueError("system config root must be an object")
+                raise ValueError("camera config root must be an object")
 
             camera_block = raw.get("camera")
             if isinstance(camera_block, dict):
                 camera_block["cameras"] = self._setup_cameras
             else:
-                # Backward compatibility fallback if a flat schema is used.
-                raw["cameras"] = self._setup_cameras
+                raise ValueError("camera section missing in camera config file")
 
             self._setup_camera_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
             self._refresh_setup_camera_table()
