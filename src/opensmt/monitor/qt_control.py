@@ -1572,9 +1572,12 @@ class ControlWindow(QMainWindow):
 
         setup_cameras_tab = QWidget()
         setup_cameras_layout = QVBoxLayout(setup_cameras_tab)
-        setup_cameras_layout.setContentsMargins(6, 6, 6, 6)
+        setup_cameras_layout.setContentsMargins(4, 2, 4, 4)
+        setup_cameras_layout.setSpacing(3)
 
         setup_cam_actions = QHBoxLayout()
+        setup_cam_actions.setContentsMargins(0, 0, 0, 0)
+        setup_cam_actions.setSpacing(4)
         self._setup_camera_add_btn = QPushButton("Add Camera")
         self._setup_camera_add_btn.clicked.connect(self._on_setup_camera_add)
         self._setup_camera_save_btn = QPushButton("Save Cameras")
