@@ -64,7 +64,11 @@ async def run_from_config(config_path: str) -> None:
         persist_path = cfg_path.with_name(f"{cfg_path.stem}.locations.json")
 
     position_store = PositionStore()
-    location_store = LocationStore(dict(config.get("locations", {})), persist_path=str(persist_path))
+    location_store = LocationStore(
+        dict(config.get("locations", {})),
+        persist_path=str(persist_path),
+        persist_root_key="locations",
+    )
 
     camera_cfg_runtime: dict[str, Any] = dict(config.get("camera", {}))
 

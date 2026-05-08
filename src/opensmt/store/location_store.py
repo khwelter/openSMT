@@ -16,12 +16,14 @@ class LocationStore:
         self,
         initial: dict[str, dict[str, float]],
         persist_path: str | None = None,
+        persist_root_key: str | None = None,
     ) -> None:
         self._locations: dict[str, dict[str, float]] = {
             name.lower(): {k.upper(): float(v) for k, v in coords.items()}
             for name, coords in initial.items()
         }
         self._persist_path = pathlib.Path(persist_path) if persist_path else None
+        self._persist_root_key = str(persist_root_key).strip() if persist_root_key else None
 
     # ------------------------------------------------------------------
     # Read
@@ -69,6 +71,8 @@ class LocationStore:
     def _persist(self) -> None:
         if self._persist_path:
             self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-            self._persist_path.write_text(
-                json.dumps(self._locations, indent=2), encoding="utf-8"
-            )
+            if self._persist_root_key:
+                payload = {self._persist_root_key: self._locations}
+            else:
+                payload = self._locations
+            self._persist_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
