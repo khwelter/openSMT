@@ -528,6 +528,8 @@ class CameraTile(QFrame):
         self._resolution_dpcm_y = 0.0
         self._pending_square_px_x = 0.0
         self._pending_square_px_y = 0.0
+        self._flip_h = False
+        self._flip_v = False
         self._visible_light_keys: list[str] = []
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -710,6 +712,10 @@ class CameraTile(QFrame):
         self._resolution_dpcm_x = float(x)
         self._resolution_dpcm_y = float(y)
 
+    def set_flip(self, flip_h: bool, flip_v: bool) -> None:
+        self._flip_h = bool(flip_h)
+        self._flip_v = bool(flip_v)
+
     def _on_zoom_changed(self, _idx: int) -> None:
         value = self._zoom.currentData()
         self._preview.set_zoom(float(value) if value is not None else 1.0)
@@ -720,8 +726,13 @@ class CameraTile(QFrame):
         if mm_per_px_x <= 0.0 or mm_per_px_y <= 0.0:
             return
 
-        dx_mm = dx_px * mm_per_px_x
-        dy_mm = -dy_px * mm_per_px_y
+        # flip_horizontal mirrors the image X axis: drag direction is inverted
+        # flip_vertical mirrors the image Y axis: combined with the Qt-Y-down correction
+        # (base sign is -1 for Y), a vertical flip doubles the inversion back to +1
+        x_sign = -1.0 if self._flip_h else 1.0
+        y_sign = 1.0 if self._flip_v else -1.0
+        dx_mm = x_sign * dx_px * mm_per_px_x
+        dy_mm = y_sign * dy_px * mm_per_px_y
         if abs(dx_mm) < 1e-9 and abs(dy_mm) < 1e-9:
             return
         self.vector_move_requested.emit(self.camera_name, dx_mm, dy_mm)
@@ -2265,6 +2276,10 @@ class ControlWindow(QMainWindow):
             tile.set_resolution_dpcm(
                 float(camera.get("resolution_dpcm_x", 0.0) or 0.0),
                 float(camera.get("resolution_dpcm_y", 0.0) or 0.0),
+            )
+            tile.set_flip(
+                bool(camera.get("flip_horizontal", False)),
+                bool(camera.get("flip_vertical", False)),
             )
             tile.sync_lights(camera.get("lights") if isinstance(camera.get("lights"), dict) else {})
 

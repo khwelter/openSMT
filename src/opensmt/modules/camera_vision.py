@@ -1740,6 +1740,8 @@ class CameraVisionModule:
                 "stream_path": f"/camera/{cam_name}",
                 "resolution_dpcm_x": float(cam_state.config.resolution_dpcm_x),
                 "resolution_dpcm_y": float(cam_state.config.resolution_dpcm_y),
+                "flip_horizontal": bool(cam_state.config.flip_horizontal),
+                "flip_vertical": bool(cam_state.config.flip_vertical),
                 "lights": {
                     key: int(cam_state.light_values.get(key, 0))
                     for key in sorted(cam_state.config.lights.keys())

@@ -1,18 +1,78 @@
 {
   "camera": {
     "nozzle_tips": [
-      { "id": "500", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "501", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "502", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "503", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "504", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "505", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "506", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "507", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "508", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "509", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "510", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null },
-      { "id": "511", "suction_hole_diameter_mm": null, "component_min_mm": null, "component_max_mm": null }
+      {
+        "id": "500",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "501",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "502",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "503",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "504",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "505",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "506",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "507",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "508",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "509",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "510",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      },
+      {
+        "id": "511",
+        "suction_hole_diameter_mm": null,
+        "component_min_mm": null,
+        "component_max_mm": null
+      }
     ],
     "nozzles": [
       {
@@ -21,9 +81,9 @@
         "min_z": -50.0,
         "max_z": 0.0,
         "tip_id": "501",
-        "standard_down_z": null,
-        "offset_x": -45.0,
-        "offset_y": -100.0
+        "standard_down_z": -38.0,
+        "offset_x": -47.80000000000018,
+        "offset_y": -97.70000000000002
       },
       {
         "name": "N2",
@@ -31,9 +91,9 @@
         "min_z": -50.0,
         "max_z": 0.0,
         "tip_id": "502",
-        "standard_down_z": null,
-        "offset_x": -15.0,
-        "offset_y": -100.0
+        "standard_down_z": -39.0,
+        "offset_x": -16.629999999999995,
+        "offset_y": -99.19999999999993
       },
       {
         "name": "N3",
@@ -41,9 +101,9 @@
         "min_z": -50.0,
         "max_z": 0.0,
         "tip_id": "511",
-        "standard_down_z": null,
-        "offset_x": 15.0,
-        "offset_y": -100.0
+        "standard_down_z": -39.0,
+        "offset_x": 16.870000000000005,
+        "offset_y": -99.19999999999993
       },
       {
         "name": "N4",
@@ -51,9 +111,9 @@
         "min_z": -50.0,
         "max_z": 0.0,
         "tip_id": "500",
-        "standard_down_z": null,
-        "offset_x": 45.0,
-        "offset_y": -100.0
+        "standard_down_z": -40.0,
+        "offset_x": 47.66999999999996,
+        "offset_y": -99.59999999999991
       }
     ]
   }
