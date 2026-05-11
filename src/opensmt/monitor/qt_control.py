@@ -1765,11 +1765,16 @@ class ControlWindow(QMainWindow):
         self._selected_feeder_id: str = ""
         self._packages_by_name: dict[str, dict[str, Any]] = {}
         self._parts_by_id: dict[str, dict[str, Any]] = {}
+        self._nozzle_tips_by_id: dict[str, dict[str, Any]] = {}
+        self._nozzles_by_name: dict[str, dict[str, Any]] = {}
         self._setup_cameras: list[dict[str, Any]] = []
         self._setup_camera_current_row = -1
         self._setup_positions: list[dict[str, Any]] = []
         self._setup_position_current_row = -1
         self._setup_config_dir = Path(__file__).resolve().parents[3] / "config" / "examples"
+        self._packages_config_dir = self._setup_config_dir / "packages"
+        self._parts_config_path = self._setup_config_dir / "parts.json"
+        self._nozzles_config_path = self._setup_config_dir / "nozzles.json"
         self._setup_camera_config_path = self._setup_config_dir / "camera" / "camera.cameras.json"
         self._setup_locations_config_path = self._setup_config_dir / "system.locations.json"
         self._current_x: float | None = None
@@ -2044,38 +2049,6 @@ class ControlWindow(QMainWindow):
         self._package_table.cellDoubleClicked.connect(self._on_package_row_double_clicked)
         package_survey_layout.addWidget(self._package_table)
 
-        package_details_tab = QWidget()
-        package_details_layout = QVBoxLayout(package_details_tab)
-        package_details_layout.setContentsMargins(6, 6, 6, 6)
-
-        package_detail_form = QFormLayout()
-        self._package_detail_name = QLineEdit()
-        self._package_detail_name.setReadOnly(True)
-        self._package_detail_footprint = QLineEdit()
-        self._package_detail_footprint.setReadOnly(True)
-        self._package_detail_length = QLineEdit()
-        self._package_detail_length.setReadOnly(True)
-        self._package_detail_width = QLineEdit()
-        self._package_detail_width.setReadOnly(True)
-        self._package_detail_height = QLineEdit()
-        self._package_detail_height.setReadOnly(True)
-        self._package_detail_pins = QLineEdit()
-        self._package_detail_pins.setReadOnly(True)
-        package_detail_form.addRow("Name", self._package_detail_name)
-        package_detail_form.addRow("Footprint", self._package_detail_footprint)
-        package_detail_form.addRow("Length (mm)", self._package_detail_length)
-        package_detail_form.addRow("Width (mm)", self._package_detail_width)
-        package_detail_form.addRow("Height (mm)", self._package_detail_height)
-        package_detail_form.addRow("Pin Count", self._package_detail_pins)
-        package_details_layout.addLayout(package_detail_form)
-        package_back_row = QHBoxLayout()
-        package_back_row.addStretch(1)
-        self._package_back_btn = QPushButton("Back to Packages")
-        self._package_back_btn.clicked.connect(lambda: self._parts_packages_tabs.setCurrentIndex(0))
-        package_back_row.addWidget(self._package_back_btn)
-        package_details_layout.addLayout(package_back_row)
-        package_details_layout.addStretch(1)
-
         parts_survey_tab = QWidget()
         parts_survey_layout = QVBoxLayout(parts_survey_tab)
         parts_survey_layout.setContentsMargins(6, 6, 6, 6)
@@ -2109,35 +2082,82 @@ class ControlWindow(QMainWindow):
         self._part_table.cellDoubleClicked.connect(self._on_part_row_double_clicked)
         parts_survey_layout.addWidget(self._part_table)
 
-        part_details_tab = QWidget()
-        part_details_layout = QVBoxLayout(part_details_tab)
-        part_details_layout.setContentsMargins(6, 6, 6, 6)
-        part_detail_form = QFormLayout()
-        self._part_detail_id = QLineEdit()
-        self._part_detail_id.setReadOnly(True)
-        self._part_detail_description = QLineEdit()
-        self._part_detail_description.setReadOnly(True)
-        self._part_detail_package = QLineEdit()
-        self._part_detail_package.setReadOnly(True)
-        self._part_detail_quantity = QLineEdit()
-        self._part_detail_quantity.setReadOnly(True)
-        part_detail_form.addRow("Part ID", self._part_detail_id)
-        part_detail_form.addRow("Description", self._part_detail_description)
-        part_detail_form.addRow("Package", self._part_detail_package)
-        part_detail_form.addRow("Quantity", self._part_detail_quantity)
-        part_details_layout.addLayout(part_detail_form)
-        part_back_row = QHBoxLayout()
-        part_back_row.addStretch(1)
-        self._part_back_btn = QPushButton("Back to Parts")
-        self._part_back_btn.clicked.connect(lambda: self._parts_packages_tabs.setCurrentIndex(2))
-        part_back_row.addWidget(self._part_back_btn)
-        part_details_layout.addLayout(part_back_row)
-        part_details_layout.addStretch(1)
+        nozzle_tip_survey_tab = QWidget()
+        nozzle_tip_survey_layout = QVBoxLayout(nozzle_tip_survey_tab)
+        nozzle_tip_survey_layout.setContentsMargins(6, 6, 6, 6)
+
+        nozzle_tip_actions = QHBoxLayout()
+        self._add_nozzle_tip_btn = QPushButton("Add Nozzle Tip")
+        self._add_nozzle_tip_btn.clicked.connect(self._on_add_nozzle_tip)
+        nozzle_tip_actions.addWidget(self._add_nozzle_tip_btn)
+        nozzle_tip_actions.addStretch(1)
+        nozzle_tip_survey_layout.addLayout(nozzle_tip_actions)
+
+        self._nozzle_tip_table = QTableWidget(0, 4)
+        self._nozzle_tip_table.setHorizontalHeaderLabels([
+            "Tip ID",
+            "Suction Hole (mm)",
+            "Component Min (mm)",
+            "Component Max (mm)",
+        ])
+        self._nozzle_tip_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._nozzle_tip_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._nozzle_tip_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._nozzle_tip_table.verticalHeader().setVisible(False)
+        tip_header = self._nozzle_tip_table.horizontalHeader()
+        tip_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        tip_header.setStretchLastSection(True)
+        tip_header.setMinimumSectionSize(70)
+        tip_header.resizeSection(0, 100)
+        tip_header.resizeSection(1, 140)
+        tip_header.resizeSection(2, 140)
+        tip_header.resizeSection(3, 140)
+        self._nozzle_tip_table.cellDoubleClicked.connect(self._on_nozzle_tip_row_double_clicked)
+        nozzle_tip_survey_layout.addWidget(self._nozzle_tip_table)
+
+        nozzle_survey_tab = QWidget()
+        nozzle_survey_layout = QVBoxLayout(nozzle_survey_tab)
+        nozzle_survey_layout.setContentsMargins(6, 6, 6, 6)
+
+        nozzle_actions = QHBoxLayout()
+        self._add_nozzle_btn = QPushButton("Add Nozzle")
+        self._add_nozzle_btn.clicked.connect(self._on_add_nozzle)
+        nozzle_actions.addWidget(self._add_nozzle_btn)
+        nozzle_actions.addStretch(1)
+        nozzle_survey_layout.addLayout(nozzle_actions)
+
+        self._nozzle_table = QTableWidget(0, 7)
+        self._nozzle_table.setHorizontalHeaderLabels([
+            "Name",
+            "Z Axis",
+            "Min Z",
+            "Max Z",
+            "Offset X",
+            "Offset Y",
+            "Tip ID",
+        ])
+        self._nozzle_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._nozzle_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._nozzle_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._nozzle_table.verticalHeader().setVisible(False)
+        noz_header = self._nozzle_table.horizontalHeader()
+        noz_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        noz_header.setStretchLastSection(True)
+        noz_header.setMinimumSectionSize(70)
+        noz_header.resizeSection(0, 100)
+        noz_header.resizeSection(1, 90)
+        noz_header.resizeSection(2, 90)
+        noz_header.resizeSection(3, 90)
+        noz_header.resizeSection(4, 90)
+        noz_header.resizeSection(5, 90)
+        noz_header.resizeSection(6, 90)
+        self._nozzle_table.cellDoubleClicked.connect(self._on_nozzle_row_double_clicked)
+        nozzle_survey_layout.addWidget(self._nozzle_table)
 
         self._parts_packages_tabs.addTab(package_survey_tab, "Packages")
-        self._parts_packages_tabs.addTab(package_details_tab, "Package Details")
         self._parts_packages_tabs.addTab(parts_survey_tab, "Parts")
-        self._parts_packages_tabs.addTab(part_details_tab, "Part Details")
+        self._parts_packages_tabs.addTab(nozzle_tip_survey_tab, "Nozzle Tips")
+        self._parts_packages_tabs.addTab(nozzle_survey_tab, "Nozzles")
         parts_packages_layout.addWidget(self._parts_packages_tabs)
 
         feeders_tab = QWidget()
@@ -2353,9 +2373,10 @@ class ControlWindow(QMainWindow):
         self._poll_timer.start()
 
         self._load_packages_from_config()
+        self._load_parts_from_config()
+        self._load_nozzle_editor_config()
         self._load_setup_cameras_from_config()
         self._load_setup_positions_from_config()
-        self._refresh_parts_table()
 
         QTimer.singleShot(0, self._init_splitters)
 
@@ -3145,6 +3166,9 @@ class ControlWindow(QMainWindow):
             for col, value in enumerate(cells):
                 self._package_table.setItem(row, col, QTableWidgetItem(value))
 
+    def _package_names(self) -> list[str]:
+        return sorted(self._packages_by_name.keys())
+
     def _on_add_package(self) -> None:
         idx = len(self._packages_by_name) + 1
         while True:
@@ -3160,6 +3184,7 @@ class ControlWindow(QMainWindow):
             "width_mm": 1.0,
             "height_mm": 0.5,
             "pin_count": 2,
+            "_path": str(self._packages_config_dir / f"{name.lower()}.json"),
         }
         self._refresh_package_table()
         self._open_package_details(name)
@@ -3176,13 +3201,67 @@ class ControlWindow(QMainWindow):
         pkg = self._packages_by_name.get(str(name).strip().upper())
         if pkg is None:
             return
-        self._package_detail_name.setText(str(pkg.get("name", "")))
-        self._package_detail_footprint.setText(str(pkg.get("footprint", "")))
-        self._package_detail_length.setText(self._fmt(pkg.get("length_mm")))
-        self._package_detail_width.setText(self._fmt(pkg.get("width_mm")))
-        self._package_detail_height.setText(self._fmt(pkg.get("height_mm")))
-        self._package_detail_pins.setText(str(int(pkg.get("pin_count", 0) or 0)))
-        self._parts_packages_tabs.setCurrentIndex(1)
+
+        dialog = _PackageEditorDialog(pkg, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        updated = dict(pkg)
+        updated.update(dialog.package_data())
+        old_name = str(pkg.get("name", "")).strip().upper()
+        self._save_package_config(updated)
+        if updated["name"] != old_name:
+            self._packages_by_name.pop(old_name, None)
+        self._packages_by_name[str(updated["name"]).strip().upper()] = updated
+        self._refresh_package_table()
+
+    def _load_packages_from_config(self) -> None:
+        self._packages_by_name = {}
+        cfg_root = self._packages_config_dir
+        if not cfg_root.exists() or not cfg_root.is_dir():
+            self._log_line(f"WARN: package config directory not found: {cfg_root}")
+            self._refresh_package_table()
+            return
+
+        for path in sorted(cfg_root.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raise ValueError("expected JSON object")
+                name = str(raw.get("name", "")).strip().upper()
+                if not name:
+                    raise ValueError("missing package name")
+                self._packages_by_name[name] = {
+                    "name": name,
+                    "footprint": str(raw.get("footprint", "")).strip(),
+                    "length_mm": float(raw.get("length_mm", 0.0) or 0.0),
+                    "width_mm": float(raw.get("width_mm", 0.0) or 0.0),
+                    "height_mm": float(raw.get("height_mm", 0.0) or 0.0),
+                    "pin_count": int(raw.get("pin_count", 0) or 0),
+                    "_path": str(path),
+                }
+            except Exception as exc:
+                self._log_line(f"WARN: failed to load package config {path.name}: {exc}")
+
+        self._refresh_package_table()
+
+    def _save_package_config(self, package: dict[str, Any]) -> None:
+        name = str(package.get("name", "")).strip().upper()
+        if not name:
+            raise ValueError("package name must not be empty")
+        path_raw = package.get("_path")
+        path = Path(str(path_raw)) if path_raw else self._packages_config_dir / f"{name.lower()}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "name": name,
+            "footprint": str(package.get("footprint", "")).strip(),
+            "length_mm": float(package.get("length_mm", 0.0) or 0.0),
+            "width_mm": float(package.get("width_mm", 0.0) or 0.0),
+            "height_mm": float(package.get("height_mm", 0.0) or 0.0),
+            "pin_count": int(package.get("pin_count", 0) or 0),
+        }
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        package["_path"] = str(path)
 
     def _refresh_parts_table(self) -> None:
         rows = sorted(self._parts_by_id.values(), key=lambda item: str(item.get("part_id", "")))
@@ -3197,6 +3276,35 @@ class ControlWindow(QMainWindow):
             for col, value in enumerate(cells):
                 self._part_table.setItem(row, col, QTableWidgetItem(value))
 
+    def _refresh_nozzle_tip_table(self) -> None:
+        rows = sorted(self._nozzle_tips_by_id.values(), key=lambda item: str(item.get("id", "")))
+        self._nozzle_tip_table.setRowCount(len(rows))
+        for row, tip in enumerate(rows):
+            cells = [
+                str(tip.get("id", "")),
+                self._fmt(tip.get("suction_hole_diameter_mm")),
+                self._fmt(tip.get("component_min_mm")),
+                self._fmt(tip.get("component_max_mm")),
+            ]
+            for col, value in enumerate(cells):
+                self._nozzle_tip_table.setItem(row, col, QTableWidgetItem(value))
+
+    def _refresh_nozzle_table(self) -> None:
+        rows = sorted(self._nozzles_by_name.values(), key=lambda item: str(item.get("name", "")))
+        self._nozzle_table.setRowCount(len(rows))
+        for row, nozzle in enumerate(rows):
+            cells = [
+                str(nozzle.get("name", "")),
+                str(nozzle.get("z_axis", "")),
+                self._fmt(nozzle.get("min_z")),
+                self._fmt(nozzle.get("max_z")),
+                self._fmt(nozzle.get("offset_x")),
+                self._fmt(nozzle.get("offset_y")),
+                str(nozzle.get("tip_id", "") or ""),
+            ]
+            for col, value in enumerate(cells):
+                self._nozzle_table.setItem(row, col, QTableWidgetItem(value))
+
     def _on_add_part(self) -> None:
         idx = len(self._parts_by_id) + 1
         while True:
@@ -3205,9 +3313,7 @@ class ControlWindow(QMainWindow):
                 break
             idx += 1
 
-        package_name = ""
-        if self._packages_by_name:
-            package_name = sorted(self._packages_by_name.keys())[0]
+        package_name = self._package_names()[0] if self._packages_by_name else ""
 
         self._parts_by_id[part_id] = {
             "part_id": part_id,
@@ -3230,11 +3336,228 @@ class ControlWindow(QMainWindow):
         part = self._parts_by_id.get(str(part_id).strip().upper())
         if part is None:
             return
-        self._part_detail_id.setText(str(part.get("part_id", "")))
-        self._part_detail_description.setText(str(part.get("description", "")))
-        self._part_detail_package.setText(str(part.get("package", "")))
-        self._part_detail_quantity.setText(str(int(part.get("quantity", 0) or 0)))
-        self._parts_packages_tabs.setCurrentIndex(3)
+
+        dialog = _PartEditorDialog(part, self._package_names(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        updated = dialog.part_data()
+        self._parts_by_id[updated["part_id"]] = updated
+        self._save_parts_config()
+        self._refresh_parts_table()
+
+    def _load_parts_from_config(self) -> None:
+        self._parts_by_id = {}
+        if not self._parts_config_path.exists():
+            self._refresh_parts_table()
+            return
+
+        try:
+            raw = json.loads(self._parts_config_path.read_text(encoding="utf-8"))
+            parts = raw.get("parts", []) if isinstance(raw, dict) else []
+            if isinstance(parts, list):
+                for item in parts:
+                    if not isinstance(item, dict):
+                        continue
+                    part_id = str(item.get("part_id", "")).strip().upper()
+                    if not part_id:
+                        continue
+                    self._parts_by_id[part_id] = {
+                        "part_id": part_id,
+                        "description": str(item.get("description", "")).strip(),
+                        "package": str(item.get("package", "")).strip().upper(),
+                        "quantity": int(item.get("quantity", 0) or 0),
+                    }
+        except Exception as exc:
+            self._log_line(f"WARN: failed to load parts config: {exc}")
+        self._refresh_parts_table()
+
+    def _save_parts_config(self) -> None:
+        self._parts_config_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"parts": [dict(self._parts_by_id[key]) for key in sorted(self._parts_by_id.keys())]}
+        self._parts_config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def _on_add_nozzle_tip(self) -> None:
+        idx = len(self._nozzle_tips_by_id) + 1
+        while True:
+            tip_id = f"T{idx:03d}"
+            if tip_id not in self._nozzle_tips_by_id:
+                break
+            idx += 1
+
+        tip = {
+            "id": tip_id,
+            "suction_hole_diameter_mm": 0.0,
+            "component_min_mm": 0.0,
+            "component_max_mm": 0.0,
+        }
+        self._nozzle_tips_by_id[tip_id] = tip
+        self._refresh_nozzle_tip_table()
+        self._open_nozzle_tip_details(tip_id)
+
+    def _on_nozzle_tip_row_double_clicked(self, row: int, _col: int) -> None:
+        item = self._nozzle_tip_table.item(row, 0)
+        if item is None:
+            return
+        tip_id = item.text().strip()
+        if tip_id:
+            self._open_nozzle_tip_details(tip_id)
+
+    def _open_nozzle_tip_details(self, tip_id: str) -> None:
+        tip = self._nozzle_tips_by_id.get(str(tip_id).strip())
+        if tip is None:
+            return
+
+        dialog = _NozzleTipEditorDialog(tip, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        updated = dialog.tip_data()
+        self._nozzle_tips_by_id[updated["id"]] = updated
+        self._save_nozzle_editor_config()
+        self._refresh_nozzle_tip_table()
+        self._refresh_nozzle_table()
+
+    def _on_add_nozzle(self) -> None:
+        idx = len(self._nozzles_by_name) + 1
+        while True:
+            name = f"N{idx}"
+            if name not in self._nozzles_by_name:
+                break
+            idx += 1
+
+        tip_ids = sorted(self._nozzle_tips_by_id.keys())
+        nozzle = {
+            "name": name,
+            "z_axis": f"Z{idx}",
+            "min_z": -50.0,
+            "max_z": 0.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+            "tip_id": tip_ids[0] if tip_ids else None,
+            "standard_down_z": -10.0,
+            "vacuum_valve": {"board": "", "io_type": "gpio", "pin": 0},
+            "air_valve": None,
+        }
+        self._nozzles_by_name[name] = nozzle
+        self._refresh_nozzle_table()
+        self._open_nozzle_details(name)
+
+    def _on_nozzle_row_double_clicked(self, row: int, _col: int) -> None:
+        item = self._nozzle_table.item(row, 0)
+        if item is None:
+            return
+        name = item.text().strip().upper()
+        if name:
+            self._open_nozzle_details(name)
+
+    def _open_nozzle_details(self, name: str) -> None:
+        nozzle = self._nozzles_by_name.get(str(name).strip().upper())
+        if nozzle is None:
+            return
+
+        tip_ids = sorted(self._nozzle_tips_by_id.keys())
+        if not tip_ids:
+            self._log_line("ERR: nozzle edit failed: define at least one nozzle tip first")
+            return
+
+        dialog = _NozzleEditorDialog(nozzle, tip_ids, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        updated = dialog.nozzle_data()
+        if not updated.get("tip_id"):
+            self._log_line("ERR: nozzle save failed: a nozzle tip must be selected")
+            return
+        self._nozzles_by_name[updated["name"]] = updated
+        self._save_nozzle_editor_config()
+        self._refresh_nozzle_table()
+        self._apply_nozzle_runtime(updated)
+
+    def _load_nozzle_editor_config(self) -> None:
+        self._nozzle_tips_by_id = {}
+        self._nozzles_by_name = {}
+        if not self._nozzles_config_path.exists():
+            self._refresh_nozzle_tip_table()
+            self._refresh_nozzle_table()
+            return
+
+        try:
+            raw = json.loads(self._nozzles_config_path.read_text(encoding="utf-8"))
+            camera = raw.get("camera", {}) if isinstance(raw, dict) else {}
+            nozzle_tips = camera.get("nozzle_tips", []) if isinstance(camera, dict) else []
+            nozzles = camera.get("nozzles", []) if isinstance(camera, dict) else []
+
+            if isinstance(nozzle_tips, list):
+                for item in nozzle_tips:
+                    if not isinstance(item, dict):
+                        continue
+                    tip_id = str(item.get("id", "")).strip()
+                    if not tip_id:
+                        continue
+                    self._nozzle_tips_by_id[tip_id] = {
+                        "id": tip_id,
+                        "suction_hole_diameter_mm": item.get("suction_hole_diameter_mm"),
+                        "component_min_mm": item.get("component_min_mm"),
+                        "component_max_mm": item.get("component_max_mm"),
+                    }
+
+            if isinstance(nozzles, list):
+                for item in nozzles:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name", "")).strip().upper()
+                    if not name:
+                        continue
+                    self._nozzles_by_name[name] = {
+                        "name": name,
+                        "z_axis": str(item.get("z_axis", "")).strip().upper(),
+                        "min_z": float(item.get("min_z", 0.0) or 0.0),
+                        "max_z": float(item.get("max_z", 0.0) or 0.0),
+                        "offset_x": float(item.get("offset_x", 0.0) or 0.0),
+                        "offset_y": float(item.get("offset_y", 0.0) or 0.0),
+                        "tip_id": str(item.get("tip_id", "")).strip() or None,
+                        "standard_down_z": float(item.get("standard_down_z", 0.0) or 0.0),
+                        "vacuum_valve": dict(item.get("vacuum_valve", {})) if isinstance(item.get("vacuum_valve"), dict) else {},
+                        "air_valve": dict(item.get("air_valve", {})) if isinstance(item.get("air_valve"), dict) else None,
+                    }
+        except Exception as exc:
+            self._log_line(f"WARN: failed to load nozzle config: {exc}")
+        self._refresh_nozzle_tip_table()
+        self._refresh_nozzle_table()
+
+    def _save_nozzle_editor_config(self) -> None:
+        self._nozzles_config_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            raw = json.loads(self._nozzles_config_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raw = {}
+        except Exception:
+            raw = {}
+        camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
+        if not isinstance(camera, dict):
+            camera = {}
+        camera["nozzle_tips"] = [dict(self._nozzle_tips_by_id[key]) for key in sorted(self._nozzle_tips_by_id.keys())]
+        camera["nozzles"] = [dict(self._nozzles_by_name[key]) for key in sorted(self._nozzles_by_name.keys())]
+        raw["camera"] = camera
+        self._nozzles_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+
+    def _apply_nozzle_runtime(self, nozzle: dict[str, Any]) -> None:
+        name = str(nozzle.get("name", "")).strip().upper()
+        if not name:
+            return
+        self._api.post_json(
+            f"/api/config/nozzle/{name}",
+            nozzle,
+            lambda ok, status, data, noz=name: self._on_nozzle_runtime_saved(noz, ok, status, data),
+        )
+
+    def _on_nozzle_runtime_saved(self, nozzle_name: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: nozzle {nozzle_name} runtime update failed: {data.get('error', 'request_failed')}")
+            return
+        self._log_line(f"OK: nozzle {nozzle_name} applied at runtime")
+        self._poll_status()
 
     def _on_feeder_row_double_clicked(self, row: int, _col: int) -> None:
         item = self._feeder_table.item(row, 0)

@@ -4,6 +4,7 @@
     "system.boards.json",
     "system.driver.json",
     "system.locations.json",
+    "parts.json",
     "nozzles.json",
     "camera/camera.core.json",
     "camera/camera.cameras.json",

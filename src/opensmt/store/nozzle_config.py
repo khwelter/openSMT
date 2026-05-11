@@ -48,3 +48,7 @@ class NozzleConfigStore:
     def names(self) -> list[str]:
         """Get list of all nozzle names."""
         return list(self._nozzles.keys())
+
+    def upsert(self, nozzle: NozzleConfig) -> None:
+        """Insert or replace a nozzle configuration in memory."""
+        self._nozzles[nozzle.name] = nozzle

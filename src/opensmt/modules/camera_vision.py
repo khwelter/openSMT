@@ -21,7 +21,7 @@ from opensmt.hardware.driver import HardwareDriver
 from opensmt.runtime.command_runner import CommandRunner
 from opensmt.store.feeder_config import FeederConfigStore, feeder_from_dict
 from opensmt.store.location_store import LocationStore
-from opensmt.store.nozzle_config import NozzleConfigStore
+from opensmt.store.nozzle_config import NozzleConfig, NozzleConfigStore, ValveConfig
 from opensmt.store.position_store import PositionStore
 from opensmt.store.valve_store import ValveStore
 
@@ -464,6 +464,7 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/move-xy", self._api_coord_move_xy)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
         app.router.add_post("/api/config/location/{name}", self._api_config_location_set)
+        app.router.add_post("/api/config/nozzle/{name}", self._api_config_nozzle_set)
         app.router.add_get("/api/feeders", self._api_feeders)
         app.router.add_post("/api/feeders", self._api_feeder_create)
         app.router.add_get("/api/feeders/{feeder_id}", self._api_feeder_get)
@@ -1117,10 +1118,27 @@ class CameraVisionModule:
                 cfg = cfg_by_name.get(name)
                 if cfg is None:
                     continue
+                item["z_axis"] = cfg.z_axis
+                item["min_z"] = float(cfg.min_z)
+                item["max_z"] = float(cfg.max_z)
                 item["offset_x"] = float(cfg.offset_x)
                 item["offset_y"] = float(cfg.offset_y)
                 item["tip_id"] = cfg.tip_id
                 item["standard_down_z"] = float(cfg.standard_down_z) if cfg.standard_down_z is not None else None
+                item["vacuum_valve"] = {
+                    "board": cfg.vacuum_valve.board,
+                    "io_type": cfg.vacuum_valve.io_type,
+                    "pin": cfg.vacuum_valve.pin,
+                }
+                item["air_valve"] = (
+                    {
+                        "board": cfg.air_valve.board,
+                        "io_type": cfg.air_valve.io_type,
+                        "pin": cfg.air_valve.pin,
+                    }
+                    if cfg.air_valve is not None
+                    else None
+                )
 
             self._nozzle_offsets_persist_path.parent.mkdir(parents=True, exist_ok=True)
             self._nozzle_offsets_persist_path.write_text(
@@ -1318,6 +1336,101 @@ class CameraVisionModule:
                 "x": x,
                 "y": y,
                 "persist_path": self._location_store.persist_path(),
+            }
+        )
+
+    async def _api_config_nozzle_set(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        if self._nozzle_config_store is None:
+            return web.json_response({"error": "persistence_not_configured"}, status=503)
+
+        nozzle_name = raw_name.upper()
+        current_cfg = self._nozzle_config_store.get(nozzle_name)
+        if current_cfg is None:
+            return web.json_response({"error": "unknown_nozzle"}, status=404)
+
+        try:
+            body = await request.json()
+            z_axis = str(body.get("z_axis", current_cfg.z_axis)).strip().upper()
+            min_z = float(body.get("min_z", current_cfg.min_z))
+            max_z = float(body.get("max_z", current_cfg.max_z))
+            offset_x = float(body.get("offset_x", current_cfg.offset_x))
+            offset_y = float(body.get("offset_y", current_cfg.offset_y))
+            tip_id_raw = body.get("tip_id")
+            tip_id = str(tip_id_raw).strip() if tip_id_raw is not None and str(tip_id_raw).strip() else None
+            standard_down_z_raw = body.get("standard_down_z")
+            standard_down_z = float(standard_down_z_raw) if standard_down_z_raw is not None else None
+
+            vacuum_valve_raw = body.get("vacuum_valve")
+            if not isinstance(vacuum_valve_raw, dict):
+                raise ValueError("missing vacuum_valve")
+            vacuum_valve = ValveConfig(
+                board=str(vacuum_valve_raw.get("board", current_cfg.vacuum_valve.board)).strip().upper(),
+                io_type=str(vacuum_valve_raw.get("io_type", current_cfg.vacuum_valve.io_type)).strip().lower(),
+                pin=int(vacuum_valve_raw.get("pin", current_cfg.vacuum_valve.pin)),
+            )
+
+            air_valve_raw = body.get("air_valve")
+            air_valve = None
+            if isinstance(air_valve_raw, dict):
+                air_valve = ValveConfig(
+                    board=str(air_valve_raw.get("board", "")).strip().upper(),
+                    io_type=str(air_valve_raw.get("io_type", "gpio")).strip().lower(),
+                    pin=int(air_valve_raw.get("pin", 0)),
+                )
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not z_axis:
+            return web.json_response({"error": "invalid_z_axis"}, status=400)
+        if not (math.isfinite(min_z) and math.isfinite(max_z) and math.isfinite(offset_x) and math.isfinite(offset_y)):
+            return web.json_response({"error": "invalid_numeric_value"}, status=400)
+        if standard_down_z is not None and not math.isfinite(standard_down_z):
+            return web.json_response({"error": "invalid_standard_down_z"}, status=400)
+
+        updated_cfg = NozzleConfig(
+            name=nozzle_name,
+            z_axis=z_axis,
+            min_z=min_z,
+            max_z=max_z,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            vacuum_valve=vacuum_valve,
+            tip_id=tip_id,
+            standard_down_z=standard_down_z,
+            air_valve=air_valve,
+        )
+        self._nozzle_config_store.upsert(updated_cfg)
+
+        r_axis = f"R{z_axis[1:]}" if z_axis.startswith("Z") and len(z_axis) > 1 else "R1"
+        self._nozzles[nozzle_name] = RuntimeNozzleConfig(
+            name=nozzle_name,
+            z_axis=z_axis,
+            r_axis=r_axis,
+            min_z=min_z,
+            max_z=max_z,
+        )
+
+        persist_error = self._persist_nozzle_offsets()
+        persisted = persist_error is None
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "nozzle": nozzle_name,
+                "z_axis": z_axis,
+                "min_z": min_z,
+                "max_z": max_z,
+                "offset_x": offset_x,
+                "offset_y": offset_y,
+                "tip_id": tip_id,
+                "standard_down_z": standard_down_z,
+                "persisted": persisted,
+                "persist_path": str(self._nozzle_offsets_persist_path) if self._nozzle_offsets_persist_path else None,
+                "persist_error": persist_error,
             }
         )
 
