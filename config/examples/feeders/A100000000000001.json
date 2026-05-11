@@ -16,15 +16,15 @@
   },
   "actual_data": {
     "current_index_x": 0,
-    "current_index_y": 0,
+    "current_index_y": 1,
     "current_pick": {
       "x": 120.2,
-      "y": 99.3
+      "y": 95.3
     },
     "last_pick": {
       "x": 120.2,
       "y": 59.3
     },
-    "parts_picked": 0
+    "parts_picked": 9
   }
 }

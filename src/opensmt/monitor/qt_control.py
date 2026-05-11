@@ -9,6 +9,8 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPoly
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -998,6 +1000,255 @@ class NozzleCard(QFrame):
 
     def _angle_step_deg(self) -> float:
         return self._r_step_val
+
+
+class _PackageEditorDialog(QDialog):
+    def __init__(self, package: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Package Editor")
+
+        self._name = QLineEdit(str(package.get("name", "")))
+        self._name.setReadOnly(True)
+        self._footprint = QLineEdit(str(package.get("footprint", "")))
+        self._length = QDoubleSpinBox()
+        self._width = QDoubleSpinBox()
+        self._height = QDoubleSpinBox()
+        self._pins = QSpinBox()
+
+        for widget in (self._length, self._width, self._height):
+            widget.setRange(0.0, 1000.0)
+            widget.setDecimals(3)
+            widget.setSingleStep(0.1)
+        self._pins.setRange(0, 9999)
+
+        self._length.setValue(float(package.get("length_mm", 0.0) or 0.0))
+        self._width.setValue(float(package.get("width_mm", 0.0) or 0.0))
+        self._height.setValue(float(package.get("height_mm", 0.0) or 0.0))
+        self._pins.setValue(int(package.get("pin_count", 0) or 0))
+
+        form = QFormLayout()
+        form.addRow("Name", self._name)
+        form.addRow("Footprint", self._footprint)
+        form.addRow("Length (mm)", self._length)
+        form.addRow("Width (mm)", self._width)
+        form.addRow("Height (mm)", self._height)
+        form.addRow("Pin Count", self._pins)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(buttons)
+
+    def package_data(self) -> dict[str, Any]:
+        return {
+            "name": self._name.text().strip().upper(),
+            "footprint": self._footprint.text().strip(),
+            "length_mm": float(self._length.value()),
+            "width_mm": float(self._width.value()),
+            "height_mm": float(self._height.value()),
+            "pin_count": int(self._pins.value()),
+        }
+
+
+class _PartEditorDialog(QDialog):
+    def __init__(self, part: dict[str, Any], package_names: list[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Part Editor")
+
+        self._part_id = QLineEdit(str(part.get("part_id", "")))
+        self._part_id.setReadOnly(True)
+        self._description = QLineEdit(str(part.get("description", "")))
+        self._package = QComboBox()
+        self._package.addItems(package_names)
+        self._quantity = QSpinBox()
+        self._quantity.setRange(0, 999999)
+        self._quantity.setValue(int(part.get("quantity", 0) or 0))
+
+        current_pkg = str(part.get("package", "")).strip().upper()
+        if current_pkg:
+            idx = self._package.findText(current_pkg)
+            if idx >= 0:
+                self._package.setCurrentIndex(idx)
+
+        form = QFormLayout()
+        form.addRow("Part ID", self._part_id)
+        form.addRow("Description", self._description)
+        form.addRow("Package", self._package)
+        form.addRow("Quantity", self._quantity)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(buttons)
+
+    def part_data(self) -> dict[str, Any]:
+        return {
+            "part_id": self._part_id.text().strip().upper(),
+            "description": self._description.text().strip(),
+            "package": self._package.currentText().strip().upper(),
+            "quantity": int(self._quantity.value()),
+        }
+
+
+class _NozzleTipEditorDialog(QDialog):
+    def __init__(self, tip: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Nozzle Tip Editor")
+
+        self._tip_id = QLineEdit(str(tip.get("id", "")))
+        self._tip_id.setReadOnly(True)
+        self._suction_hole = QDoubleSpinBox()
+        self._component_min = QDoubleSpinBox()
+        self._component_max = QDoubleSpinBox()
+        for widget in (self._suction_hole, self._component_min, self._component_max):
+            widget.setRange(0.0, 1000.0)
+            widget.setDecimals(3)
+            widget.setSingleStep(0.1)
+
+        for widget, key in (
+            (self._suction_hole, "suction_hole_diameter_mm"),
+            (self._component_min, "component_min_mm"),
+            (self._component_max, "component_max_mm"),
+        ):
+            value = tip.get(key)
+            widget.setValue(float(value) if value is not None else 0.0)
+
+        form = QFormLayout()
+        form.addRow("Tip ID", self._tip_id)
+        form.addRow("Suction Hole (mm)", self._suction_hole)
+        form.addRow("Component Min (mm)", self._component_min)
+        form.addRow("Component Max (mm)", self._component_max)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(buttons)
+
+    def tip_data(self) -> dict[str, Any]:
+        return {
+            "id": self._tip_id.text().strip(),
+            "suction_hole_diameter_mm": self._suction_hole.value(),
+            "component_min_mm": self._component_min.value(),
+            "component_max_mm": self._component_max.value(),
+        }
+
+
+class _NozzleEditorDialog(QDialog):
+    def __init__(self, nozzle: dict[str, Any], tip_ids: list[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Nozzle Editor")
+
+        self._name = QLineEdit(str(nozzle.get("name", "")))
+        self._name.setReadOnly(True)
+        self._z_axis = QLineEdit(str(nozzle.get("z_axis", "")))
+        self._min_z = QDoubleSpinBox()
+        self._max_z = QDoubleSpinBox()
+        self._offset_x = QDoubleSpinBox()
+        self._offset_y = QDoubleSpinBox()
+        self._standard_down_z = QDoubleSpinBox()
+        self._vacuum_board = QLineEdit(str((nozzle.get("vacuum_valve") or {}).get("board", "")))
+        self._vacuum_io = QLineEdit(str((nozzle.get("vacuum_valve") or {}).get("io_type", "")))
+        self._vacuum_pin = QSpinBox()
+        self._air_enabled = QCheckBox("Has Air Valve")
+        self._air_board = QLineEdit(str((nozzle.get("air_valve") or {}).get("board", "")))
+        self._air_io = QLineEdit(str((nozzle.get("air_valve") or {}).get("io_type", "")))
+        self._air_pin = QSpinBox()
+        self._tip_id = QComboBox()
+        self._tip_id.addItems(tip_ids)
+
+        for widget in (self._min_z, self._max_z, self._offset_x, self._offset_y, self._standard_down_z):
+            widget.setRange(-100000.0, 100000.0)
+            widget.setDecimals(3)
+            widget.setSingleStep(0.1)
+        self._vacuum_pin.setRange(0, 9999)
+        self._air_pin.setRange(0, 9999)
+
+        self._min_z.setValue(float(nozzle.get("min_z", 0.0) or 0.0))
+        self._max_z.setValue(float(nozzle.get("max_z", 0.0) or 0.0))
+        self._offset_x.setValue(float(nozzle.get("offset_x", 0.0) or 0.0))
+        self._offset_y.setValue(float(nozzle.get("offset_y", 0.0) or 0.0))
+        self._standard_down_z.setValue(float(nozzle.get("standard_down_z", 0.0) or 0.0))
+
+        vacuum_valve = nozzle.get("vacuum_valve") if isinstance(nozzle.get("vacuum_valve"), dict) else {}
+        self._vacuum_pin.setValue(int(vacuum_valve.get("pin", 0) or 0))
+
+        air_valve = nozzle.get("air_valve") if isinstance(nozzle.get("air_valve"), dict) else None
+        if air_valve is not None:
+            self._air_enabled.setChecked(True)
+            self._air_board.setText(str(air_valve.get("board", "")))
+            self._air_io.setText(str(air_valve.get("io_type", "")))
+            self._air_pin.setValue(int(air_valve.get("pin", 0) or 0))
+        else:
+            self._air_enabled.setChecked(False)
+
+        current_tip = str(nozzle.get("tip_id", "")).strip()
+        if current_tip:
+            idx = self._tip_id.findText(current_tip)
+            if idx >= 0:
+                self._tip_id.setCurrentIndex(idx)
+        elif self._tip_id.count() > 0:
+            self._tip_id.setCurrentIndex(0)
+
+        form = QFormLayout()
+        form.addRow("Nozzle Name", self._name)
+        form.addRow("Z Axis", self._z_axis)
+        form.addRow("Min Z", self._min_z)
+        form.addRow("Max Z", self._max_z)
+        form.addRow("Offset X", self._offset_x)
+        form.addRow("Offset Y", self._offset_y)
+        form.addRow("Tip ID", self._tip_id)
+        form.addRow("Standard Down Z", self._standard_down_z)
+        form.addRow("Vacuum Board", self._vacuum_board)
+        form.addRow("Vacuum IO Type", self._vacuum_io)
+        form.addRow("Vacuum Pin", self._vacuum_pin)
+        form.addRow(self._air_enabled)
+        form.addRow("Air Board", self._air_board)
+        form.addRow("Air IO Type", self._air_io)
+        form.addRow("Air Pin", self._air_pin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(buttons)
+
+    def nozzle_data(self) -> dict[str, Any]:
+        tip_id = self._tip_id.currentText().strip()
+        data: dict[str, Any] = {
+            "name": self._name.text().strip().upper(),
+            "z_axis": self._z_axis.text().strip().upper(),
+            "min_z": float(self._min_z.value()),
+            "max_z": float(self._max_z.value()),
+            "offset_x": float(self._offset_x.value()),
+            "offset_y": float(self._offset_y.value()),
+            "tip_id": tip_id or None,
+            "standard_down_z": float(self._standard_down_z.value()),
+            "vacuum_valve": {
+                "board": self._vacuum_board.text().strip().upper(),
+                "io_type": self._vacuum_io.text().strip().lower(),
+                "pin": int(self._vacuum_pin.value()),
+            },
+        }
+        if self._air_enabled.isChecked():
+            data["air_valve"] = {
+                "board": self._air_board.text().strip().upper(),
+                "io_type": self._air_io.text().strip().lower(),
+                "pin": int(self._air_pin.value()),
+            }
+        else:
+            data["air_valve"] = None
+        return data
 
 
 class TrayFeederEditor(QWidget):
