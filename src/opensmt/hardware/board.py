@@ -107,6 +107,13 @@ class SerialBoard:
         Raises RuntimeError on timeout or missing OK.
         """
         async with self._lock:
+            await self._write_line("G90")
+            ok = await self._wait_for_ok(timeout=5.0)
+            if not ok:
+                raise RuntimeError(
+                    f"Board {self._config.board_id}: no OK after 'G90'"
+                )
+
             terms = " ".join(f"{letter}{value:g}" for letter, value in axis_moves)
             move_line = f"G0 {terms} F{velocity:g}"
             await self._write_line(move_line)
