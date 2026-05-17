@@ -3306,7 +3306,7 @@ class ControlWindow(QMainWindow):
             }
 
         self._refresh_package_table()
-    self._refresh_catalog_status()
+        self._refresh_catalog_status()
 
     def _save_package_config(self, package: dict[str, Any]) -> None:
         self._catalog_db.upsert_package(package)

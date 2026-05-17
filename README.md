@@ -1,261 +1,128 @@
+[Behind the scenes](behindthescenes.md)
+
 # openSMT
 
-Modulares Python-Projekt fuer den Aufbau eines Kommunikationssystems fuer einen SMD-Bestueckungsautomaten.
+openSMT is a Python-based control stack for an SMT pick-and-place system.
+The current production path is:
 
-## Merkmale
+- backend runtime: `opensmt run`
+- operator UI: native Qt control client (`opensmt control-gui`)
+- transport: HTTP API served by the runtime
 
-- Voll asynchroner Message-Broker fuer Text- und Binaernachrichten
-- SCPI-kompatibles Textschema mit Query, Set, WORKING und finaler Antwort
-- Callback-Registrierung getrennt nach Query, Set, Response und Working
-- Terminal-Monitor mit Senden, Anzeigen und Playback aus Datei
-- Einfacher Qt-Monitor fuer Mehrfachinstanzen
-- Serial/G-Code Modul mit beliebig vielen individuell konfigurierbaren Schnittstellen
-- JSON-Konfiguration mit verschachtelten Includes ueber $include
-- Einheitliche `system.json`-Laufzeit fuer Boards, Achsen, Kameras, Nozzles und Feeder
-- Native Qt-Control-GUI fuer Maschinenbedienung ueber HTTP ohne Browser
-- Kamera-Thumbs, XY-Jogging, Nozzle-Jogging, Offset-Kalibrierung und Vakuumsteuerung in der Qt-Control-GUI
-- Externe Feeder-Konfiguration mit gemeinsamer Basiskonfiguration und feeder-typspezifischen Tabs in der GUI
+The legacy SCPI broker/monitor tools are still available for development,
+but they are not required for the main machine workflow.
 
-## SCPI Nachrichten
+## Current Feature Set
 
-- Query: :XXX:YYY?
-- Query-Antwort: :XXX:YYY? <wert>
-- Set: :XXX:YYY <wert>
-- Zwischenstatus bei langer Ausfuehrung: :XXX:YYY WORKING
-- Abschlussbestaetigung fuer Set: :XXX:YYY? <wert>
+- Native Qt control GUI for machine operation (no browser required)
+- Camera thumbnails, XY jog, nozzle actions, feeder workflows
+- Setup editors for cameras and special positions
+- Package, part, nozzle-tip and nozzle editors via popup dialogs
+- Dynamic nozzle-tip compatibility matrix in package editor
+- Tray feeder part field with type-ahead selection list
+- JSON include-based system configuration (`$include`)
+- SQLite catalog persistence for packages, parts, feeders
+- Runtime status indicator in GUI footer for active catalog DB and row counts
+- Absolute motion enforcement on board move commands (`G90` before motion)
 
-Werte duerfen Integer, Fliesskomma oder Strings in Anfuehrungszeichen sein.
+## Runtime Architecture
 
-## Schnellstart
+`python3 -m opensmt run --config config/examples/system.json` starts:
 
-1. Debian ohne pip-Installation
+- serial board connections
+- `HardwareDriver`
+- `PositionStore`, `LocationStore`
+- `CameraVisionModule` (HTTP API + camera handling)
 
-   Dieses Projekt kann direkt aus dem Quellcode gestartet werden:
+`python3 -m opensmt control-gui --host 127.0.0.1 --port 8080` starts
+the operator client that polls and commands the runtime.
 
-   export PYTHONPATH=src
+## Quick Start
 
-2. Konfiguration pruefen und an Hardware anpassen
-
-   - Datei: config/examples/system.json
-   - Wichtig: boards.*.device auf die realen seriellen Geraete setzen
-   - Optional: camera.web_host / camera.web_port, locations und feeder include anpassen
-   - Feeder sind im Beispiel extern definiert ueber: config/examples/feeders.json
-
-3. System starten
-
-   python3 -m opensmt run --config config/examples/system.json
-
-4. Qt-Control-GUI starten
-
-   python3 -m opensmt control-gui --host 127.0.0.1 --port 8080
-
-Hinweis:
-Die neue Laufzeit startet HardwareDriver + PositionStore + LocationStore + CameraVision direkt aus system.json.
-Ein separater Broker ist dafuer nicht noetig. Die fruehere Browser-Oberflaeche wird nicht mehr verwendet; `opensmt run`
-stellt die HTTP-API und Kamera-Thumb-Endpunkte fuer die Qt-Control-GUI bereit.
-
-### Legacy Tools (optional)
-
-Die folgenden CLI-Tools sind weiterhin verfuegbar, aber nicht Teil des neuen Standard-Startablaufs:
-
-1. Broker starten
-
-   python3 -m opensmt broker --host 127.0.0.1 --port 8765
-
-2. Terminal-Monitor starten
-
-   python3 -m opensmt monitor --host 127.0.0.1 --port 8765 --name MON1
-
-3. Qt-Monitor starten
-
-   python3 -m opensmt monitor-gui --host 127.0.0.1 --port 8765 --name MON_GUI
-
-4. Qt Control GUI starten (Fernbedienung ohne Browser)
-
-   python3 -m opensmt control-gui --host MACHINE_IP --port 8080
-
-## Aktueller Status
-
-- Primare Bedienoberflaeche ist die native Qt-Control-GUI.
-- `opensmt run` liefert dafuer die HTTP-API auf `camera.web_host:camera.web_port` sowie Kamera-Thumbnails ueber `/thumb/<NAME>`.
-- Die GUI enthaelt aktuell Kamerapane, General-Purpose-Pane mit Tabs, XY-Jogging, Nozzle-Karten und Feeders-Verwaltung.
-- Nozzle-Vakuum wird ueber Board `XY` geschaltet, Indizes `2..5`, Werte `0` oder `255`.
-- Feeder werden extern in `config/examples/feeders.json` konfiguriert und ueber `$include` in `system.json` eingebunden.
-
-## Qt Control GUI (Remote Operation)
-
-`opensmt control-gui` is a native Qt application that controls the machine over the network
-without a browser. It connects directly to the HTTP API of a running `opensmt run` instance.
-
-Typical use case: run the core software on the machine-side Linux host, and operate it
-from an office machine on the same network.
-
-### Requirements on the office machine
-
-- Python >= 3.11
-- PySide6 (for Qt)
-- No serial hardware required — only network access to the machine host
-
-### One-time setup on the office machine
+1. Set Python path in a source checkout
 
 ```bash
-# Create a virtual environment
-python3 -m venv ~/.venvs/opensmt-gui
-
-# Activate it
-source ~/.venvs/opensmt-gui/bin/activate
-
-# Install directly from the git repository
-pip install -U "git+ssh://YOUR_GIT_HOST/YOUR_REPO_PATH.git"
+export PYTHONPATH=src
 ```
 
-Replace `YOUR_GIT_HOST/YOUR_REPO_PATH` with the actual SSH path to this repository.
+2. Review config and hardware ports
 
-If you prefer a local wheel instead:
+- main config: `config/examples/system.json`
+- board ports: `boards.*.device`
+- API bind: `camera.web_host`, `camera.web_port`
+
+3. Run backend
 
 ```bash
-# On the development/machine host — build a wheel
-python3 -m build --wheel
-
-# Copy the .whl file to the office machine, then install it there
-pip install -U dist/opensmt-0.1.0-py3-none-any.whl
+python3 -m opensmt run --config config/examples/system.json
 ```
 
-### Launching the GUI
+4. Run Qt client
 
 ```bash
-# Activate the virtual environment
-source ~/.venvs/opensmt-gui/bin/activate
-
-# Start the control GUI, pointing at the machine host
-opensmt control-gui --host MACHINE_FLOOR_IP --port 8080
+python3 -m opensmt control-gui --host 127.0.0.1 --port 8080
 ```
 
-The GUI polls `/api/status` every 800 ms and sends all commands through the existing REST
-API, so control latency on a wired LAN is negligible.
+## Configuration Layout
 
-Current Qt-Control-GUI surfaces:
+The example config is split into modular chunks and merged via `$include`.
+Important files:
 
-- Cameras pane with live thumbnail refresh from `/thumb/<camera>`
-- XY jogging pane with step selection, homing and machine-position shortcuts
-- Nozzle pane with per-nozzle home, Z up/down, rotation, park, standard-down, offset calibration and vacuum on/off
-- General Purpose pane with tabs for Setup & Configuration, Production, Feeders and Diagnostics Log
-- Feeders tab with overall feeder list plus per-type detail tabs for tray, auto, push/pull, vibration, label and tube feeders
+- `config/examples/system.json` (entrypoint)
+- `config/examples/system.boards.json`
+- `config/examples/system.driver.json`
+- `config/examples/system.locations.json`
+- `config/examples/nozzles.json`
+- `config/examples/camera/camera.core.json`
+- `config/examples/camera/camera.cameras.json`
+- `config/examples/camera/camera.pipelines.json`
+- `config/examples/feeders.json`
+- `config/examples/parts.json`
 
-### Updating after code changes
+## SQLite Catalog (Packages / Parts / Feeders)
 
-```bash
-source ~/.venvs/opensmt-gui/bin/activate
-pip install -U "git+ssh://YOUR_GIT_HOST/YOUR_REPO_PATH.git"
-```
+Current primary persistence for catalog data is SQLite:
 
-### Optional: desktop launcher (Linux)
+- default DB: `config/examples/catalog.sqlite`
+- tables: `packages`, `parts`, `feeders`
 
-Create `~/.local/share/applications/opensmt-control.desktop`:
+Runtime behavior:
 
-```ini
-[Desktop Entry]
-Name=openSMT Control
-Exec=/bin/bash -c "source ~/.venvs/opensmt-gui/bin/activate && opensmt control-gui --host MACHINE_FLOOR_IP --port 8080"
-Icon=utilities-system-monitor
-Terminal=false
-Type=Application
-Categories=Utility;
-```
+- packages bootstrap from `config/examples/packages/*.json` when DB is empty
+- parts bootstrap from `config/examples/parts.json` when DB is empty
+- feeders bootstrap from merged config/feeders JSON when DB is empty
 
-Then run `update-desktop-database ~/.local/share/applications/` to register it.
+The Qt control footer shows the active DB and row counts.
 
-### Machine-side prerequisite
+## Qt Control GUI Overview
 
-Ensure `camera.web_host` is set to `0.0.0.0` (not `127.0.0.1`) in your `system.json`
-so the HTTP API is reachable from the network:
+- Cameras pane
+  - camera selector, light control, resolution calibration, vector moves
+- XY pane
+  - jog, homing, park/dispose/fiducial/calibration shortcuts
+- Nozzles pane
+  - home/move/rotate/park/standard-down/vacuum/camera alignment actions
+- General Purpose tabs
+  - Setup
+    - Cameras
+    - Special Positions
+  - Production (reserved)
+  - Parts and Packages
+    - Packages (popup editor)
+    - Parts (popup editor)
+    - Nozzle Tips (popup editor)
+    - Nozzles (popup editor)
+  - Feeders
+    - feeder survey
+    - tray feeder editor with part type-ahead selection
+  - Diagnostics Log
 
-```json
-"camera": {
-  "web_host": "0.0.0.0",
-  "web_port": 8080,
-  ...
-}
-```
+## HTTP API (Current Operator Path)
 
-### Feeder configuration
-
-Feeders are defined outside the main machine config and merged in via `$include`.
-
-Example in `config/examples/system.json`:
-
-```json
-{
-   "$include": "feeders.json",
-   ...
-}
-```
-
-Each feeder currently shares these common fields:
-
-- `feeder_id`: unique hexadecimal identifier with at least 16 digits
-- `pick_location`: object with `x` / `y`
-- `pick_height`: Z value used for pickup
-- `manufacturer_part_number`: currently stored as the loaded part reference
-- `feeder_type`: one of `tray_feeder`, `auto_feeder`, `push_pull_feeder`, `vibration_feeder`, `label_feeder`, `tube_feeder`
-
----
-
-## Debian Pakete
-
-Wenn Debian die Umgebung als externally managed markiert, werden Abhaengigkeiten ueber apt installiert.
-
-Beispiel:
-
-sudo apt install python3-serial python3-serial-asyncio
-
-Fuer Qt wird zusaetzlich ein passendes PySide6-Paket aus den Debian-Repositories benoetigt.
-
-## Playback-Datei fuer Monitor
-
-- Kommentar: Zeile beginnt mit #
-- Wartezeit: SLEEP <sekunden>
-- Binaerdaten: BIN <hex bytes>
-- Sonst: SCPI-Textnachricht
-
-Beispiel in config/examples/playback.txt.
-
-## Aktuelle Architektur und API
-
-Dieser Abschnitt beschreibt den aktuellen Stand der produktiven Laufzeit (Qt-Control-GUI + HTTP API).
-Die fruehere browserbasierte Bedienoberflaeche ist nicht mehr Teil des aktiven Bedienpfads.
-
-### Architekturueberblick
-
-- Prozessstart ueber `python3 -m opensmt run --config config/examples/system.json`
-- Eine Laufzeit mit:
-   - Board-Verbindungen (`XY`, `AB`, `CD`)
-   - `HardwareDriver` (Bewegung + IO)
-   - `PositionStore` / `LocationStore`
-   - `CameraVisionModule` als HTTP API Schicht
-- Bedienung primar ueber `opensmt control-gui`
-
-### Konfiguration (heute relevant)
-
-- `boards`: serielle Board-Endpunkte
-- `driver`: Achs-Mapping, Geschwindigkeiten, Homing-Gruppen
-- `locations`: Park/Dispose/Fiducials/Nozzle-Change/Calibration-Spot
-- `camera`:
-   - Kameraquellen
-   - Nozzle-Geometrie und Offsets
-   - Lichtdefinitionen
-   - Web-Host/Port fuer API
-- `feeders` (extern eingebunden ueber `$include`, Beispiel: `config/examples/feeders.json`)
-
-### HTTP API (operator path)
-
-Wichtige Endpunkte fuer die Qt-Control-GUI:
+Primary routes used by the Qt control client:
 
 - `GET /api/status`
-   - Gesamtstatus fuer Positionen, Kameras, Nozzles, Feeder
-   - Primarer Poll-Endpunkt der GUI
 - `GET /thumb/{name}`
-   - JPEG-Thumbnail pro Kamera
 - `POST /api/coord/jog`
 - `POST /api/coord/home`
 - `POST /api/coord/home-xy`
@@ -267,56 +134,44 @@ Wichtige Endpunkte fuer die Qt-Control-GUI:
 - `POST /api/coord/calibration-spot`
 - `POST /api/coord/set-home-here`
 - `POST /api/coord/set-calibration-spot-here`
-- `POST /api/head/nozzle/{name}/home`
+- `POST /api/coord/move-xy`
+- `GET /api/coord/positions`
+- `POST /api/config/location/{name}`
+- `POST /api/config/nozzle/{name}`
+- `GET /api/feeders`
+- `POST /api/feeders`
+- `GET /api/feeders/{feeder_id}`
+- `PUT /api/feeders/{feeder_id}`
+- `POST /api/feeders/{feeder_id}/reset`
+- `POST /api/feeders/{feeder_id}/advance-pick`
 - `POST /api/head/nozzle/{name}/move`
 - `POST /api/head/nozzle/{name}/move-absolute`
 - `POST /api/head/nozzle/{name}/move-standard-down`
 - `POST /api/head/nozzle/{name}/rotate`
+- `POST /api/head/nozzle/{name}/home`
 - `POST /api/head/nozzle/{name}/park`
 - `POST /api/head/nozzle/{name}/vacuum`
 - `POST /api/nozzle/{name}/move-to-camera`
 - `POST /api/nozzle/{name}/move-to-bottom-camera`
 - `POST /api/nozzle/{name}/move-camera-here`
 - `POST /api/nozzle/{name}/calculate-offset-top`
+- `POST /api/camera/{name}/light`
+- `POST /api/camera/{name}/settings`
+- `POST /api/camera/{name}/calibrate-resolution`
 
-### Wichtige Verhaltensregeln
+## Motion Mode Policy
 
-- Nozzle-Vakuum wird ueber Board `XY` gefahren:
-   - `N1 -> index 2`
-   - `N2 -> index 3`
-   - `N3 -> index 4`
-   - `N4 -> index 5`
-   - Werte: `255` (on), `0` (off)
-- IO-Setzung nutzt `M106 P<index> S<value>` auf den Boards.
+The system is intended to run in absolute positioning mode only.
+Board motion now explicitly sets absolute mode before move commands.
 
-### API Beispiel
+## Legacy CLI Tools (Optional)
 
-Vakuum fuer `N1` einschalten:
+These remain available for development and migration:
 
-```bash
-curl -sS -X POST \
-   -H "Content-Type: application/json" \
-   -d '{"on": true}' \
-   http://127.0.0.1:8080/api/head/nozzle/N1/vacuum
-```
+- `python3 -m opensmt broker --host 127.0.0.1 --port 8765`
+- `python3 -m opensmt monitor --host 127.0.0.1 --port 8765 --name MONITOR`
+- `python3 -m opensmt monitor-gui --host 127.0.0.1 --port 8765 --name MONITOR_QT`
 
-Status abrufen:
+## License
 
-```bash
-curl -sS http://127.0.0.1:8080/api/status
-```
-
-### Legacy-Hinweis
-
-Das Projekt enthaelt weiterhin Legacy-Module und SCPI-/Broker-Werkzeuge fuer Entwicklungs- und
-Migrationszwecke. Fuer den aktuellen Produktionsfluss gilt jedoch:
-
-- Steuerung: Qt-Control-GUI
-- Transport: HTTP API
-- Konfigurationsquelle: `system.json` mit Includes
-
----
-
-## Lizenz
-
-Public Domain (Unlicense), siehe LICENSE.
+Public Domain (Unlicense), see `LICENSE`.
