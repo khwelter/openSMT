@@ -1003,7 +1003,7 @@ class NozzleCard(QFrame):
 
 
 class _PackageEditorDialog(QDialog):
-    def __init__(self, package: dict[str, Any], parent: QWidget | None = None) -> None:
+    def __init__(self, package: dict[str, Any], tip_ids: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Package Editor")
 
@@ -1014,6 +1014,7 @@ class _PackageEditorDialog(QDialog):
         self._width = QDoubleSpinBox()
         self._height = QDoubleSpinBox()
         self._pins = QSpinBox()
+        self._compat_table = QTableWidget(0, 2)
 
         for widget in (self._length, self._width, self._height):
             widget.setRange(0.0, 1000.0)
@@ -1034,15 +1035,53 @@ class _PackageEditorDialog(QDialog):
         form.addRow("Height (mm)", self._height)
         form.addRow("Pin Count", self._pins)
 
+        self._compat_table.setHorizontalHeaderLabels(["Nozzle Tip", "Compatible"])
+        self._compat_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._compat_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._compat_table.verticalHeader().setVisible(False)
+        compat_header = self._compat_table.horizontalHeader()
+        compat_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        compat_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+
+        compatible_ids = {
+            str(item).strip()
+            for item in package.get("compatible_nozzle_tips", [])
+            if str(item).strip()
+        }
+        ordered_tips = sorted({str(t).strip() for t in tip_ids if str(t).strip()})
+        self._compat_table.setRowCount(len(ordered_tips))
+        for row, tip_id in enumerate(ordered_tips):
+            tip_item = QTableWidgetItem(tip_id)
+            tip_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self._compat_table.setItem(row, 0, tip_item)
+
+            compat_item = QTableWidgetItem("")
+            compat_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            compat_item.setCheckState(Qt.CheckState.Checked if tip_id in compatible_ids else Qt.CheckState.Unchecked)
+            self._compat_table.setItem(row, 1, compat_item)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
         root.addLayout(form)
+        root.addWidget(QLabel("Nozzle Tip Compatibility"))
+        root.addWidget(self._compat_table)
         root.addWidget(buttons)
 
     def package_data(self) -> dict[str, Any]:
+        compatible_tip_ids: list[str] = []
+        for row in range(self._compat_table.rowCount()):
+            tip_item = self._compat_table.item(row, 0)
+            compat_item = self._compat_table.item(row, 1)
+            if tip_item is None or compat_item is None:
+                continue
+            if compat_item.checkState() == Qt.CheckState.Checked:
+                tip_id = tip_item.text().strip()
+                if tip_id:
+                    compatible_tip_ids.append(tip_id)
+
         return {
             "name": self._name.text().strip().upper(),
             "footprint": self._footprint.text().strip(),
@@ -1050,6 +1089,7 @@ class _PackageEditorDialog(QDialog):
             "width_mm": float(self._width.value()),
             "height_mm": float(self._height.value()),
             "pin_count": int(self._pins.value()),
+            "compatible_nozzle_tips": compatible_tip_ids,
         }
 
 
@@ -3184,6 +3224,7 @@ class ControlWindow(QMainWindow):
             "width_mm": 1.0,
             "height_mm": 0.5,
             "pin_count": 2,
+            "compatible_nozzle_tips": [],
             "_path": str(self._packages_config_dir / f"{name.lower()}.json"),
         }
         self._refresh_package_table()
@@ -3202,7 +3243,7 @@ class ControlWindow(QMainWindow):
         if pkg is None:
             return
 
-        dialog = _PackageEditorDialog(pkg, self)
+        dialog = _PackageEditorDialog(pkg, sorted(self._nozzle_tips_by_id.keys()), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -3238,6 +3279,11 @@ class ControlWindow(QMainWindow):
                     "width_mm": float(raw.get("width_mm", 0.0) or 0.0),
                     "height_mm": float(raw.get("height_mm", 0.0) or 0.0),
                     "pin_count": int(raw.get("pin_count", 0) or 0),
+                    "compatible_nozzle_tips": [
+                        str(t).strip()
+                        for t in raw.get("compatible_nozzle_tips", [])
+                        if str(t).strip()
+                    ],
                     "_path": str(path),
                 }
             except Exception as exc:
@@ -3259,6 +3305,11 @@ class ControlWindow(QMainWindow):
             "width_mm": float(package.get("width_mm", 0.0) or 0.0),
             "height_mm": float(package.get("height_mm", 0.0) or 0.0),
             "pin_count": int(package.get("pin_count", 0) or 0),
+            "compatible_nozzle_tips": [
+                str(t).strip()
+                for t in package.get("compatible_nozzle_tips", [])
+                if str(t).strip()
+            ],
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         package["_path"] = str(path)
