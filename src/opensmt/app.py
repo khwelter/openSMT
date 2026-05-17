@@ -107,7 +107,7 @@ async def run_from_config(config_path: str) -> None:
     # Build NozzleConfigStore from camera config
     nozzle_configs: list[NozzleConfig] = []
     for item in camera_cfg_runtime.get("nozzles", []):
-        vacuum_cfg_dict = item.get("vacuum_valve", {})
+        vacuum_cfg_dict = item.get("vacuum_valve") if isinstance(item.get("vacuum_valve"), dict) else {}
         vacuum_cfg = ValveConfig(
             board=str(vacuum_cfg_dict.get("board", "AB")),
             io_type=str(vacuum_cfg_dict.get("io_type", "gpio")),
@@ -115,8 +115,8 @@ async def run_from_config(config_path: str) -> None:
         )
 
         air_cfg = None
-        if "air_valve" in item:
-            air_cfg_dict = item["air_valve"]
+        air_cfg_dict = item.get("air_valve")
+        if isinstance(air_cfg_dict, dict):
             air_cfg = ValveConfig(
                 board=str(air_cfg_dict.get("board", "AB")),
                 io_type=str(air_cfg_dict.get("io_type", "gpio")),
