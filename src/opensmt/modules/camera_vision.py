@@ -482,6 +482,7 @@ class CameraVisionModule:
         app.router.add_post("/api/camera/{name}/settings", self._api_camera_settings)
         app.router.add_post("/api/camera/{name}/calibrate-resolution", self._api_camera_calibrate_resolution)
         app.router.add_get("/api/status", self._api_status)
+        app.router.add_get("/api/jobs/{job_id}", self._api_job_get)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -767,6 +768,17 @@ class CameraVisionModule:
 
     async def _api_coord_positions(self, request: web.Request) -> web.Response:
         return web.json_response(self._position_store.all())
+
+    async def _api_job_get(self, request: web.Request) -> web.Response:
+        """Return the current state of a command job.
+
+        Path: GET /api/jobs/{job_id}
+        """
+        job_id = request.match_info["job_id"]
+        job = self._commands.get(job_id)
+        if job is None:
+            return web.json_response({"error": "unknown_job"}, status=404)
+        return web.json_response({"job": job})
 
     def _persist_feeder_config(self, feeder_payload: dict[str, Any]) -> str | None:
         if self._catalog_db is not None:

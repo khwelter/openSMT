@@ -4462,10 +4462,13 @@ class ControlWindow(QMainWindow):
             fail_cb(status, str(data.get("error", "request_failed")), "move to pick location failed")
             return
 
-        self._wait_for_xy_target(
-            target_cam_x,
-            target_cam_y,
-            on_reached=lambda: self._api.post_json(
+        job_id = str(data.get("job_id", "")).strip()
+        if not job_id:
+            fail_cb(0, "no_job_id", "move-xy response missing job_id")
+            return
+
+        def _after_xy() -> None:
+            self._api.post_json(
                 f"/api/head/nozzle/{nozzle_name}/move-absolute",
                 {"z": float(target_down_z)},
                 lambda down_ok, down_status, down_data: self._on_pick_step_down(
@@ -4477,8 +4480,12 @@ class ControlWindow(QMainWindow):
                     down_data,
                     fail_cb,
                 ),
-            ),
-            on_timeout=lambda: fail_cb(408, "xy_move_timeout", "move to pick location did not finish in time"),
+            )
+
+        self._wait_for_job_complete(
+            job_id,
+            on_success=_after_xy,
+            on_failure=lambda err: fail_cb(408, f"xy_move_failed: {err}", "XY move did not complete before Z"),
         )
 
     def _on_pick_step_down(
@@ -4609,18 +4616,15 @@ class ControlWindow(QMainWindow):
             on_done(False)
             return
 
-        machine_target = data.get("machine_target") if isinstance(data.get("machine_target"), dict) else {}
-        try:
-            target_x = float(machine_target.get("x"))
-            target_y = float(machine_target.get("y"))
-        except Exception:
-            target_x = self._current_x if self._current_x is not None else 0.0
-            target_y = self._current_y if self._current_y is not None else 0.0
+        job_id = str(data.get("job_id", "")).strip()
+        if not job_id:
+            self._log_line(f"ERR: move-to-bottom-camera response missing job_id for {nozzle_name}")
+            self._tray_editor.show_status("Bottom-camera step failed: no job_id in response", ok=False)
+            on_done(False)
+            return
 
-        self._wait_for_xy_target(
-            float(target_x),
-            float(target_y),
-            on_reached=lambda: self._api.post_json(
+        def _after_xy() -> None:
+            self._api.post_json(
                 f"/api/head/nozzle/{nozzle_name}/move-standard-down",
                 None,
                 lambda down_ok, down_status, down_data: self._on_bottom_camera_down(
@@ -4630,9 +4634,14 @@ class ControlWindow(QMainWindow):
                     down_status,
                     down_data,
                 ),
-            ),
-            on_timeout=lambda: self._on_bottom_camera_xy_timeout(nozzle_name, on_done),
-        )
+            )
+
+        def _on_xy_failure(err: str) -> None:
+            self._log_line(f"ERR: XY move to bottom camera did not complete for {nozzle_name}: {err}")
+            self._tray_editor.show_status("Bottom-camera step failed: XY move did not complete", ok=False)
+            on_done(False)
+
+        self._wait_for_job_complete(job_id, on_success=_after_xy, on_failure=_on_xy_failure)
 
     def _on_bottom_camera_xy_timeout(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
         self._log_line(f"ERR 408: move {nozzle_name} to bottom camera did not finish in time")
@@ -4695,6 +4704,56 @@ class ControlWindow(QMainWindow):
             QTimer.singleShot(interval_ms, _check_once)
 
         _check_once()
+
+    def _wait_for_job_complete(
+        self,
+        job_id: str,
+        on_success: Callable[[], None],
+        on_failure: Callable[[str], None],
+        *,
+        max_attempts: int = 250,
+        interval_ms: int = 100,
+    ) -> None:
+        """Poll GET /api/jobs/{job_id} until state is 'succeeded', 'failed', or 'canceled'.
+
+        Only returns when the board-level M400 has confirmed the move is done,
+        ensuring XY is truly complete before any Z command is sent.
+        """
+        attempts = {"count": 0}
+
+        def _poll() -> None:
+            self._api.get_json(
+                f"/api/jobs/{job_id}",
+                lambda ok, _status, data: _on_response(ok, data),
+            )
+
+        def _on_response(ok: bool, data: dict[str, Any]) -> None:
+            attempts["count"] += 1
+            if not ok:
+                # Transient HTTP error – keep retrying until max_attempts
+                if attempts["count"] >= max_attempts:
+                    on_failure("job_poll_timeout")
+                    return
+                QTimer.singleShot(interval_ms, _poll)
+                return
+
+            job = data.get("job") if isinstance(data.get("job"), dict) else {}
+            state = str(job.get("state", ""))
+
+            if state == "succeeded":
+                on_success()
+                return
+            if state in {"failed", "canceled"}:
+                on_failure(f"job_{state}: {job.get('error', '')}")
+                return
+
+            # Still queued or running – keep polling
+            if attempts["count"] >= max_attempts:
+                on_failure("job_poll_timeout")
+                return
+            QTimer.singleShot(interval_ms, _poll)
+
+        _poll()
 
     def _compute_pick_down_z(self, nozzle_name: str, feeder_pick_height: float) -> float | None:
         nozzle = str(nozzle_name).strip().upper()
@@ -4826,28 +4885,32 @@ class ControlWindow(QMainWindow):
         title = f"Move top camera to X={target_x:.3f}, Y={target_y:.3f}"
         self._handle_action_result(title, ok, status, data)
         if ok:
-            self._start_xy_motion_gate(target_x, target_y, "Move top camera")
+            job_id = str(data.get("job_id", "")).strip()
+            self._start_xy_motion_gate(job_id, title)
 
-    def _start_xy_motion_gate(self, target_x: float, target_y: float, title: str) -> None:
+    def _start_xy_motion_gate(self, job_id: str, title: str) -> None:
         self._xy_motion_gate_token += 1
         token = self._xy_motion_gate_token
         self._xy_motion_in_progress = True
 
-        self._wait_for_xy_target(
-            target_x,
-            target_y,
-            on_reached=lambda: self._finish_xy_motion_gate(token, title, True),
-            on_timeout=lambda: self._finish_xy_motion_gate(token, title, False),
-        )
+        if not job_id:
+            # No job_id available – gate is advisory only, clear immediately
+            self._xy_motion_in_progress = False
+            return
 
-    def _finish_xy_motion_gate(self, token: int, title: str, reached: bool) -> None:
-        if token != self._xy_motion_gate_token:
-            return
-        self._xy_motion_in_progress = False
-        if reached:
+        def _on_gate_success() -> None:
+            if token != self._xy_motion_gate_token:
+                return
+            self._xy_motion_in_progress = False
             self._log_line(f"OK: XY movement finished: {title}")
-            return
-        self._log_line(f"WARN: XY movement timeout: {title}")
+
+        def _on_gate_failure(err: str) -> None:
+            if token != self._xy_motion_gate_token:
+                return
+            self._xy_motion_in_progress = False
+            self._log_line(f"WARN: XY movement gate failed: {title}: {err}")
+
+        self._wait_for_job_complete(job_id, on_success=_on_gate_success, on_failure=_on_gate_failure)
 
     def _block_if_xy_in_progress(self, title: str) -> bool:
         if not self._xy_motion_in_progress:
@@ -4869,22 +4932,8 @@ class ControlWindow(QMainWindow):
         if not ok:
             return
 
-        target: dict[str, Any] = {}
-        if isinstance(data.get("machine_target"), dict):
-            target = data.get("machine_target")
-        elif isinstance(data.get("camera_target"), dict):
-            target = data.get("camera_target")
-        elif isinstance(data.get("camera_position"), dict):
-            target = data.get("camera_position")
-
-        try:
-            target_x = float(target.get("x"))
-            target_y = float(target.get("y"))
-        except Exception:
-            target_x = self._current_x if self._current_x is not None else 0.0
-            target_y = self._current_y if self._current_y is not None else 0.0
-
-        self._start_xy_motion_gate(target_x, target_y, title)
+        job_id = str(data.get("job_id", "")).strip()
+        self._start_xy_motion_gate(job_id, title)
 
     @staticmethod
     def _set_table_visible_rows(table: QTableWidget, visible_rows: int) -> None:
