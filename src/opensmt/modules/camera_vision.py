@@ -19,6 +19,7 @@ from opensmt.vision import PassthroughPipeline, VisionPipelineBase
 
 from opensmt.hardware.driver import HardwareDriver
 from opensmt.runtime.command_runner import CommandRunner
+from opensmt.store.catalog_sqlite import CatalogSQLite
 from opensmt.store.feeder_config import FeederConfigStore, feeder_from_dict
 from opensmt.store.location_store import LocationStore
 from opensmt.store.nozzle_config import NozzleConfig, NozzleConfigStore, ValveConfig
@@ -167,6 +168,8 @@ class CameraVisionModule:
 
         self._runner: web.AppRunner | None = None
         self._commands = CommandRunner(max_history=500)
+        catalog_db_path_raw = config.get("_catalog_db_path")
+        self._catalog_db = CatalogSQLite(catalog_db_path_raw) if catalog_db_path_raw else None
 
         # Build named pipeline pool
         for pipe_cfg in config.get("pipelines", []):
@@ -766,6 +769,13 @@ class CameraVisionModule:
         return web.json_response(self._position_store.all())
 
     def _persist_feeder_config(self, feeder_payload: dict[str, Any]) -> str | None:
+        if self._catalog_db is not None:
+            try:
+                self._catalog_db.upsert_feeder(feeder_payload)
+                return None
+            except Exception as exc:
+                return str(exc)
+
         if self._feeders_persist_dir is None:
             return "feeders_persist_dir_not_configured"
         feeder_id = str(feeder_payload.get("feeder_id", "")).upper().strip()

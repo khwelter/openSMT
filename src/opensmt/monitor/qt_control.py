@@ -9,6 +9,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPoly
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QCheckBox,
@@ -37,6 +38,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QSpinBox,
 )
+
+from opensmt.store.catalog_sqlite import CatalogSQLite
 
 _ICON_SZ = 22
 _ARROW_W = 10
@@ -1318,8 +1321,14 @@ class TrayFeederEditor(QWidget):
         fixed_layout.setSpacing(4)
 
         self._id_label = QLabel("--")
-        self._part_number = QLineEdit()
+        self._part_number = QComboBox()
+        self._part_number.setEditable(True)
+        self._part_number.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._part_number.setMinimumWidth(75)
+        self._part_number.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._part_number.setCompleter(QCompleter([], self._part_number))
+        self._part_number.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._part_number.completer().setFilterMode(Qt.MatchFlag.MatchContains)
         self._pick_x = QDoubleSpinBox()
         self._pick_y = QDoubleSpinBox()
         self._pick_h = QDoubleSpinBox()
@@ -1512,7 +1521,9 @@ class TrayFeederEditor(QWidget):
         self._btn_pick_from_camera.clicked.connect(self._emit_set_pick_from_camera)
         self._btn_advance.clicked.connect(self._emit_advance)
         self._btn_reset.clicked.connect(self._emit_reset)
-        self._part_number.textChanged.connect(self._on_fields_changed)
+        self._part_number.currentTextChanged.connect(self._on_fields_changed)
+        if self._part_number.lineEdit() is not None:
+            self._part_number.lineEdit().textChanged.connect(self._on_fields_changed)
         self._pick_x.valueChanged.connect(self._on_base_pick_changed)
         self._pick_y.valueChanged.connect(self._on_base_pick_changed)
         for w in (
@@ -1551,7 +1562,7 @@ class TrayFeederEditor(QWidget):
         type_data = feeder.get("type_data") if isinstance(feeder.get("type_data"), dict) else {}
         actual = feeder.get("actual_data") if isinstance(feeder.get("actual_data"), dict) else {}
 
-        self._part_number.setText(str(feeder.get("manufacturer_part_number", "")))
+        self._part_number.setCurrentText(str(feeder.get("manufacturer_part_number", "")))
         self._pick_x.setValue(float(pick.get("x", 0.0) or 0.0))
         self._pick_y.setValue(float(pick.get("y", 0.0) or 0.0))
         self._base_x_prev = self._pick_x.value()
@@ -1640,7 +1651,7 @@ class TrayFeederEditor(QWidget):
     def _build_payload(self) -> dict[str, Any]:
         current_x, current_y = self._computed_current_pick()
         return {
-            "manufacturer_part_number": self._part_number.text().strip(),
+            "manufacturer_part_number": self._part_number.currentText().strip(),
             "pick_location": {
                 "x": self._pick_x.value(),
                 "y": self._pick_y.value(),
@@ -1763,6 +1774,18 @@ class TrayFeederEditor(QWidget):
         self._loading_values = False
         self._refresh_dirty_state()
 
+    def set_part_suggestions(self, part_ids: list[str]) -> None:
+        current = self._part_number.currentText()
+        values = sorted({str(part_id).strip() for part_id in part_ids if str(part_id).strip()})
+        self._loading_values = True
+        self._part_number.clear()
+        self._part_number.addItems(values)
+        self._part_number.setCurrentText(current)
+        completer = self._part_number.completer()
+        if completer is not None:
+            completer.setModel(self._part_number.model())
+        self._loading_values = False
+
     def show_status(self, text: str, ok: bool = True) -> None:
         color = "#1f8a1f" if ok else "#bb2b2b"
         self._status.setStyleSheet(f"color:{color};")
@@ -1810,6 +1833,8 @@ class ControlWindow(QMainWindow):
         self._setup_positions: list[dict[str, Any]] = []
         self._setup_position_current_row = -1
         self._setup_config_dir = Path(__file__).resolve().parents[3] / "config" / "examples"
+        self._catalog_db_path = self._setup_config_dir / "catalog.sqlite"
+        self._catalog_db = CatalogSQLite(self._catalog_db_path)
         self._packages_config_dir = self._setup_config_dir / "packages"
         self._parts_config_path = self._setup_config_dir / "parts.json"
         self._nozzles_config_path = self._setup_config_dir / "nozzles.json"
@@ -1818,6 +1843,7 @@ class ControlWindow(QMainWindow):
         self._current_x: float | None = None
         self._current_y: float | None = None
         self._machine_status = QLabel("X=--  Y=--")
+        self._catalog_status = QLabel("Catalog DB: --")
         self._top_left_ratio_min = 0.2
         self._top_left_ratio_max = 0.65
         self._bottom_left_ratio_min = 0.2
@@ -2381,6 +2407,7 @@ class ControlWindow(QMainWindow):
 
         status = self.statusBar()
         status.setSizeGripEnabled(False)
+        status.addPermanentWidget(self._catalog_status, 0)
         status.addPermanentWidget(self._machine_status, 1)
 
         self._connect_btn.clicked.connect(self._apply_host)
@@ -2415,6 +2442,7 @@ class ControlWindow(QMainWindow):
         self._load_nozzle_editor_config()
         self._load_setup_cameras_from_config()
         self._load_setup_positions_from_config()
+        self._refresh_catalog_status()
 
         QTimer.singleShot(0, self._init_splitters)
 
@@ -2748,6 +2776,7 @@ class ControlWindow(QMainWindow):
             if str(selected.get("feeder_type", "")).strip().lower() == "tray_feeder" and self._tray_editor.is_dirty():
                 return
             self._open_feeder_editor(self._selected_feeder_id, activate_tab=False)
+        self._refresh_catalog_status()
 
     def _load_packages_from_config(self) -> None:
         self._packages_by_name = {}
@@ -3250,67 +3279,38 @@ class ControlWindow(QMainWindow):
         old_name = str(pkg.get("name", "")).strip().upper()
         self._save_package_config(updated)
         if updated["name"] != old_name:
+            self._catalog_db.delete_package(old_name)
             self._packages_by_name.pop(old_name, None)
         self._packages_by_name[str(updated["name"]).strip().upper()] = updated
         self._refresh_package_table()
 
     def _load_packages_from_config(self) -> None:
         self._packages_by_name = {}
-        cfg_root = self._packages_config_dir
-        if not cfg_root.exists() or not cfg_root.is_dir():
-            self._log_line(f"WARN: package config directory not found: {cfg_root}")
-            self._refresh_package_table()
-            return
-
-        for path in sorted(cfg_root.glob("*.json")):
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(raw, dict):
-                    raise ValueError("expected JSON object")
-                name = str(raw.get("name", "")).strip().upper()
-                if not name:
-                    raise ValueError("missing package name")
-                self._packages_by_name[name] = {
-                    "name": name,
-                    "footprint": str(raw.get("footprint", "")).strip(),
-                    "length_mm": float(raw.get("length_mm", 0.0) or 0.0),
-                    "width_mm": float(raw.get("width_mm", 0.0) or 0.0),
-                    "height_mm": float(raw.get("height_mm", 0.0) or 0.0),
-                    "pin_count": int(raw.get("pin_count", 0) or 0),
-                    "compatible_nozzle_tips": [
-                        str(t).strip()
-                        for t in raw.get("compatible_nozzle_tips", [])
-                        if str(t).strip()
-                    ],
-                    "_path": str(path),
-                }
-            except Exception as exc:
-                self._log_line(f"WARN: failed to load package config {path.name}: {exc}")
+        self._catalog_db.bootstrap_packages_from_dir(self._packages_config_dir)
+        for raw in self._catalog_db.load_packages():
+            name = str(raw.get("name", "")).strip().upper()
+            if not name:
+                continue
+            self._packages_by_name[name] = {
+                "name": name,
+                "footprint": str(raw.get("footprint", "")).strip(),
+                "length_mm": float(raw.get("length_mm", 0.0) or 0.0),
+                "width_mm": float(raw.get("width_mm", 0.0) or 0.0),
+                "height_mm": float(raw.get("height_mm", 0.0) or 0.0),
+                "pin_count": int(raw.get("pin_count", 0) or 0),
+                "compatible_nozzle_tips": [
+                    str(t).strip()
+                    for t in raw.get("compatible_nozzle_tips", [])
+                    if str(t).strip()
+                ],
+            }
 
         self._refresh_package_table()
+    self._refresh_catalog_status()
 
     def _save_package_config(self, package: dict[str, Any]) -> None:
-        name = str(package.get("name", "")).strip().upper()
-        if not name:
-            raise ValueError("package name must not be empty")
-        path_raw = package.get("_path")
-        path = Path(str(path_raw)) if path_raw else self._packages_config_dir / f"{name.lower()}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "name": name,
-            "footprint": str(package.get("footprint", "")).strip(),
-            "length_mm": float(package.get("length_mm", 0.0) or 0.0),
-            "width_mm": float(package.get("width_mm", 0.0) or 0.0),
-            "height_mm": float(package.get("height_mm", 0.0) or 0.0),
-            "pin_count": int(package.get("pin_count", 0) or 0),
-            "compatible_nozzle_tips": [
-                str(t).strip()
-                for t in package.get("compatible_nozzle_tips", [])
-                if str(t).strip()
-            ],
-        }
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        package["_path"] = str(path)
+        self._catalog_db.upsert_package(package)
+        self._refresh_catalog_status()
 
     def _refresh_parts_table(self) -> None:
         rows = sorted(self._parts_by_id.values(), key=lambda item: str(item.get("part_id", "")))
@@ -3371,6 +3371,7 @@ class ControlWindow(QMainWindow):
             "quantity": 1,
         }
         self._refresh_parts_table()
+        self._tray_editor.set_part_suggestions(sorted(self._parts_by_id.keys()))
         self._open_part_details(part_id)
 
     def _on_part_row_double_clicked(self, row: int, _col: int) -> None:
@@ -3395,40 +3396,45 @@ class ControlWindow(QMainWindow):
         new_id = str(updated.get("part_id", "")).strip().upper()
         if old_id and old_id != new_id:
             self._parts_by_id.pop(old_id, None)
+            self._catalog_db.delete_part(old_id)
         self._parts_by_id[updated["part_id"]] = updated
         self._save_parts_config()
         self._refresh_parts_table()
+        self._tray_editor.set_part_suggestions(sorted(self._parts_by_id.keys()))
 
     def _load_parts_from_config(self) -> None:
         self._parts_by_id = {}
-        if not self._parts_config_path.exists():
-            self._refresh_parts_table()
-            return
-
-        try:
-            raw = json.loads(self._parts_config_path.read_text(encoding="utf-8"))
-            parts = raw.get("parts", []) if isinstance(raw, dict) else []
-            if isinstance(parts, list):
-                for item in parts:
-                    if not isinstance(item, dict):
-                        continue
-                    part_id = str(item.get("part_id", "")).strip().upper()
-                    if not part_id:
-                        continue
-                    self._parts_by_id[part_id] = {
-                        "part_id": part_id,
-                        "description": str(item.get("description", "")).strip(),
-                        "package": str(item.get("package", "")).strip().upper(),
-                        "quantity": int(item.get("quantity", 0) or 0),
-                    }
-        except Exception as exc:
-            self._log_line(f"WARN: failed to load parts config: {exc}")
+        self._catalog_db.bootstrap_parts_from_file(self._parts_config_path)
+        for item in self._catalog_db.load_parts():
+            part_id = str(item.get("part_id", "")).strip().upper()
+            if not part_id:
+                continue
+            self._parts_by_id[part_id] = {
+                "part_id": part_id,
+                "description": str(item.get("description", "")).strip(),
+                "package": str(item.get("package", "")).strip().upper(),
+                "quantity": int(item.get("quantity", 0) or 0),
+            }
         self._refresh_parts_table()
+        self._tray_editor.set_part_suggestions(sorted(self._parts_by_id.keys()))
+        self._refresh_catalog_status()
 
     def _save_parts_config(self) -> None:
-        self._parts_config_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"parts": [dict(self._parts_by_id[key]) for key in sorted(self._parts_by_id.keys())]}
-        self._parts_config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        for part in self._parts_by_id.values():
+            self._catalog_db.upsert_part(part)
+        self._refresh_catalog_status()
+
+    def _refresh_catalog_status(self) -> None:
+        try:
+            counts = self._catalog_db.counts()
+            self._catalog_status.setText(
+                "Catalog DB: "
+                f"{self._catalog_db.path.name} "
+                f"(packages={counts.get('packages', 0)}, parts={counts.get('parts', 0)}, feeders={counts.get('feeders', 0)})"
+            )
+            self._catalog_status.setToolTip(str(self._catalog_db.path))
+        except Exception:
+            self._catalog_status.setText("Catalog DB: unavailable")
 
     def _on_add_nozzle_tip(self) -> None:
         idx = len(self._nozzle_tips_by_id) + 1

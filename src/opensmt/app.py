@@ -10,6 +10,7 @@ from opensmt.config import load_config
 from opensmt.hardware.board import BoardConfig, SerialBoard
 from opensmt.hardware.driver import HardwareDriver
 from opensmt.modules.camera_vision import CameraVisionModule
+from opensmt.store.catalog_sqlite import CatalogSQLite
 from opensmt.store.feeder_config import FeederConfigStore, feeder_from_dict
 from opensmt.store.location_store import LocationStore
 from opensmt.store.nozzle_config import NozzleConfig, NozzleConfigStore, ValveConfig
@@ -71,6 +72,15 @@ async def run_from_config(config_path: str) -> None:
     )
 
     camera_cfg_runtime: dict[str, Any] = dict(config.get("camera", {}))
+    catalog_db_path_raw = config.get("catalog_db_path")
+    if catalog_db_path_raw is not None:
+        catalog_db_path = Path(str(catalog_db_path_raw)).expanduser()
+        if not catalog_db_path.is_absolute():
+            catalog_db_path = (cfg_path.parent / catalog_db_path).resolve()
+    else:
+        catalog_db_path = (cfg_path.parent / "catalog.sqlite").resolve()
+    camera_cfg_runtime["_catalog_db_path"] = str(catalog_db_path)
+    catalog_db = CatalogSQLite(catalog_db_path)
 
     # Persist nozzle offset/tip runtime corrections directly into base nozzle config chunk.
     offsets_persist_path_raw = camera_cfg_runtime.get("nozzle_offsets_persist_path")
@@ -161,7 +171,12 @@ async def run_from_config(config_path: str) -> None:
                 continue
             by_id[feeder_id] = raw
 
-    feeder_configs = [feeder_from_dict(item) for item in by_id.values()]
+    catalog_db.bootstrap_feeders([dict(item) for item in by_id.values()])
+    feeder_payloads = catalog_db.load_feeders()
+    if not feeder_payloads:
+        feeder_payloads = [dict(item) for item in by_id.values()]
+
+    feeder_configs = [feeder_from_dict(item) for item in feeder_payloads]
     feeder_config_store = FeederConfigStore(feeder_configs)
 
     # ------------------------------------------------------------------ #
