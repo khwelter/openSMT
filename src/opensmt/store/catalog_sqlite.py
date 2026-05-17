@@ -55,6 +55,43 @@ class CatalogSQLite:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pcbs (
+                    board_number TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    ll_x_mm REAL NOT NULL,
+                    ll_y_mm REAL NOT NULL,
+                    relative_z_mm REAL NOT NULL,
+                    rotation_deg REAL NOT NULL,
+                    items_json TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS panels (
+                    panel_name TEXT PRIMARY KEY,
+                    source_board_number TEXT NOT NULL,
+                    count_x INTEGER NOT NULL,
+                    count_y INTEGER NOT NULL,
+                    pitch_x_mm REAL NOT NULL,
+                    pitch_y_mm REAL NOT NULL,
+                    rotation_deg REAL NOT NULL,
+                    import_type TEXT NOT NULL DEFAULT '',
+                    import_file TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_name TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def _table_count(self, table: str) -> int:
@@ -67,6 +104,9 @@ class CatalogSQLite:
             "packages": self._table_count("packages"),
             "parts": self._table_count("parts"),
             "feeders": self._table_count("feeders"),
+            "pcbs": self._table_count("pcbs"),
+            "panels": self._table_count("panels"),
+            "jobs": self._table_count("jobs"),
         }
 
     def bootstrap_packages_from_dir(self, config_dir: str | Path) -> None:
@@ -254,4 +294,181 @@ class CatalogSQLite:
                 """,
                 (feeder_id, feeder_type, json.dumps(feeder)),
             )
+            conn.commit()
+
+    def load_pcbs(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT board_number, name, version, ll_x_mm, ll_y_mm, relative_z_mm, rotation_deg, items_json
+                FROM pcbs
+                ORDER BY board_number
+                """
+            ).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                items_raw = json.loads(str(row["items_json"]))
+                items = items_raw if isinstance(items_raw, list) else []
+            except Exception:
+                items = []
+            out.append(
+                {
+                    "board_number": str(row["board_number"]).strip().upper(),
+                    "name": str(row["name"]),
+                    "version": str(row["version"]),
+                    "ll_x_mm": float(row["ll_x_mm"]),
+                    "ll_y_mm": float(row["ll_y_mm"]),
+                    "relative_z_mm": float(row["relative_z_mm"]),
+                    "rotation_deg": float(row["rotation_deg"]),
+                    "items": items,
+                }
+            )
+        return out
+
+    def upsert_pcb(self, pcb: dict[str, Any]) -> None:
+        board_number = str(pcb.get("board_number", "")).strip().upper()
+        if not board_number:
+            return
+        items = pcb.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO pcbs(board_number, name, version, ll_x_mm, ll_y_mm, relative_z_mm, rotation_deg, items_json)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(board_number) DO UPDATE SET
+                    name=excluded.name,
+                    version=excluded.version,
+                    ll_x_mm=excluded.ll_x_mm,
+                    ll_y_mm=excluded.ll_y_mm,
+                    relative_z_mm=excluded.relative_z_mm,
+                    rotation_deg=excluded.rotation_deg,
+                    items_json=excluded.items_json
+                """,
+                (
+                    board_number,
+                    str(pcb.get("name", "")).strip(),
+                    str(pcb.get("version", "")).strip(),
+                    float(pcb.get("ll_x_mm", 0.0) or 0.0),
+                    float(pcb.get("ll_y_mm", 0.0) or 0.0),
+                    float(pcb.get("relative_z_mm", 0.0) or 0.0),
+                    float(pcb.get("rotation_deg", 0.0) or 0.0),
+                    json.dumps(items),
+                ),
+            )
+            conn.commit()
+
+    def delete_pcb(self, board_number: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM pcbs WHERE board_number = ?", (str(board_number).strip().upper(),))
+            conn.commit()
+
+    def load_panels(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT panel_name, source_board_number, count_x, count_y, pitch_x_mm, pitch_y_mm, rotation_deg, import_type, import_file
+                FROM panels
+                ORDER BY panel_name
+                """
+            ).fetchall()
+        return [
+            {
+                "panel_name": str(row["panel_name"]).strip().upper(),
+                "source_board_number": str(row["source_board_number"]).strip().upper(),
+                "count_x": int(row["count_x"]),
+                "count_y": int(row["count_y"]),
+                "pitch_x_mm": float(row["pitch_x_mm"]),
+                "pitch_y_mm": float(row["pitch_y_mm"]),
+                "rotation_deg": float(row["rotation_deg"]),
+                "import_type": str(row["import_type"]),
+                "import_file": str(row["import_file"]),
+            }
+            for row in rows
+        ]
+
+    def upsert_panel(self, panel: dict[str, Any]) -> None:
+        panel_name = str(panel.get("panel_name", "")).strip().upper()
+        if not panel_name:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO panels(panel_name, source_board_number, count_x, count_y, pitch_x_mm, pitch_y_mm, rotation_deg, import_type, import_file)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(panel_name) DO UPDATE SET
+                    source_board_number=excluded.source_board_number,
+                    count_x=excluded.count_x,
+                    count_y=excluded.count_y,
+                    pitch_x_mm=excluded.pitch_x_mm,
+                    pitch_y_mm=excluded.pitch_y_mm,
+                    rotation_deg=excluded.rotation_deg,
+                    import_type=excluded.import_type,
+                    import_file=excluded.import_file
+                """,
+                (
+                    panel_name,
+                    str(panel.get("source_board_number", "")).strip().upper(),
+                    int(panel.get("count_x", 1) or 1),
+                    int(panel.get("count_y", 1) or 1),
+                    float(panel.get("pitch_x_mm", 0.0) or 0.0),
+                    float(panel.get("pitch_y_mm", 0.0) or 0.0),
+                    float(panel.get("rotation_deg", 0.0) or 0.0),
+                    str(panel.get("import_type", "")).strip(),
+                    str(panel.get("import_file", "")).strip(),
+                ),
+            )
+            conn.commit()
+
+    def delete_panel(self, panel_name: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM panels WHERE panel_name = ?", (str(panel_name).strip().upper(),))
+            conn.commit()
+
+    def load_jobs(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT job_name, payload
+                FROM jobs
+                ORDER BY job_name
+                """
+            ).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload"]))
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload.setdefault("job_name", str(row["job_name"]).strip().upper())
+            out.append(payload)
+        return out
+
+    def upsert_job(self, job: dict[str, Any]) -> None:
+        job_name = str(job.get("job_name", "")).strip().upper()
+        if not job_name:
+            return
+        payload = dict(job)
+        payload["job_name"] = job_name
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO jobs(job_name, payload)
+                VALUES(?, ?)
+                ON CONFLICT(job_name) DO UPDATE SET
+                    payload=excluded.payload
+                """,
+                (job_name, json.dumps(payload)),
+            )
+            conn.commit()
+
+    def delete_job(self, job_name: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM jobs WHERE job_name = ?", (str(job_name).strip().upper(),))
             conn.commit()

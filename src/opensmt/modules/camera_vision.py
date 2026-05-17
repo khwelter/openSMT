@@ -466,6 +466,7 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/set-calibration-spot-here", self._api_coord_set_calibration_spot_here)
         app.router.add_post("/api/coord/move-xy", self._api_coord_move_xy)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
+        app.router.add_get("/api/coord/m114", self._api_coord_m114)
         app.router.add_post("/api/config/location/{name}", self._api_config_location_set)
         app.router.add_post("/api/config/nozzle/{name}", self._api_config_nozzle_set)
         app.router.add_get("/api/feeders", self._api_feeders)
@@ -768,6 +769,16 @@ class CameraVisionModule:
 
     async def _api_coord_positions(self, request: web.Request) -> web.Response:
         return web.json_response(self._position_store.all())
+
+    async def _api_coord_m114(self, request: web.Request) -> web.Response:
+        """Return live XY from firmware using M114.
+
+        Path: GET /api/coord/m114
+        """
+        xy = await self._driver.query_xy_position_m114()
+        if xy is None:
+            return web.json_response({"error": "m114_unavailable"}, status=503)
+        return web.json_response({"positions": xy})
 
     async def _api_job_get(self, request: web.Request) -> web.Response:
         """Return the current state of a command job.

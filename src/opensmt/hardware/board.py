@@ -214,6 +214,51 @@ class SerialBoard:
         async with self._lock:
             await self._write_line(line)
 
+    async def query_position(self, timeout: float = 2.0) -> dict[str, float] | None:
+        """Query current firmware position via M114.
+
+        Returns GCode-letter keyed coordinates (e.g. {"X": 10.0, "Y": 20.0}).
+        """
+        async with self._lock:
+            # Drop stale lines so we evaluate the fresh M114 answer only.
+            while True:
+                try:
+                    self._line_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+            await self._write_line("M114")
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(0.1, float(timeout))
+            coords: dict[str, float] | None = None
+            saw_ok = False
+
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    line = await asyncio.wait_for(self._line_queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+
+                if _BUSY_RE.search(line):
+                    continue
+
+                parsed = _parse_coords(line)
+                if parsed:
+                    coords = parsed
+
+                if _OK_RE.match(line.strip()):
+                    saw_ok = True
+
+                if coords is not None and saw_ok:
+                    return coords
+
+            # Some firmware variants emit coords without an explicit trailing OK.
+            return coords
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

@@ -378,6 +378,30 @@ class HardwareDriver:
     def axes(self) -> dict[str, AxisConfig]:
         return dict(self._axes)
 
+    async def query_xy_position_m114(self) -> dict[str, float] | None:
+        """Read live XY position directly from firmware via M114."""
+        x_cfg = self._axes.get("X")
+        y_cfg = self._axes.get("Y")
+        if x_cfg is None or y_cfg is None:
+            return None
+        if x_cfg.board_id != y_cfg.board_id:
+            return None
+
+        board = self._boards.get(x_cfg.board_id)
+        if board is None:
+            return None
+
+        coords = await board.query_position(timeout=2.0)
+        if not coords:
+            return None
+
+        x_raw = coords.get(x_cfg.gcode_letter)
+        y_raw = coords.get(y_cfg.gcode_letter)
+        if x_raw is None or y_raw is None:
+            return None
+
+        return {"X": float(x_raw), "Y": float(y_raw)}
+
     @property
     def home_groups(self) -> dict[str, list[str]]:
         return dict(self._home_groups)

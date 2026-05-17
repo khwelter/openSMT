@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCompleter,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -1185,6 +1186,46 @@ class _NozzleTipEditorDialog(QDialog):
         }
 
 
+class _PanelImportDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Import Panel Data")
+
+        self._import_type = QComboBox()
+        self._import_type.addItems(["KiCad", "Eagle", "Fusion"])
+
+        self._file_path = QLineEdit()
+        self._browse_btn = QPushButton("Browse...")
+        self._browse_btn.clicked.connect(self._on_browse)
+
+        file_row = QHBoxLayout()
+        file_row.addWidget(self._file_path, 1)
+        file_row.addWidget(self._browse_btn)
+
+        form = QFormLayout()
+        form.addRow("Format", self._import_type)
+        form.addRow("File", file_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addLayout(form)
+        root.addWidget(buttons)
+
+    def _on_browse(self) -> None:
+        file_path, _filter = QFileDialog.getOpenFileName(self, "Select Import File")
+        if file_path:
+            self._file_path.setText(file_path)
+
+    def import_type(self) -> str:
+        return self._import_type.currentText().strip()
+
+    def file_path(self) -> str:
+        return self._file_path.text().strip()
+
+
 class _NozzleEditorDialog(QDialog):
     def __init__(self, nozzle: dict[str, Any], tip_ids: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1987,6 +2028,9 @@ class ControlWindow(QMainWindow):
         self._parts_by_id: dict[str, dict[str, Any]] = {}
         self._nozzle_tips_by_id: dict[str, dict[str, Any]] = {}
         self._nozzles_by_name: dict[str, dict[str, Any]] = {}
+        self._pcbs_by_board_number: dict[str, dict[str, Any]] = {}
+        self._panels_by_name: dict[str, dict[str, Any]] = {}
+        self._jobs_by_name: dict[str, dict[str, Any]] = {}
         self._setup_cameras: list[dict[str, Any]] = []
         self._setup_camera_current_row = -1
         self._setup_positions: list[dict[str, Any]] = []
@@ -2242,10 +2286,199 @@ class ControlWindow(QMainWindow):
         production_tab = QWidget()
         production_layout = QVBoxLayout(production_tab)
         production_layout.setContentsMargins(6, 6, 6, 6)
-        production_note = QLabel("Reserved for production tools and run-time workflows.")
-        production_note.setWordWrap(True)
-        production_layout.addWidget(production_note)
-        production_layout.addStretch(1)
+        self._production_tabs = QTabWidget()
+
+        single_pcb_tab = QWidget()
+        single_pcb_layout = QVBoxLayout(single_pcb_tab)
+        single_pcb_layout.setContentsMargins(6, 6, 6, 6)
+
+        single_top_actions = QHBoxLayout()
+        self._single_pcb_select = QComboBox()
+        self._single_pcb_select.currentIndexChanged.connect(self._on_single_pcb_selected)
+        self._single_pcb_new_btn = QPushButton("New")
+        self._single_pcb_save_btn = QPushButton("Save")
+        self._single_pcb_delete_btn = QPushButton("Delete")
+        self._single_pcb_new_btn.clicked.connect(self._on_single_pcb_new)
+        self._single_pcb_save_btn.clicked.connect(self._on_single_pcb_save)
+        self._single_pcb_delete_btn.clicked.connect(self._on_single_pcb_delete)
+        single_top_actions.addWidget(QLabel("PCB"))
+        single_top_actions.addWidget(self._single_pcb_select, 1)
+        single_top_actions.addWidget(self._single_pcb_new_btn)
+        single_top_actions.addWidget(self._single_pcb_save_btn)
+        single_top_actions.addWidget(self._single_pcb_delete_btn)
+        single_pcb_layout.addLayout(single_top_actions)
+
+        single_common_group = QGroupBox("Common PCB Data")
+        single_common_layout = QFormLayout(single_common_group)
+        single_common_layout.setContentsMargins(8, 8, 8, 8)
+        self._single_pcb_board_number = QLineEdit()
+        self._single_pcb_name = QLineEdit()
+        self._single_pcb_version = QLineEdit()
+        self._single_pcb_ll_x = QDoubleSpinBox()
+        self._single_pcb_ll_x.setRange(-100000.0, 100000.0)
+        self._single_pcb_ll_x.setDecimals(3)
+        self._single_pcb_ll_y = QDoubleSpinBox()
+        self._single_pcb_ll_y.setRange(-100000.0, 100000.0)
+        self._single_pcb_ll_y.setDecimals(3)
+        self._single_pcb_rel_z = QDoubleSpinBox()
+        self._single_pcb_rel_z.setRange(-1000.0, 1000.0)
+        self._single_pcb_rel_z.setDecimals(3)
+        self._single_pcb_rotation = QDoubleSpinBox()
+        self._single_pcb_rotation.setRange(0.0, 360.0)
+        self._single_pcb_rotation.setDecimals(3)
+        self._single_pcb_rotation.setSuffix(" deg")
+        single_common_layout.addRow("Board Number", self._single_pcb_board_number)
+        single_common_layout.addRow("Name", self._single_pcb_name)
+        single_common_layout.addRow("Version", self._single_pcb_version)
+        single_common_layout.addRow("Lower-Left X (mm)", self._single_pcb_ll_x)
+        single_common_layout.addRow("Lower-Left Y (mm)", self._single_pcb_ll_y)
+        single_common_layout.addRow("Relative Z Height (mm)", self._single_pcb_rel_z)
+        single_common_layout.addRow("Rotation (0-360 deg)", self._single_pcb_rotation)
+        single_pcb_layout.addWidget(single_common_group)
+
+        single_items_group = QGroupBox("Placement Items")
+        single_items_layout = QVBoxLayout(single_items_group)
+        single_items_layout.setContentsMargins(8, 8, 8, 8)
+
+        single_items_actions = QHBoxLayout()
+        self._single_pcb_add_item_btn = QPushButton("Add Item")
+        self._single_pcb_remove_item_btn = QPushButton("Remove Item")
+        self._single_pcb_add_item_btn.clicked.connect(self._on_single_pcb_add_item)
+        self._single_pcb_remove_item_btn.clicked.connect(self._on_single_pcb_remove_item)
+        single_items_actions.addWidget(self._single_pcb_add_item_btn)
+        single_items_actions.addWidget(self._single_pcb_remove_item_btn)
+        single_items_actions.addStretch(1)
+        single_items_layout.addLayout(single_items_actions)
+
+        self._single_pcb_items_table = QTableWidget(0, 4)
+        self._single_pcb_items_table.setHorizontalHeaderLabels([
+            "Part Number",
+            "Part Code",
+            "X (mm)",
+            "Y (mm)",
+        ])
+        self._single_pcb_items_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
+        self._single_pcb_items_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._single_pcb_items_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._single_pcb_items_table.verticalHeader().setVisible(False)
+        single_hdr = self._single_pcb_items_table.horizontalHeader()
+        single_hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        single_hdr.setStretchLastSection(True)
+        single_hdr.setMinimumSectionSize(70)
+        single_hdr.resizeSection(0, 190)
+        single_hdr.resizeSection(1, 120)
+        single_hdr.resizeSection(2, 110)
+        single_hdr.resizeSection(3, 110)
+        single_items_layout.addWidget(self._single_pcb_items_table)
+        single_pcb_layout.addWidget(single_items_group)
+
+        panel_tab = QWidget()
+        panel_layout = QVBoxLayout(panel_tab)
+        panel_layout.setContentsMargins(6, 6, 6, 6)
+
+        panel_top_actions = QHBoxLayout()
+        self._panel_select = QComboBox()
+        self._panel_select.currentIndexChanged.connect(self._on_panel_selected)
+        self._panel_new_btn = QPushButton("New")
+        self._panel_save_btn = QPushButton("Save")
+        self._panel_delete_btn = QPushButton("Delete")
+        self._panel_import_btn = QPushButton("Import...")
+        self._panel_new_btn.clicked.connect(self._on_panel_new)
+        self._panel_save_btn.clicked.connect(self._on_panel_save)
+        self._panel_delete_btn.clicked.connect(self._on_panel_delete)
+        self._panel_import_btn.clicked.connect(self._on_panel_import)
+        panel_top_actions.addWidget(QLabel("Panel"))
+        panel_top_actions.addWidget(self._panel_select, 1)
+        panel_top_actions.addWidget(self._panel_new_btn)
+        panel_top_actions.addWidget(self._panel_save_btn)
+        panel_top_actions.addWidget(self._panel_delete_btn)
+        panel_top_actions.addWidget(self._panel_import_btn)
+        panel_layout.addLayout(panel_top_actions)
+
+        panel_common_group = QGroupBox("PCB Panel Definition")
+        panel_common_layout = QFormLayout(panel_common_group)
+        panel_common_layout.setContentsMargins(8, 8, 8, 8)
+        self._panel_name = QLineEdit()
+        self._panel_source_board_number = QLineEdit()
+        self._panel_count_x = QSpinBox()
+        self._panel_count_x.setRange(1, 10)
+        self._panel_count_x.setValue(1)
+        self._panel_count_y = QSpinBox()
+        self._panel_count_y.setRange(1, 10)
+        self._panel_count_y.setValue(1)
+        self._panel_pitch_x = QDoubleSpinBox()
+        self._panel_pitch_x.setRange(0.0, 1000.0)
+        self._panel_pitch_x.setDecimals(3)
+        self._panel_pitch_y = QDoubleSpinBox()
+        self._panel_pitch_y.setRange(0.0, 1000.0)
+        self._panel_pitch_y.setDecimals(3)
+        self._panel_rotation = QDoubleSpinBox()
+        self._panel_rotation.setRange(0.0, 360.0)
+        self._panel_rotation.setDecimals(3)
+        self._panel_rotation.setSuffix(" deg")
+        self._panel_import_type = QLineEdit()
+        self._panel_import_type.setReadOnly(True)
+        self._panel_import_file = QLineEdit()
+        self._panel_import_file.setReadOnly(True)
+        panel_common_layout.addRow("Panel Name", self._panel_name)
+        panel_common_layout.addRow("Source Board Number", self._panel_source_board_number)
+        panel_common_layout.addRow("PCBs in X (1-10)", self._panel_count_x)
+        panel_common_layout.addRow("PCBs in Y (1-10)", self._panel_count_y)
+        panel_common_layout.addRow("Pitch X (mm)", self._panel_pitch_x)
+        panel_common_layout.addRow("Pitch Y (mm)", self._panel_pitch_y)
+        panel_common_layout.addRow("Board Rotation (0-360 deg)", self._panel_rotation)
+        panel_common_layout.addRow("Import Type", self._panel_import_type)
+        panel_common_layout.addRow("Import File", self._panel_import_file)
+        panel_layout.addWidget(panel_common_group)
+
+        panel_note = QLabel(
+            "A panel is a matrix of one or more PCBs. Set X/Y counts (max 10 each) "
+            "and the board rotation for placement generation."
+        )
+        panel_note.setWordWrap(True)
+        panel_layout.addWidget(panel_note)
+        panel_layout.addStretch(1)
+
+        job_tab = QWidget()
+        job_layout = QVBoxLayout(job_tab)
+        job_layout.setContentsMargins(6, 6, 6, 6)
+
+        job_top_actions = QHBoxLayout()
+        self._job_select = QComboBox()
+        self._job_select.currentIndexChanged.connect(self._on_job_selected)
+        self._job_new_btn = QPushButton("New")
+        self._job_save_btn = QPushButton("Save")
+        self._job_delete_btn = QPushButton("Delete")
+        self._job_new_btn.clicked.connect(self._on_job_new)
+        self._job_save_btn.clicked.connect(self._on_job_save)
+        self._job_delete_btn.clicked.connect(self._on_job_delete)
+        job_top_actions.addWidget(QLabel("Job"))
+        job_top_actions.addWidget(self._job_select, 1)
+        job_top_actions.addWidget(self._job_new_btn)
+        job_top_actions.addWidget(self._job_save_btn)
+        job_top_actions.addWidget(self._job_delete_btn)
+        job_layout.addLayout(job_top_actions)
+
+        job_form = QFormLayout()
+        self._job_name = QLineEdit()
+        self._job_description = QLineEdit()
+        self._job_target_board_number = QLineEdit()
+        self._job_target_panel_name = QLineEdit()
+        job_form.addRow("Job Name", self._job_name)
+        job_form.addRow("Description", self._job_description)
+        job_form.addRow("Target Board Number", self._job_target_board_number)
+        job_form.addRow("Target Panel Name", self._job_target_panel_name)
+        job_layout.addLayout(job_form)
+
+        job_note = QLabel("Job actions and execution logic will be extended later.")
+        job_note.setWordWrap(True)
+        job_layout.addWidget(job_note)
+        job_layout.addStretch(1)
+
+        self._production_tabs.addTab(single_pcb_tab, "Single PCB")
+        self._production_tabs.addTab(panel_tab, "PCB Panel")
+        self._production_tabs.addTab(job_tab, "Job")
+        production_layout.addWidget(self._production_tabs)
 
         parts_packages_tab = QWidget()
         parts_packages_layout = QVBoxLayout(parts_packages_tab)
@@ -2623,6 +2856,7 @@ class ControlWindow(QMainWindow):
         self._load_nozzle_editor_config()
         self._load_setup_cameras_from_config()
         self._load_setup_positions_from_config()
+        self._load_production_from_db()
         self._refresh_catalog_status()
 
         QTimer.singleShot(0, self._init_splitters)
@@ -3715,13 +3949,338 @@ class ControlWindow(QMainWindow):
             self._catalog_db.upsert_part(part)
         self._refresh_catalog_status()
 
+    def _load_production_from_db(self) -> None:
+        self._pcbs_by_board_number = {}
+        for item in self._catalog_db.load_pcbs():
+            board_number = str(item.get("board_number", "")).strip().upper()
+            if board_number:
+                self._pcbs_by_board_number[board_number] = item
+
+        self._panels_by_name = {}
+        for item in self._catalog_db.load_panels():
+            panel_name = str(item.get("panel_name", "")).strip().upper()
+            if panel_name:
+                self._panels_by_name[panel_name] = item
+
+        self._jobs_by_name = {}
+        for item in self._catalog_db.load_jobs():
+            job_name = str(item.get("job_name", "")).strip().upper()
+            if job_name:
+                self._jobs_by_name[job_name] = item
+
+        self._refresh_single_pcb_selector()
+        self._refresh_panel_selector()
+        self._refresh_job_selector()
+
+    def _refresh_single_pcb_selector(self) -> None:
+        names = sorted(self._pcbs_by_board_number.keys())
+        self._single_pcb_select.blockSignals(True)
+        self._single_pcb_select.clear()
+        self._single_pcb_select.addItem("(new)", "")
+        for board_number in names:
+            self._single_pcb_select.addItem(board_number, board_number)
+        self._single_pcb_select.blockSignals(False)
+        if names:
+            self._single_pcb_select.setCurrentIndex(1)
+            self._on_single_pcb_selected(1)
+        else:
+            self._on_single_pcb_new()
+
+    def _on_single_pcb_selected(self, _index: int) -> None:
+        board_number = str(self._single_pcb_select.currentData() or "").strip().upper()
+        if not board_number:
+            return
+        pcb = self._pcbs_by_board_number.get(board_number)
+        if pcb is None:
+            return
+        self._single_pcb_board_number.setText(board_number)
+        self._single_pcb_name.setText(str(pcb.get("name", "")))
+        self._single_pcb_version.setText(str(pcb.get("version", "")))
+        self._single_pcb_ll_x.setValue(float(pcb.get("ll_x_mm", 0.0) or 0.0))
+        self._single_pcb_ll_y.setValue(float(pcb.get("ll_y_mm", 0.0) or 0.0))
+        self._single_pcb_rel_z.setValue(float(pcb.get("relative_z_mm", 0.0) or 0.0))
+        self._single_pcb_rotation.setValue(float(pcb.get("rotation_deg", 0.0) or 0.0))
+
+        items = pcb.get("items", []) if isinstance(pcb.get("items"), list) else []
+        self._single_pcb_items_table.setRowCount(0)
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            row = self._single_pcb_items_table.rowCount()
+            self._single_pcb_items_table.insertRow(row)
+            cells = [
+                str(entry.get("part_number", "")),
+                str(entry.get("part_code", "")),
+                str(entry.get("x_mm", "")),
+                str(entry.get("y_mm", "")),
+            ]
+            for col, value in enumerate(cells):
+                self._single_pcb_items_table.setItem(row, col, QTableWidgetItem(value))
+
+    def _on_single_pcb_new(self) -> None:
+        self._single_pcb_select.blockSignals(True)
+        self._single_pcb_select.setCurrentIndex(0)
+        self._single_pcb_select.blockSignals(False)
+        self._single_pcb_board_number.clear()
+        self._single_pcb_name.clear()
+        self._single_pcb_version.clear()
+        self._single_pcb_ll_x.setValue(0.0)
+        self._single_pcb_ll_y.setValue(0.0)
+        self._single_pcb_rel_z.setValue(0.0)
+        self._single_pcb_rotation.setValue(0.0)
+        self._single_pcb_items_table.setRowCount(0)
+
+    def _collect_single_pcb(self) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        for row in range(self._single_pcb_items_table.rowCount()):
+            part_number = self._single_pcb_items_table.item(row, 0)
+            part_code = self._single_pcb_items_table.item(row, 1)
+            x_cell = self._single_pcb_items_table.item(row, 2)
+            y_cell = self._single_pcb_items_table.item(row, 3)
+            x_text = x_cell.text().strip() if x_cell is not None else ""
+            y_text = y_cell.text().strip() if y_cell is not None else ""
+            try:
+                x_mm = float(x_text or 0.0)
+            except Exception:
+                x_mm = 0.0
+            try:
+                y_mm = float(y_text or 0.0)
+            except Exception:
+                y_mm = 0.0
+            items.append(
+                {
+                    "part_number": part_number.text().strip() if part_number is not None else "",
+                    "part_code": part_code.text().strip() if part_code is not None else "",
+                    "x_mm": x_mm,
+                    "y_mm": y_mm,
+                }
+            )
+
+        return {
+            "board_number": self._single_pcb_board_number.text().strip().upper(),
+            "name": self._single_pcb_name.text().strip(),
+            "version": self._single_pcb_version.text().strip(),
+            "ll_x_mm": float(self._single_pcb_ll_x.value()),
+            "ll_y_mm": float(self._single_pcb_ll_y.value()),
+            "relative_z_mm": float(self._single_pcb_rel_z.value()),
+            "rotation_deg": float(self._single_pcb_rotation.value()),
+            "items": items,
+        }
+
+    def _on_single_pcb_save(self) -> None:
+        pcb = self._collect_single_pcb()
+        board_number = str(pcb.get("board_number", "")).strip().upper()
+        if not board_number:
+            self._log_line("ERR: cannot save PCB without board number")
+            return
+        self._catalog_db.upsert_pcb(pcb)
+        self._pcbs_by_board_number[board_number] = pcb
+        self._refresh_single_pcb_selector()
+        idx = self._single_pcb_select.findData(board_number)
+        if idx >= 0:
+            self._single_pcb_select.setCurrentIndex(idx)
+        self._refresh_catalog_status()
+        self._log_line(f"OK: saved PCB {board_number}")
+
+    def _on_single_pcb_delete(self) -> None:
+        board_number = self._single_pcb_board_number.text().strip().upper()
+        if not board_number:
+            return
+        self._catalog_db.delete_pcb(board_number)
+        self._pcbs_by_board_number.pop(board_number, None)
+        self._refresh_single_pcb_selector()
+        self._refresh_catalog_status()
+        self._log_line(f"OK: deleted PCB {board_number}")
+
+    def _on_single_pcb_add_item(self) -> None:
+        row = self._single_pcb_items_table.rowCount()
+        self._single_pcb_items_table.insertRow(row)
+        for col in range(self._single_pcb_items_table.columnCount()):
+            self._single_pcb_items_table.setItem(row, col, QTableWidgetItem(""))
+        self._single_pcb_items_table.setCurrentCell(row, 0)
+
+    def _on_single_pcb_remove_item(self) -> None:
+        row = self._single_pcb_items_table.currentRow()
+        if row < 0:
+            row = self._single_pcb_items_table.rowCount() - 1
+        if row >= 0:
+            self._single_pcb_items_table.removeRow(row)
+
+    def _refresh_panel_selector(self) -> None:
+        names = sorted(self._panels_by_name.keys())
+        self._panel_select.blockSignals(True)
+        self._panel_select.clear()
+        self._panel_select.addItem("(new)", "")
+        for panel_name in names:
+            self._panel_select.addItem(panel_name, panel_name)
+        self._panel_select.blockSignals(False)
+        if names:
+            self._panel_select.setCurrentIndex(1)
+            self._on_panel_selected(1)
+        else:
+            self._on_panel_new()
+
+    def _on_panel_selected(self, _index: int) -> None:
+        panel_name = str(self._panel_select.currentData() or "").strip().upper()
+        if not panel_name:
+            return
+        panel = self._panels_by_name.get(panel_name)
+        if panel is None:
+            return
+        self._panel_name.setText(str(panel.get("panel_name", "")))
+        self._panel_source_board_number.setText(str(panel.get("source_board_number", "")))
+        self._panel_count_x.setValue(max(1, min(10, int(panel.get("count_x", 1) or 1))))
+        self._panel_count_y.setValue(max(1, min(10, int(panel.get("count_y", 1) or 1))))
+        self._panel_pitch_x.setValue(float(panel.get("pitch_x_mm", 0.0) or 0.0))
+        self._panel_pitch_y.setValue(float(panel.get("pitch_y_mm", 0.0) or 0.0))
+        self._panel_rotation.setValue(float(panel.get("rotation_deg", 0.0) or 0.0))
+        self._panel_import_type.setText(str(panel.get("import_type", "")))
+        self._panel_import_file.setText(str(panel.get("import_file", "")))
+
+    def _on_panel_new(self) -> None:
+        self._panel_select.blockSignals(True)
+        self._panel_select.setCurrentIndex(0)
+        self._panel_select.blockSignals(False)
+        self._panel_name.clear()
+        self._panel_source_board_number.clear()
+        self._panel_count_x.setValue(1)
+        self._panel_count_y.setValue(1)
+        self._panel_pitch_x.setValue(0.0)
+        self._panel_pitch_y.setValue(0.0)
+        self._panel_rotation.setValue(0.0)
+        self._panel_import_type.clear()
+        self._panel_import_file.clear()
+
+    def _collect_panel(self) -> dict[str, Any]:
+        return {
+            "panel_name": self._panel_name.text().strip().upper(),
+            "source_board_number": self._panel_source_board_number.text().strip().upper(),
+            "count_x": int(self._panel_count_x.value()),
+            "count_y": int(self._panel_count_y.value()),
+            "pitch_x_mm": float(self._panel_pitch_x.value()),
+            "pitch_y_mm": float(self._panel_pitch_y.value()),
+            "rotation_deg": float(self._panel_rotation.value()),
+            "import_type": self._panel_import_type.text().strip(),
+            "import_file": self._panel_import_file.text().strip(),
+        }
+
+    def _on_panel_save(self) -> None:
+        panel = self._collect_panel()
+        panel_name = str(panel.get("panel_name", "")).strip().upper()
+        if not panel_name:
+            self._log_line("ERR: cannot save panel without name")
+            return
+        self._catalog_db.upsert_panel(panel)
+        self._panels_by_name[panel_name] = panel
+        self._refresh_panel_selector()
+        idx = self._panel_select.findData(panel_name)
+        if idx >= 0:
+            self._panel_select.setCurrentIndex(idx)
+        self._refresh_catalog_status()
+        self._log_line(f"OK: saved panel {panel_name}")
+
+    def _on_panel_delete(self) -> None:
+        panel_name = self._panel_name.text().strip().upper()
+        if not panel_name:
+            return
+        self._catalog_db.delete_panel(panel_name)
+        self._panels_by_name.pop(panel_name, None)
+        self._refresh_panel_selector()
+        self._refresh_catalog_status()
+        self._log_line(f"OK: deleted panel {panel_name}")
+
+    def _on_panel_import(self) -> None:
+        dialog = _PanelImportDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        import_type = dialog.import_type()
+        file_path = dialog.file_path()
+        self._panel_import_type.setText(import_type)
+        self._panel_import_file.setText(file_path)
+        self._log_line(f"REQ: panel import selected type={import_type}, file={file_path}")
+
+    def _refresh_job_selector(self) -> None:
+        names = sorted(self._jobs_by_name.keys())
+        self._job_select.blockSignals(True)
+        self._job_select.clear()
+        self._job_select.addItem("(new)", "")
+        for job_name in names:
+            self._job_select.addItem(job_name, job_name)
+        self._job_select.blockSignals(False)
+        if names:
+            self._job_select.setCurrentIndex(1)
+            self._on_job_selected(1)
+        else:
+            self._on_job_new()
+
+    def _on_job_selected(self, _index: int) -> None:
+        job_name = str(self._job_select.currentData() or "").strip().upper()
+        if not job_name:
+            return
+        job = self._jobs_by_name.get(job_name)
+        if job is None:
+            return
+        self._job_name.setText(str(job.get("job_name", "")))
+        self._job_description.setText(str(job.get("description", "")))
+        self._job_target_board_number.setText(str(job.get("target_board_number", "")))
+        self._job_target_panel_name.setText(str(job.get("target_panel_name", "")))
+
+    def _on_job_new(self) -> None:
+        self._job_select.blockSignals(True)
+        self._job_select.setCurrentIndex(0)
+        self._job_select.blockSignals(False)
+        self._job_name.clear()
+        self._job_description.clear()
+        self._job_target_board_number.clear()
+        self._job_target_panel_name.clear()
+
+    def _collect_job(self) -> dict[str, Any]:
+        return {
+            "job_name": self._job_name.text().strip().upper(),
+            "description": self._job_description.text().strip(),
+            "target_board_number": self._job_target_board_number.text().strip().upper(),
+            "target_panel_name": self._job_target_panel_name.text().strip().upper(),
+        }
+
+    def _on_job_save(self) -> None:
+        job = self._collect_job()
+        job_name = str(job.get("job_name", "")).strip().upper()
+        if not job_name:
+            self._log_line("ERR: cannot save job without name")
+            return
+        self._catalog_db.upsert_job(job)
+        self._jobs_by_name[job_name] = job
+        self._refresh_job_selector()
+        idx = self._job_select.findData(job_name)
+        if idx >= 0:
+            self._job_select.setCurrentIndex(idx)
+        self._refresh_catalog_status()
+        self._log_line(f"OK: saved job {job_name}")
+
+    def _on_job_delete(self) -> None:
+        job_name = self._job_name.text().strip().upper()
+        if not job_name:
+            return
+        self._catalog_db.delete_job(job_name)
+        self._jobs_by_name.pop(job_name, None)
+        self._refresh_job_selector()
+        self._refresh_catalog_status()
+        self._log_line(f"OK: deleted job {job_name}")
+
     def _refresh_catalog_status(self) -> None:
         try:
             counts = self._catalog_db.counts()
             self._catalog_status.setText(
                 "Catalog DB: "
                 f"{self._catalog_db.path.name} "
-                f"(packages={counts.get('packages', 0)}, parts={counts.get('parts', 0)}, feeders={counts.get('feeders', 0)})"
+                "("
+                f"packages={counts.get('packages', 0)}, "
+                f"parts={counts.get('parts', 0)}, "
+                f"feeders={counts.get('feeders', 0)}, "
+                f"pcbs={counts.get('pcbs', 0)}, "
+                f"panels={counts.get('panels', 0)}, "
+                f"jobs={counts.get('jobs', 0)}"
+                ")"
             )
             self._catalog_status.setToolTip(str(self._catalog_db.path))
         except Exception:
@@ -4482,8 +5041,10 @@ class ControlWindow(QMainWindow):
                 ),
             )
 
-        self._wait_for_job_complete(
+        self._wait_for_xy_job_and_m114(
             job_id,
+            target_cam_x,
+            target_cam_y,
             on_success=_after_xy,
             on_failure=lambda err: fail_cb(408, f"xy_move_failed: {err}", "XY move did not complete before Z"),
         )
@@ -4623,6 +5184,14 @@ class ControlWindow(QMainWindow):
             on_done(False)
             return
 
+        machine_target = data.get("machine_target") if isinstance(data.get("machine_target"), dict) else {}
+        try:
+            target_x = float(machine_target.get("x"))
+            target_y = float(machine_target.get("y"))
+        except Exception:
+            target_x = self._current_x if self._current_x is not None else 0.0
+            target_y = self._current_y if self._current_y is not None else 0.0
+
         def _after_xy() -> None:
             self._api.post_json(
                 f"/api/head/nozzle/{nozzle_name}/move-standard-down",
@@ -4641,7 +5210,13 @@ class ControlWindow(QMainWindow):
             self._tray_editor.show_status("Bottom-camera step failed: XY move did not complete", ok=False)
             on_done(False)
 
-        self._wait_for_job_complete(job_id, on_success=_after_xy, on_failure=_on_xy_failure)
+        self._wait_for_xy_job_and_m114(
+            job_id,
+            target_x,
+            target_y,
+            on_success=_after_xy,
+            on_failure=_on_xy_failure,
+        )
 
     def _on_bottom_camera_xy_timeout(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
         self._log_line(f"ERR 408: move {nozzle_name} to bottom camera did not finish in time")
@@ -4751,6 +5326,88 @@ class ControlWindow(QMainWindow):
             if attempts["count"] >= max_attempts:
                 on_failure("job_poll_timeout")
                 return
+            QTimer.singleShot(interval_ms, _poll)
+
+        _poll()
+
+    def _wait_for_xy_job_and_m114(
+        self,
+        job_id: str,
+        target_x: float,
+        target_y: float,
+        on_success: Callable[[], None],
+        on_failure: Callable[[str], None],
+        *,
+        tolerance_mm: float = 0.02,
+        max_attempts: int = 500,
+        interval_ms: int = 80,
+        consecutive_required: int = 3,
+    ) -> None:
+        """Gate XY completion using both command state and live M114 position.
+
+        Success requires:
+        - command job reached 'succeeded'
+        - live M114 XY is at target for N consecutive polls
+        """
+        attempts = {"count": 0}
+        stable_hits = {"count": 0}
+
+        def _poll() -> None:
+            self._api.get_json(
+                f"/api/jobs/{job_id}",
+                lambda ok, _status, data: _on_job(ok, data),
+            )
+
+        def _on_job(ok: bool, data: dict[str, Any]) -> None:
+            attempts["count"] += 1
+            if not ok:
+                if attempts["count"] >= max_attempts:
+                    on_failure("job_poll_timeout")
+                    return
+                QTimer.singleShot(interval_ms, _poll)
+                return
+
+            job = data.get("job") if isinstance(data.get("job"), dict) else {}
+            state = str(job.get("state", ""))
+
+            if state in {"failed", "canceled"}:
+                on_failure(f"job_{state}: {job.get('error', '')}")
+                return
+
+            self._api.get_json(
+                "/api/coord/m114",
+                lambda m_ok, _m_status, m_data, st=state: _on_m114(m_ok, m_data, st),
+            )
+
+        def _on_m114(ok: bool, data: dict[str, Any], job_state: str) -> None:
+            if not ok:
+                stable_hits["count"] = 0
+            else:
+                positions = data.get("positions", {}) if isinstance(data.get("positions"), dict) else {}
+                cur_x = positions.get("X")
+                cur_y = positions.get("Y")
+                try:
+                    cur_x_f = float(cur_x)
+                    cur_y_f = float(cur_y)
+                    self._current_x = cur_x_f
+                    self._current_y = cur_y_f
+                    dx = abs(cur_x_f - float(target_x))
+                    dy = abs(cur_y_f - float(target_y))
+                    if dx <= tolerance_mm and dy <= tolerance_mm:
+                        stable_hits["count"] += 1
+                    else:
+                        stable_hits["count"] = 0
+                except Exception:
+                    stable_hits["count"] = 0
+
+            if job_state == "succeeded" and stable_hits["count"] >= max(1, int(consecutive_required)):
+                on_success()
+                return
+
+            if attempts["count"] >= max_attempts:
+                on_failure("xy_not_confirmed_by_m114")
+                return
+
             QTimer.singleShot(interval_ms, _poll)
 
         _poll()
