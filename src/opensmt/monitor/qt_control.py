@@ -2295,6 +2295,12 @@ class ControlWindow(QMainWindow):
         single_top_actions = QHBoxLayout()
         self._single_pcb_select = QComboBox()
         self._single_pcb_select.currentIndexChanged.connect(self._on_single_pcb_selected)
+        self._single_pcb_capture_board_btn = QToolButton()
+        self._single_pcb_capture_board_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._single_pcb_capture_board_btn.setAutoRaise(True)
+        self._single_pcb_capture_board_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        self._single_pcb_capture_board_btn.setToolTip("Use current camera XY as the board XY position")
+        self._single_pcb_capture_board_btn.clicked.connect(self._on_single_pcb_capture_board_xy)
         self._single_pcb_new_btn = QPushButton("New")
         self._single_pcb_save_btn = QPushButton("Save")
         self._single_pcb_delete_btn = QPushButton("Delete")
@@ -2303,6 +2309,7 @@ class ControlWindow(QMainWindow):
         self._single_pcb_delete_btn.clicked.connect(self._on_single_pcb_delete)
         single_top_actions.addWidget(QLabel("PCB"))
         single_top_actions.addWidget(self._single_pcb_select, 1)
+        single_top_actions.addWidget(self._single_pcb_capture_board_btn)
         single_top_actions.addWidget(self._single_pcb_new_btn)
         single_top_actions.addWidget(self._single_pcb_save_btn)
         single_top_actions.addWidget(self._single_pcb_delete_btn)
@@ -2358,19 +2365,34 @@ class ControlWindow(QMainWindow):
         single_items_actions = QHBoxLayout()
         self._single_pcb_add_item_btn = QPushButton("Add Item")
         self._single_pcb_remove_item_btn = QPushButton("Remove Item")
+        self._single_pcb_capture_item_btn = QToolButton()
+        self._single_pcb_capture_item_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._single_pcb_capture_item_btn.setAutoRaise(True)
+        self._single_pcb_capture_item_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_RED, lens_color=_COLOR_BLUE)))
+        self._single_pcb_capture_item_btn.setToolTip("Use current camera XY as the selected part PCB-relative XY")
+        self._single_pcb_capture_item_btn.clicked.connect(self._on_single_pcb_capture_selected_item_xy)
+        self._single_pcb_move_camera_item_btn = QToolButton()
+        self._single_pcb_move_camera_item_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._single_pcb_move_camera_item_btn.setAutoRaise(True)
+        self._single_pcb_move_camera_item_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        self._single_pcb_move_camera_item_btn.setToolTip("Move camera to the selected part position on the PCB")
+        self._single_pcb_move_camera_item_btn.clicked.connect(self._on_single_pcb_move_camera_to_selected_item)
         self._single_pcb_add_item_btn.clicked.connect(self._on_single_pcb_add_item)
         self._single_pcb_remove_item_btn.clicked.connect(self._on_single_pcb_remove_item)
         single_items_actions.addWidget(self._single_pcb_add_item_btn)
         single_items_actions.addWidget(self._single_pcb_remove_item_btn)
+        single_items_actions.addWidget(self._single_pcb_capture_item_btn)
+        single_items_actions.addWidget(self._single_pcb_move_camera_item_btn)
         single_items_actions.addStretch(1)
         single_items_layout.addLayout(single_items_actions)
 
-        self._single_pcb_items_table = QTableWidget(0, 4)
+        self._single_pcb_items_table = QTableWidget(0, 5)
         self._single_pcb_items_table.setHorizontalHeaderLabels([
             "Part Number",
             "Part Code",
             "X (mm)",
             "Y (mm)",
+            "Rotation (deg)",
         ])
         self._single_pcb_items_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
         self._single_pcb_items_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -2384,6 +2406,7 @@ class ControlWindow(QMainWindow):
         single_hdr.resizeSection(1, 120)
         single_hdr.resizeSection(2, 110)
         single_hdr.resizeSection(3, 110)
+        single_hdr.resizeSection(4, 110)
         single_items_layout.addWidget(self._single_pcb_items_table)
         single_pcb_layout.addWidget(single_items_group)
 
@@ -4046,6 +4069,7 @@ class ControlWindow(QMainWindow):
                 str(entry.get("part_code", "")),
                 str(entry.get("x_mm", "")),
                 str(entry.get("y_mm", "")),
+                str(entry.get("rotation_deg", "")),
             ]
             for col, value in enumerate(cells):
                 self._single_pcb_items_table.setItem(row, col, QTableWidgetItem(value))
@@ -4070,8 +4094,10 @@ class ControlWindow(QMainWindow):
             part_code = self._single_pcb_items_table.item(row, 1)
             x_cell = self._single_pcb_items_table.item(row, 2)
             y_cell = self._single_pcb_items_table.item(row, 3)
+            rotation_cell = self._single_pcb_items_table.item(row, 4)
             x_text = x_cell.text().strip() if x_cell is not None else ""
             y_text = y_cell.text().strip() if y_cell is not None else ""
+            rotation_text = rotation_cell.text().strip() if rotation_cell is not None else ""
             try:
                 x_mm = float(x_text or 0.0)
             except Exception:
@@ -4080,12 +4106,17 @@ class ControlWindow(QMainWindow):
                 y_mm = float(y_text or 0.0)
             except Exception:
                 y_mm = 0.0
+            try:
+                rotation_deg = float(rotation_text or 0.0)
+            except Exception:
+                rotation_deg = 0.0
             items.append(
                 {
                     "part_number": part_number.text().strip() if part_number is not None else "",
                     "part_code": part_code.text().strip() if part_code is not None else "",
                     "x_mm": x_mm,
                     "y_mm": y_mm,
+                    "rotation_deg": rotation_deg,
                 }
             )
 
@@ -4138,6 +4169,62 @@ class ControlWindow(QMainWindow):
             row = self._single_pcb_items_table.rowCount() - 1
         if row >= 0:
             self._single_pcb_items_table.removeRow(row)
+
+    def _single_pcb_selected_item_row(self) -> int:
+        row = self._single_pcb_items_table.currentRow()
+        if row >= 0:
+            return row
+        if self._single_pcb_items_table.rowCount() == 1:
+            return 0
+        return -1
+
+    def _on_single_pcb_capture_board_xy(self) -> None:
+        if self._current_x is None or self._current_y is None:
+            self._log_line("ERR: cannot capture board XY because camera position is unknown")
+            return
+        self._single_pcb_ll_x.setValue(float(self._current_x))
+        self._single_pcb_ll_y.setValue(float(self._current_y))
+        self._log_line(
+            f"OK: board XY captured from camera position X={self._current_x:.3f}, Y={self._current_y:.3f}"
+        )
+
+    def _on_single_pcb_capture_selected_item_xy(self) -> None:
+        row = self._single_pcb_selected_item_row()
+        if row < 0:
+            self._log_line("ERR: select a PCB part row before capturing camera XY")
+            return
+        if self._current_x is None or self._current_y is None:
+            self._log_line("ERR: cannot capture part XY because camera position is unknown")
+            return
+
+        board_x = float(self._single_pcb_ll_x.value())
+        board_y = float(self._single_pcb_ll_y.value())
+        rel_x = float(self._current_x) - board_x
+        rel_y = float(self._current_y) - board_y
+
+        self._single_pcb_items_table.setItem(row, 2, QTableWidgetItem(f"{rel_x:.3f}"))
+        self._single_pcb_items_table.setItem(row, 3, QTableWidgetItem(f"{rel_y:.3f}"))
+        self._log_line(
+            f"OK: part row {row + 1} XY set to board-relative camera position X={rel_x:.3f}, Y={rel_y:.3f}"
+        )
+
+    def _on_single_pcb_move_camera_to_selected_item(self) -> None:
+        row = self._single_pcb_selected_item_row()
+        if row < 0:
+            self._log_line("ERR: select a PCB part row before moving camera")
+            return
+        x_item = self._single_pcb_items_table.item(row, 2)
+        y_item = self._single_pcb_items_table.item(row, 3)
+        try:
+            rel_x = float(x_item.text().strip() if x_item is not None else "")
+            rel_y = float(y_item.text().strip() if y_item is not None else "")
+        except Exception:
+            self._log_line("ERR: selected part row has invalid X/Y coordinates")
+            return
+
+        board_x = float(self._single_pcb_ll_x.value())
+        board_y = float(self._single_pcb_ll_y.value())
+        self._move_camera_to_xy(board_x + rel_x, board_y + rel_y)
 
     def _refresh_panel_selector(self) -> None:
         names = sorted(self._panels_by_name.keys())
