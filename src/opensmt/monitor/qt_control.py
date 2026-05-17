@@ -1935,8 +1935,8 @@ class StepperPopup(QDialog):
         root.addWidget(self._steps)
         root.addLayout(btn_row)
 
-        self._play_btn.clicked.connect(self.play_requested)
-        self._single_btn.clicked.connect(self.single_step_requested)
+        self._play_btn.clicked.connect(self.play_requested.emit)
+        self._single_btn.clicked.connect(self.single_step_requested.emit)
 
     def set_action(self, title: str, steps: list[str]) -> None:
         self._title.setText(title)
@@ -2015,6 +2015,7 @@ class ControlWindow(QMainWindow):
         self._stepper_running: bool = False
         self._stepper_auto_play: bool = False
         self._stepper_done: Callable[[bool], None] | None = None
+        self._stepper_run_token: int = 0
         self._machine_status = QLabel("X=--  Y=--")
         self._catalog_status = QLabel("Catalog DB: --")
         self._top_left_ratio_min = 0.2
@@ -2734,6 +2735,7 @@ class ControlWindow(QMainWindow):
         self._stepper_running = False
         self._stepper_auto_play = False
         self._stepper_done = on_done
+        self._stepper_run_token += 1
         self._stepper_popup.set_action(title, [label for label, _fn in self._stepper_steps])
         self._stepper_popup.update_progress(0, None)
         self._tray_editor.show_status("Debug stepping active: use Play or Single Step.", ok=True)
@@ -2770,7 +2772,18 @@ class ControlWindow(QMainWindow):
 
         _label, step_fn = self._stepper_steps[self._stepper_index]
         self._stepper_running = True
-        step_fn(self._on_stepper_step_finished)
+        token = self._stepper_run_token
+        done_called = {"value": False}
+
+        def _done_once(ok: bool) -> None:
+            if done_called["value"]:
+                return
+            done_called["value"] = True
+            if token != self._stepper_run_token:
+                return
+            self._on_stepper_step_finished(ok)
+
+        step_fn(_done_once)
 
     def _on_stepper_step_finished(self, ok: bool) -> None:
         self._stepper_running = False
@@ -4134,6 +4147,7 @@ class ControlWindow(QMainWindow):
                 pick_y = float(current_pick.get("y", 0.0) or 0.0)
                 nozzle_off_x = float(nozzle_state.get("offset_x", 0.0) or 0.0)
                 nozzle_off_y = float(nozzle_state.get("offset_y", 0.0) or 0.0)
+                feeder_pick_height = float(feeder.get("pick_height", 0.0) or 0.0)
             except Exception:
                 self._tray_editor.show_status("Advance failed: invalid pick position data.", ok=False)
                 done(False)
@@ -4141,6 +4155,15 @@ class ControlWindow(QMainWindow):
 
             ctx["pick_cam_x"] = pick_x - nozzle_off_x
             ctx["pick_cam_y"] = pick_y - nozzle_off_y
+            pick_down_z = self._compute_pick_down_z(nozzle_name, feeder_pick_height)
+            if pick_down_z is None:
+                self._tray_editor.show_status(
+                    f"Pick failed: nozzle {nozzle_name} standard down Z not configured.",
+                    ok=False,
+                )
+                done(False)
+                return
+            ctx["pick_down_z"] = float(pick_down_z)
             tx = float(ctx.get("pick_cam_x", 0.0))
             ty = float(ctx.get("pick_cam_y", 0.0))
             self._api.post_json(
@@ -4157,9 +4180,10 @@ class ControlWindow(QMainWindow):
             self._wait_for_xy_target(tx, ty, on_reached=lambda: done(True), on_timeout=lambda: done(False))
 
         def _move_down(done: Callable[[bool], None]) -> None:
+            target_z = float(ctx.get("pick_down_z", 0.0))
             self._api.post_json(
-                f"/api/head/nozzle/{nozzle_name}/move-standard-down",
-                None,
+                f"/api/head/nozzle/{nozzle_name}/move-absolute",
+                {"z": target_z},
                 lambda ok, _status, _data: done(bool(ok)),
             )
 
@@ -4382,6 +4406,7 @@ class ControlWindow(QMainWindow):
         try:
             pick_x = float(current_pick.get("x", 0.0) or 0.0)
             pick_y = float(current_pick.get("y", 0.0) or 0.0)
+            feeder_pick_height = float(feeder.get("pick_height", 0.0) or 0.0)
         except Exception:
             fail_cb(400, "invalid_current_pick", "pick position missing after advance")
             return
@@ -4396,6 +4421,10 @@ class ControlWindow(QMainWindow):
 
         cam_x = pick_x - nozzle_off_x
         cam_y = pick_y - nozzle_off_y
+        pick_down_z = self._compute_pick_down_z(nozzle_name, feeder_pick_height)
+        if pick_down_z is None:
+            fail_cb(409, "standard_down_not_set", f"nozzle {nozzle_name} standard down Z not configured")
+            return
         self._log_line(
             f"REQ: move nozzle {nozzle_name} to pick X={pick_x:.3f} Y={pick_y:.3f} via camera X={cam_x:.3f} Y={cam_y:.3f}"
         )
@@ -4406,6 +4435,7 @@ class ControlWindow(QMainWindow):
                 nozzle_name,
                 cam_x,
                 cam_y,
+                float(pick_down_z),
                 max(0, int(dwell_ms)),
                 on_done,
                 move_ok,
@@ -4420,6 +4450,7 @@ class ControlWindow(QMainWindow):
         nozzle_name: str,
         target_cam_x: float,
         target_cam_y: float,
+        target_down_z: float,
         dwell_ms: int,
         on_done: Callable[[bool], None],
         ok: bool,
@@ -4435,8 +4466,8 @@ class ControlWindow(QMainWindow):
             target_cam_x,
             target_cam_y,
             on_reached=lambda: self._api.post_json(
-                f"/api/head/nozzle/{nozzle_name}/move-standard-down",
-                None,
+                f"/api/head/nozzle/{nozzle_name}/move-absolute",
+                {"z": float(target_down_z)},
                 lambda down_ok, down_status, down_data: self._on_pick_step_down(
                     nozzle_name,
                     dwell_ms,
@@ -4461,7 +4492,7 @@ class ControlWindow(QMainWindow):
         fail_cb: Callable[[int, str, str], None],
     ) -> None:
         if not ok:
-            fail_cb(status, str(data.get("error", "request_failed")), "move nozzle to standard-down failed")
+            fail_cb(status, str(data.get("error", "request_failed")), "move nozzle to feeder-corrected pick Z failed")
             return
 
         self._api.post_json(
@@ -4664,6 +4695,24 @@ class ControlWindow(QMainWindow):
             QTimer.singleShot(interval_ms, _check_once)
 
         _check_once()
+
+    def _compute_pick_down_z(self, nozzle_name: str, feeder_pick_height: float) -> float | None:
+        nozzle = str(nozzle_name).strip().upper()
+        base_raw: Any = None
+        status_nozzle = self._nozzle_status_by_name.get(nozzle)
+        if isinstance(status_nozzle, dict):
+            base_raw = status_nozzle.get("standard_down_z")
+        if base_raw is None:
+            cfg_nozzle = self._nozzles_by_name.get(nozzle)
+            if isinstance(cfg_nozzle, dict):
+                base_raw = cfg_nozzle.get("standard_down_z")
+        try:
+            base_z = float(base_raw)
+            feeder_h = float(feeder_pick_height)
+        except Exception:
+            return None
+        # Positive feeder height means higher than PCB, negative means lower.
+        return base_z + feeder_h
 
     def _on_bottom_camera_down(
         self,
