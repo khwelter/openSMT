@@ -1008,7 +1008,6 @@ class _PackageEditorDialog(QDialog):
         self.setWindowTitle("Package Editor")
 
         self._name = QLineEdit(str(package.get("name", "")))
-        self._name.setReadOnly(True)
         self._footprint = QLineEdit(str(package.get("footprint", "")))
         self._length = QDoubleSpinBox()
         self._width = QDoubleSpinBox()
@@ -1099,7 +1098,6 @@ class _PartEditorDialog(QDialog):
         self.setWindowTitle("Part Editor")
 
         self._part_id = QLineEdit(str(part.get("part_id", "")))
-        self._part_id.setReadOnly(True)
         self._description = QLineEdit(str(part.get("description", "")))
         self._package = QComboBox()
         self._package.addItems(package_names)
@@ -3392,7 +3390,11 @@ class ControlWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
+        old_id = str(part.get("part_id", "")).strip().upper()
         updated = dialog.part_data()
+        new_id = str(updated.get("part_id", "")).strip().upper()
+        if old_id and old_id != new_id:
+            self._parts_by_id.pop(old_id, None)
         self._parts_by_id[updated["part_id"]] = updated
         self._save_parts_config()
         self._refresh_parts_table()
