@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPushButton,
+    QListWidget,
+    QListWidgetItem,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -1906,6 +1908,57 @@ class TrayFeederEditor(QWidget):
         self.save_requested.emit(self._feeder_id, payload)
 
 
+class StepperPopup(QDialog):
+    play_requested = Signal()
+    single_step_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Action Stepper")
+        self.setModal(False)
+        self.setMinimumWidth(420)
+
+        self._title = QLabel("No action loaded")
+        self._steps = QListWidget()
+        self._steps.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+
+        self._play_btn = QPushButton("Play")
+        self._single_btn = QPushButton("Single Step")
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._play_btn)
+        btn_row.addWidget(self._single_btn)
+        btn_row.addStretch(1)
+
+        root = QVBoxLayout(self)
+        root.addWidget(self._title)
+        root.addWidget(self._steps)
+        root.addLayout(btn_row)
+
+        self._play_btn.clicked.connect(self.play_requested)
+        self._single_btn.clicked.connect(self.single_step_requested)
+
+    def set_action(self, title: str, steps: list[str]) -> None:
+        self._title.setText(title)
+        self._steps.clear()
+        for step in steps:
+            self._steps.addItem(QListWidgetItem(str(step)))
+        self.update_progress(0, None)
+
+    def update_progress(self, passed_count: int, active_index: int | None) -> None:
+        for idx in range(self._steps.count()):
+            item = self._steps.item(idx)
+            if item is None:
+                continue
+            item.setBackground(QColor("transparent"))
+            item.setForeground(QColor("#d8dee9"))
+            if idx < int(passed_count):
+                item.setForeground(QColor("#d90429"))
+            elif active_index is not None and idx == int(active_index):
+                item.setBackground(QColor("#1f8a1f"))
+                item.setForeground(QColor("#ffffff"))
+
+
 class ControlWindow(QMainWindow):
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
@@ -1956,6 +2009,12 @@ class ControlWindow(QMainWindow):
         self._process_busy: bool = False
         self._xy_motion_gate_token: int = 0
         self._xy_motion_in_progress: bool = False
+        self._stepper_popup: StepperPopup | None = None
+        self._stepper_steps: list[tuple[str, Callable[[Callable[[bool], None]], None]]] = []
+        self._stepper_index: int = 0
+        self._stepper_running: bool = False
+        self._stepper_auto_play: bool = False
+        self._stepper_done: Callable[[bool], None] | None = None
         self._machine_status = QLabel("X=--  Y=--")
         self._catalog_status = QLabel("Catalog DB: --")
         self._top_left_ratio_min = 0.2
@@ -1974,6 +2033,7 @@ class ControlWindow(QMainWindow):
         self._host = QLineEdit(host)
         self._port = QLineEdit(str(port))
         self._connect_btn = QPushButton("Apply Host")
+        self._debug_btn = QPushButton("Debug")
         self._conn_state = QLabel("Ready")
 
         self._host.setMaximumWidth(170)
@@ -1984,6 +2044,7 @@ class ControlWindow(QMainWindow):
         top.addWidget(QLabel("Port"))
         top.addWidget(self._port)
         top.addWidget(self._connect_btn)
+        top.addWidget(self._debug_btn)
         top.addStretch(1)
         top.addWidget(self._conn_state)
         outer.addLayout(top)
@@ -2529,6 +2590,7 @@ class ControlWindow(QMainWindow):
         status.addPermanentWidget(self._machine_status, 1)
 
         self._connect_btn.clicked.connect(self._apply_host)
+        self._debug_btn.clicked.connect(self._open_stepper_popup)
 
         b_l.clicked.connect(lambda: self._jog_xy(-1.0, 0.0))
         b_r.clicked.connect(lambda: self._jog_xy(1.0, 0.0))
@@ -2642,6 +2704,98 @@ class ControlWindow(QMainWindow):
         self._conn_state.setText("Host updated")
         self._log_line(f"Base URL set to http://{host}:{port}")
         self._poll_status()
+
+    def _open_stepper_popup(self) -> None:
+        if self._stepper_popup is None:
+            self._stepper_popup = StepperPopup(self)
+            self._stepper_popup.play_requested.connect(self._on_stepper_play)
+            self._stepper_popup.single_step_requested.connect(self._on_stepper_single_step)
+        self._stepper_popup.show()
+        self._stepper_popup.raise_()
+        self._stepper_popup.activateWindow()
+
+    def _is_stepper_active(self) -> bool:
+        return self._stepper_popup is not None and self._stepper_popup.isVisible()
+
+    def _start_stepper_action(
+        self,
+        title: str,
+        steps: list[tuple[str, Callable[[Callable[[bool], None]], None]]],
+        on_done: Callable[[bool], None],
+    ) -> None:
+        if self._stepper_popup is None:
+            self._open_stepper_popup()
+        if self._stepper_popup is None:
+            on_done(False)
+            return
+
+        self._stepper_steps = list(steps)
+        self._stepper_index = 0
+        self._stepper_running = False
+        self._stepper_auto_play = False
+        self._stepper_done = on_done
+        self._stepper_popup.set_action(title, [label for label, _fn in self._stepper_steps])
+        self._stepper_popup.update_progress(0, None)
+        self._tray_editor.show_status("Debug stepping active: use Play or Single Step.", ok=True)
+
+    def _on_stepper_play(self) -> None:
+        if not self._stepper_steps:
+            return
+        self._stepper_auto_play = True
+        self._run_stepper_next()
+
+    def _on_stepper_single_step(self) -> None:
+        if not self._stepper_steps:
+            return
+        self._stepper_auto_play = False
+        self._run_stepper_next()
+
+    def _run_stepper_next(self) -> None:
+        if self._stepper_running:
+            return
+
+        if self._stepper_index >= len(self._stepper_steps):
+            total = len(self._stepper_steps)
+            done_cb = self._stepper_done
+            if self._stepper_popup is not None:
+                self._stepper_popup.update_progress(total, None)
+            self._stepper_steps = []
+            self._stepper_done = None
+            if done_cb is not None:
+                done_cb(True)
+            return
+
+        if self._stepper_popup is not None:
+            self._stepper_popup.update_progress(self._stepper_index, self._stepper_index)
+
+        _label, step_fn = self._stepper_steps[self._stepper_index]
+        self._stepper_running = True
+        step_fn(self._on_stepper_step_finished)
+
+    def _on_stepper_step_finished(self, ok: bool) -> None:
+        self._stepper_running = False
+        if not ok:
+            done_cb = self._stepper_done
+            self._stepper_steps = []
+            self._stepper_done = None
+            if done_cb is not None:
+                done_cb(False)
+            return
+
+        self._stepper_index += 1
+        if self._stepper_popup is not None:
+            self._stepper_popup.update_progress(self._stepper_index, None)
+
+        if self._stepper_index >= len(self._stepper_steps):
+            done_cb = self._stepper_done
+            self._stepper_steps = []
+            self._stepper_done = None
+            if done_cb is not None:
+                done_cb(True)
+            return
+
+        if self._stepper_auto_play:
+            self._run_stepper_next()
 
     def _xy_step_mm(self) -> float:
         value = self._xy_step.currentData()
@@ -3903,10 +4057,162 @@ class ControlWindow(QMainWindow):
         self._poll_status()
 
     def _on_pick_step_requested(self, feeder_id: str, nozzle_name: str, dwell_ms: int) -> None:
-        self._run_pick_step(feeder_id, nozzle_name, dwell_ms, lambda _ok: None)
+        self._run_pick_part_action(feeder_id, nozzle_name, dwell_ms, lambda _ok: None)
 
     def _on_bottom_camera_step_requested(self, _feeder_id: str, nozzle_name: str) -> None:
         self._run_bottom_camera_step(nozzle_name, lambda _ok: None)
+
+    def _run_pick_part_action(
+        self,
+        feeder_id: str,
+        nozzle_name: str,
+        dwell_ms: int,
+        on_done: Callable[[bool], None],
+    ) -> None:
+        if self._is_stepper_active():
+            self._run_pick_part_action_stepper(feeder_id, nozzle_name, dwell_ms, on_done)
+            return
+
+        self._run_pick_step(
+            feeder_id,
+            nozzle_name,
+            dwell_ms,
+            lambda ok, noz=nozzle_name: self._run_bottom_camera_step(noz, on_done) if ok else on_done(False),
+        )
+
+    def _run_pick_part_action_stepper(
+        self,
+        feeder_id: str,
+        nozzle_name: str,
+        dwell_ms: int,
+        on_done: Callable[[bool], None],
+    ) -> None:
+        feeder_id = str(feeder_id).strip().upper()
+        nozzle_name = str(nozzle_name).strip().upper()
+        dwell_ms = max(0, int(dwell_ms))
+
+        nozzle_state = self._nozzle_status_by_name.get(nozzle_name)
+        if nozzle_state is None:
+            self._tray_editor.show_status(f"Pick failed: nozzle {nozzle_name} unavailable.", ok=False)
+            on_done(False)
+            return
+        if not str(nozzle_state.get("tip_id", "") or "").strip():
+            self._tray_editor.show_status(f"Pick failed: nozzle {nozzle_name} has no mounted tip.", ok=False)
+            on_done(False)
+            return
+
+        ctx: dict[str, float] = {}
+
+        def _advance(done: Callable[[bool], None]) -> None:
+            self._api.post_json(
+                f"/api/feeders/{feeder_id}/advance-pick",
+                None,
+                lambda ok, status, data: _after_advance(done, ok, status, data),
+            )
+
+        def _after_advance(done: Callable[[bool], None], ok: bool, status: int, data: dict[str, Any]) -> None:
+            if not ok:
+                self._tray_editor.show_status(f"Advance failed ({status}): {data.get('error', 'request_failed')}", ok=False)
+                done(False)
+                return
+
+            feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
+            if feeder is None:
+                self._tray_editor.show_status("Advance failed: invalid feeder payload.", ok=False)
+                done(False)
+                return
+
+            fid = str(feeder.get("feeder_id", feeder_id)).upper()
+            self._feeders_by_id[fid] = feeder
+            self._selected_feeder_id = fid
+            self._open_feeder_editor(fid, force=True)
+
+            actual = feeder.get("actual_data") if isinstance(feeder.get("actual_data"), dict) else {}
+            current_pick = actual.get("current_pick") if isinstance(actual.get("current_pick"), dict) else {}
+            try:
+                pick_x = float(current_pick.get("x", 0.0) or 0.0)
+                pick_y = float(current_pick.get("y", 0.0) or 0.0)
+                nozzle_off_x = float(nozzle_state.get("offset_x", 0.0) or 0.0)
+                nozzle_off_y = float(nozzle_state.get("offset_y", 0.0) or 0.0)
+            except Exception:
+                self._tray_editor.show_status("Advance failed: invalid pick position data.", ok=False)
+                done(False)
+                return
+
+            ctx["pick_cam_x"] = pick_x - nozzle_off_x
+            ctx["pick_cam_y"] = pick_y - nozzle_off_y
+            tx = float(ctx.get("pick_cam_x", 0.0))
+            ty = float(ctx.get("pick_cam_y", 0.0))
+            self._api.post_json(
+                "/api/coord/move-xy",
+                {"x": tx, "y": ty},
+                lambda ok, status, data: _after_xy_pick(done, tx, ty, ok, status, data),
+            )
+
+        def _after_xy_pick(done: Callable[[bool], None], tx: float, ty: float, ok: bool, status: int, data: dict[str, Any]) -> None:
+            if not ok:
+                self._tray_editor.show_status(f"Move XY failed ({status}): {data.get('error', 'request_failed')}", ok=False)
+                done(False)
+                return
+            self._wait_for_xy_target(tx, ty, on_reached=lambda: done(True), on_timeout=lambda: done(False))
+
+        def _move_down(done: Callable[[bool], None]) -> None:
+            self._api.post_json(
+                f"/api/head/nozzle/{nozzle_name}/move-standard-down",
+                None,
+                lambda ok, _status, _data: done(bool(ok)),
+            )
+
+        def _vacuum_on(done: Callable[[bool], None]) -> None:
+            self._api.post_json(
+                f"/api/head/nozzle/{nozzle_name}/vacuum",
+                {"on": True},
+                lambda ok, _status, _data: done(bool(ok)),
+            )
+
+        def _wait_step(done: Callable[[bool], None]) -> None:
+            QTimer.singleShot(dwell_ms, lambda: done(True))
+
+        def _z_up(done: Callable[[bool], None]) -> None:
+            self._api.post_json(
+                f"/api/head/nozzle/{nozzle_name}/move-absolute",
+                {"z": 0.0},
+                lambda ok, _status, _data: done(bool(ok)),
+            )
+
+        def _move_xy_camera(done: Callable[[bool], None]) -> None:
+            self._api.post_json(
+                f"/api/nozzle/{nozzle_name}/move-to-bottom-camera",
+                None,
+                lambda ok, status, data: _after_xy_camera(done, ok, status, data),
+            )
+
+        def _after_xy_camera(done: Callable[[bool], None], ok: bool, status: int, data: dict[str, Any]) -> None:
+            if not ok:
+                self._tray_editor.show_status(f"Move to camera failed ({status}): {data.get('error', 'request_failed')}", ok=False)
+                done(False)
+                return
+            target = data.get("machine_target") if isinstance(data.get("machine_target"), dict) else {}
+            try:
+                tx = float(target.get("x"))
+                ty = float(target.get("y"))
+            except Exception:
+                tx = self._current_x if self._current_x is not None else 0.0
+                ty = self._current_y if self._current_y is not None else 0.0
+            self._wait_for_xy_target(tx, ty, on_reached=lambda: done(True), on_timeout=lambda: done(False))
+
+        self._start_stepper_action(
+            f"Pickup Part ({nozzle_name})",
+            [
+                ("Move to XY", _advance),
+                ("Move to down", _move_down),
+                ("Switch on vacuum", _vacuum_on),
+                ("Wait", _wait_step),
+                ("Move Z up", _z_up),
+                ("Move XY to camera", _move_xy_camera),
+            ],
+            on_done,
+        )
 
     def _on_process_start_requested(self, feeder_id: str, nozzle_name: str, dwell_ms: int, single_step: bool) -> None:
         if self._process_busy:
