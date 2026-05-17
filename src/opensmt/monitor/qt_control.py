@@ -1954,6 +1954,8 @@ class ControlWindow(QMainWindow):
         self._process_dwell_ms: int = 150
         self._process_single_step: bool = False
         self._process_busy: bool = False
+        self._xy_motion_gate_token: int = 0
+        self._xy_motion_in_progress: bool = False
         self._machine_status = QLabel("X=--  Y=--")
         self._catalog_status = QLabel("Catalog DB: --")
         self._top_left_ratio_min = 0.2
@@ -4096,6 +4098,8 @@ class ControlWindow(QMainWindow):
             {"x": cam_x, "y": cam_y},
             lambda move_ok, move_status, move_data: self._on_pick_step_moved(
                 nozzle_name,
+                cam_x,
+                cam_y,
                 max(0, int(dwell_ms)),
                 on_done,
                 move_ok,
@@ -4108,6 +4112,8 @@ class ControlWindow(QMainWindow):
     def _on_pick_step_moved(
         self,
         nozzle_name: str,
+        target_cam_x: float,
+        target_cam_y: float,
         dwell_ms: int,
         on_done: Callable[[bool], None],
         ok: bool,
@@ -4119,18 +4125,23 @@ class ControlWindow(QMainWindow):
             fail_cb(status, str(data.get("error", "request_failed")), "move to pick location failed")
             return
 
-        self._api.post_json(
-            f"/api/head/nozzle/{nozzle_name}/move-standard-down",
-            None,
-            lambda down_ok, down_status, down_data: self._on_pick_step_down(
-                nozzle_name,
-                dwell_ms,
-                on_done,
-                down_ok,
-                down_status,
-                down_data,
-                fail_cb,
+        self._wait_for_xy_target(
+            target_cam_x,
+            target_cam_y,
+            on_reached=lambda: self._api.post_json(
+                f"/api/head/nozzle/{nozzle_name}/move-standard-down",
+                None,
+                lambda down_ok, down_status, down_data: self._on_pick_step_down(
+                    nozzle_name,
+                    dwell_ms,
+                    on_done,
+                    down_ok,
+                    down_status,
+                    down_data,
+                    fail_cb,
+                ),
             ),
+            on_timeout=lambda: fail_cb(408, "xy_move_timeout", "move to pick location did not finish in time"),
         )
 
     def _on_pick_step_down(
@@ -4261,17 +4272,92 @@ class ControlWindow(QMainWindow):
             on_done(False)
             return
 
-        self._api.post_json(
-            f"/api/head/nozzle/{nozzle_name}/move-standard-down",
-            None,
-            lambda down_ok, down_status, down_data: self._on_bottom_camera_down(
-                nozzle_name,
-                on_done,
-                down_ok,
-                down_status,
-                down_data,
+        machine_target = data.get("machine_target") if isinstance(data.get("machine_target"), dict) else {}
+        try:
+            target_x = float(machine_target.get("x"))
+            target_y = float(machine_target.get("y"))
+        except Exception:
+            target_x = self._current_x if self._current_x is not None else 0.0
+            target_y = self._current_y if self._current_y is not None else 0.0
+
+        self._wait_for_xy_target(
+            float(target_x),
+            float(target_y),
+            on_reached=lambda: self._api.post_json(
+                f"/api/head/nozzle/{nozzle_name}/move-standard-down",
+                None,
+                lambda down_ok, down_status, down_data: self._on_bottom_camera_down(
+                    nozzle_name,
+                    on_done,
+                    down_ok,
+                    down_status,
+                    down_data,
+                ),
             ),
+            on_timeout=lambda: self._on_bottom_camera_xy_timeout(nozzle_name, on_done),
         )
+
+    def _on_bottom_camera_xy_timeout(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
+        self._log_line(f"ERR 408: move {nozzle_name} to bottom camera did not finish in time")
+        self._tray_editor.show_status("Bottom-camera step failed: XY move timeout", ok=False)
+        on_done(False)
+
+    def _wait_for_xy_target(
+        self,
+        target_x: float,
+        target_y: float,
+        on_reached: Callable[[], None],
+        on_timeout: Callable[[], None],
+        *,
+        tolerance_mm: float = 0.02,
+        max_attempts: int = 80,
+        interval_ms: int = 120,
+    ) -> None:
+        attempts = {"count": 0}
+
+        def _check_once() -> None:
+            self._api.get_json(
+                "/api/status",
+                lambda ok, _status, data: _on_status(ok, data),
+            )
+
+        def _on_status(ok: bool, data: dict[str, Any]) -> None:
+            attempts["count"] += 1
+            if not ok:
+                if attempts["count"] >= max_attempts:
+                    on_timeout()
+                    return
+                QTimer.singleShot(interval_ms, _check_once)
+                return
+
+            positions = data.get("positions", {}) if isinstance(data.get("positions"), dict) else {}
+            cur_x = positions.get("X")
+            cur_y = positions.get("Y")
+            try:
+                cur_x_f = float(cur_x)
+                cur_y_f = float(cur_y)
+            except Exception:
+                if attempts["count"] >= max_attempts:
+                    on_timeout()
+                    return
+                QTimer.singleShot(interval_ms, _check_once)
+                return
+
+            self._current_x = cur_x_f
+            self._current_y = cur_y_f
+            dx = abs(cur_x_f - float(target_x))
+            dy = abs(cur_y_f - float(target_y))
+            if dx <= tolerance_mm and dy <= tolerance_mm:
+                on_reached()
+                return
+
+            if attempts["count"] >= max_attempts:
+                on_timeout()
+                return
+
+            QTimer.singleShot(interval_ms, _check_once)
+
+        _check_once()
 
     def _on_bottom_camera_down(
         self,
@@ -4373,11 +4459,77 @@ class ControlWindow(QMainWindow):
         self._feeders_tabs.setCurrentIndex(0)
 
     def _move_camera_to_xy(self, x: float, y: float) -> None:
-        self._post_action(
+        target_x = float(x)
+        target_y = float(y)
+        self._api.post_json(
             "/api/coord/move-xy",
-            {"x": float(x), "y": float(y)},
-            f"Move top camera to X={x:.3f}, Y={y:.3f}",
+            {"x": target_x, "y": target_y},
+            lambda ok, status, data, tx=target_x, ty=target_y: self._on_move_camera_xy_result(tx, ty, ok, status, data),
         )
+
+    def _on_move_camera_xy_result(self, target_x: float, target_y: float, ok: bool, status: int, data: dict[str, Any]) -> None:
+        title = f"Move top camera to X={target_x:.3f}, Y={target_y:.3f}"
+        self._handle_action_result(title, ok, status, data)
+        if ok:
+            self._start_xy_motion_gate(target_x, target_y, "Move top camera")
+
+    def _start_xy_motion_gate(self, target_x: float, target_y: float, title: str) -> None:
+        self._xy_motion_gate_token += 1
+        token = self._xy_motion_gate_token
+        self._xy_motion_in_progress = True
+
+        self._wait_for_xy_target(
+            target_x,
+            target_y,
+            on_reached=lambda: self._finish_xy_motion_gate(token, title, True),
+            on_timeout=lambda: self._finish_xy_motion_gate(token, title, False),
+        )
+
+    def _finish_xy_motion_gate(self, token: int, title: str, reached: bool) -> None:
+        if token != self._xy_motion_gate_token:
+            return
+        self._xy_motion_in_progress = False
+        if reached:
+            self._log_line(f"OK: XY movement finished: {title}")
+            return
+        self._log_line(f"WARN: XY movement timeout: {title}")
+
+    def _block_if_xy_in_progress(self, title: str) -> bool:
+        if not self._xy_motion_in_progress:
+            return False
+        self._log_line(f"ERR: {title} blocked: XY movement still in progress")
+        self._tray_editor.show_status("Z move blocked: wait until XY movement has finished.", ok=False)
+        return True
+
+    def _on_nozzle_xy_action_result(
+        self,
+        nozzle: str,
+        action_title: str,
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+    ) -> None:
+        title = f"{nozzle}: {action_title}"
+        self._handle_action_result(title, ok, status, data)
+        if not ok:
+            return
+
+        target: dict[str, Any] = {}
+        if isinstance(data.get("machine_target"), dict):
+            target = data.get("machine_target")
+        elif isinstance(data.get("camera_target"), dict):
+            target = data.get("camera_target")
+        elif isinstance(data.get("camera_position"), dict):
+            target = data.get("camera_position")
+
+        try:
+            target_x = float(target.get("x"))
+            target_y = float(target.get("y"))
+        except Exception:
+            target_x = self._current_x if self._current_x is not None else 0.0
+            target_y = self._current_y if self._current_y is not None else 0.0
+
+        self._start_xy_motion_gate(target_x, target_y, title)
 
     @staticmethod
     def _set_table_visible_rows(table: QTableWidget, visible_rows: int) -> None:
@@ -4391,18 +4543,44 @@ class ControlWindow(QMainWindow):
 
     def _on_nozzle_action(self, nozzle: str, action: str, value: float) -> None:
         if action == "align_to_cam":
-            self._post_action(f"/api/nozzle/{nozzle}/move-to-camera", None, f"{nozzle}: Align to camera")
+            self._api.post_json(
+                f"/api/nozzle/{nozzle}/move-to-camera",
+                None,
+                lambda ok, status, data, noz=nozzle: self._on_nozzle_xy_action_result(
+                    noz,
+                    "Align to camera",
+                    ok,
+                    status,
+                    data,
+                ),
+            )
             return
 
         if action == "cam_to_nozzle":
-            self._post_action(f"/api/nozzle/{nozzle}/move-camera-here", None, f"{nozzle}: Move camera to nozzle")
+            self._api.post_json(
+                f"/api/nozzle/{nozzle}/move-camera-here",
+                None,
+                lambda ok, status, data, noz=nozzle: self._on_nozzle_xy_action_result(
+                    noz,
+                    "Move camera to nozzle",
+                    ok,
+                    status,
+                    data,
+                ),
+            )
             return
 
         if action == "above_bottom":
-            self._post_action(
+            self._api.post_json(
                 f"/api/nozzle/{nozzle}/move-to-bottom-camera",
                 None,
-                f"{nozzle}: Move above bottom camera",
+                lambda ok, status, data, noz=nozzle: self._on_nozzle_xy_action_result(
+                    noz,
+                    "Move above bottom camera",
+                    ok,
+                    status,
+                    data,
+                ),
             )
             return
 
@@ -4415,10 +4593,14 @@ class ControlWindow(QMainWindow):
             return
 
         if action == "nozzle_home":
+            if self._block_if_xy_in_progress(f"{nozzle}: Home Z"):
+                return
             self._post_action(f"/api/head/nozzle/{nozzle}/home", None, f"{nozzle}: Home Z")
             return
 
         if action == "z_up":
+            if self._block_if_xy_in_progress(f"{nozzle}: Z up"):
+                return
             self._post_action(
                 f"/api/head/nozzle/{nozzle}/move",
                 {"delta": float(value)},
@@ -4427,6 +4609,8 @@ class ControlWindow(QMainWindow):
             return
 
         if action == "z_down":
+            if self._block_if_xy_in_progress(f"{nozzle}: Z down"):
+                return
             self._post_action(
                 f"/api/head/nozzle/{nozzle}/move",
                 {"delta": -float(value)},
@@ -4443,6 +4627,8 @@ class ControlWindow(QMainWindow):
             return
 
         if action == "z_zero":
+            if self._block_if_xy_in_progress(f"{nozzle}: Move to Z=0.0"):
+                return
             self._post_action(
                 f"/api/head/nozzle/{nozzle}/move-absolute",
                 {"z": 0.0},
@@ -4451,6 +4637,8 @@ class ControlWindow(QMainWindow):
             return
 
         if action == "z_park":
+            if self._block_if_xy_in_progress(f"{nozzle}: Park"):
+                return
             self._post_action(
                 f"/api/head/nozzle/{nozzle}/park",
                 None,
@@ -4459,6 +4647,8 @@ class ControlWindow(QMainWindow):
             return
 
         if action == "z_standard_down":
+            if self._block_if_xy_in_progress(f"{nozzle}: Move to standard down"):
+                return
             self._post_action(
                 f"/api/head/nozzle/{nozzle}/move-standard-down",
                 None,
