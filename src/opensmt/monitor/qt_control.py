@@ -1302,6 +1302,10 @@ class TrayFeederEditor(QWidget):
     set_pick_from_camera_requested = Signal(str)
     reset_requested = Signal(str)
     advance_requested = Signal(str)
+    pick_step_requested = Signal(str, str, int)
+    bottom_camera_step_requested = Signal(str, str)
+    process_start_requested = Signal(str, str, int, bool)
+    process_next_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -1412,6 +1416,38 @@ class TrayFeederEditor(QWidget):
         fixed_layout.addLayout(btn_row_top)
         fixed_layout.addLayout(btn_row_bottom)
         fixed_layout.addWidget(self._status)
+
+        process_box = QGroupBox("Pick and Place Process")
+        process_layout = QGridLayout(process_box)
+        process_layout.setContentsMargins(6, 6, 6, 6)
+        process_layout.setHorizontalSpacing(6)
+        process_layout.setVerticalSpacing(4)
+
+        self._pick_nozzle = QComboBox()
+        self._pick_nozzle.setMinimumWidth(120)
+        self._pick_dwell_ms = QSpinBox()
+        self._pick_dwell_ms.setRange(0, 60000)
+        self._pick_dwell_ms.setValue(150)
+        self._single_step_mode = QCheckBox("Single-step mode")
+
+        self._btn_pick_step = QPushButton("Step 1: Pick")
+        self._btn_bottom_step = QPushButton("Step 2: Bottom Camera")
+        self._btn_start_process = QPushButton("Start Sequence")
+        self._btn_next_process = QPushButton("Run Next Step")
+
+        process_layout.addWidget(QLabel("Nozzle"), 0, 0)
+        process_layout.addWidget(self._pick_nozzle, 0, 1)
+        process_layout.addWidget(QLabel("Vacuum dwell (ms)"), 0, 2)
+        process_layout.addWidget(self._pick_dwell_ms, 0, 3)
+        process_layout.addWidget(self._single_step_mode, 0, 4)
+
+        process_layout.addWidget(self._btn_pick_step, 1, 0)
+        process_layout.addWidget(self._btn_bottom_step, 1, 1)
+        process_layout.addWidget(self._btn_start_process, 1, 2)
+        process_layout.addWidget(self._btn_next_process, 1, 3)
+        process_layout.setColumnStretch(5, 1)
+
+        root.addWidget(process_box)
         root.addWidget(fixed_box)
 
         scroll = QScrollArea()
@@ -1521,6 +1557,10 @@ class TrayFeederEditor(QWidget):
         self._btn_pick_from_camera.clicked.connect(self._emit_set_pick_from_camera)
         self._btn_advance.clicked.connect(self._emit_advance)
         self._btn_reset.clicked.connect(self._emit_reset)
+        self._btn_pick_step.clicked.connect(self._emit_pick_step)
+        self._btn_bottom_step.clicked.connect(self._emit_bottom_step)
+        self._btn_start_process.clicked.connect(self._emit_start_process)
+        self._btn_next_process.clicked.connect(self._emit_next_process)
         self._part_number.currentTextChanged.connect(self._on_fields_changed)
         if self._part_number.lineEdit() is not None:
             self._part_number.lineEdit().textChanged.connect(self._on_fields_changed)
@@ -1607,6 +1647,13 @@ class TrayFeederEditor(QWidget):
             self._current_y,
             self._last_x,
             self._last_y,
+            self._pick_nozzle,
+            self._pick_dwell_ms,
+            self._single_step_mode,
+            self._btn_pick_step,
+            self._btn_bottom_step,
+            self._btn_start_process,
+            self._btn_next_process,
             self._btn_move_base,
             self._btn_move_current,
             self._btn_pick_from_camera,
@@ -1692,6 +1739,11 @@ class TrayFeederEditor(QWidget):
         self._btn_pick_from_camera.setEnabled(bool(self._feeder_id))
         self._btn_advance.setEnabled(bool(self._feeder_id))
         self._btn_reset.setEnabled(bool(self._feeder_id))
+        has_nozzle = bool(self.selected_nozzle_name())
+        self._btn_pick_step.setEnabled(bool(self._feeder_id) and has_nozzle)
+        self._btn_bottom_step.setEnabled(bool(self._feeder_id) and has_nozzle)
+        self._btn_start_process.setEnabled(bool(self._feeder_id) and has_nozzle)
+        self._btn_next_process.setEnabled(bool(self._feeder_id))
 
     def _emit_reload(self) -> None:
         if self._feeder_id:
@@ -1715,6 +1767,27 @@ class TrayFeederEditor(QWidget):
     def _emit_advance(self) -> None:
         if self._feeder_id:
             self.advance_requested.emit(self._feeder_id)
+
+    def _emit_pick_step(self) -> None:
+        if self._feeder_id and self.selected_nozzle_name():
+            self.pick_step_requested.emit(self._feeder_id, self.selected_nozzle_name(), self.vacuum_dwell_ms())
+
+    def _emit_bottom_step(self) -> None:
+        if self._feeder_id and self.selected_nozzle_name():
+            self.bottom_camera_step_requested.emit(self._feeder_id, self.selected_nozzle_name())
+
+    def _emit_start_process(self) -> None:
+        if self._feeder_id and self.selected_nozzle_name():
+            self.process_start_requested.emit(
+                self._feeder_id,
+                self.selected_nozzle_name(),
+                self.vacuum_dwell_ms(),
+                self._single_step_mode.isChecked(),
+            )
+
+    def _emit_next_process(self) -> None:
+        if self._feeder_id:
+            self.process_next_requested.emit()
 
     def _emit_set_pick_from_camera(self) -> None:
         if self._feeder_id:
@@ -1786,6 +1859,38 @@ class TrayFeederEditor(QWidget):
             completer.setModel(self._part_number.model())
         self._loading_values = False
 
+    def set_nozzle_choices(self, nozzle_states: list[dict[str, Any]]) -> None:
+        current = self.selected_nozzle_name()
+        options: list[tuple[str, str]] = []
+        for nozzle in nozzle_states:
+            name = str(nozzle.get("name", "")).strip().upper()
+            tip_id = str(nozzle.get("tip_id", "") or "").strip()
+            if not name or not tip_id:
+                continue
+            options.append((name, f"{name} (tip {tip_id})"))
+
+        options.sort(key=lambda item: item[0])
+
+        self._pick_nozzle.blockSignals(True)
+        self._pick_nozzle.clear()
+        if options:
+            for name, label in options:
+                self._pick_nozzle.addItem(label, name)
+            idx = self._pick_nozzle.findData(current)
+            self._pick_nozzle.setCurrentIndex(idx if idx >= 0 else 0)
+        else:
+            self._pick_nozzle.addItem("No mounted nozzle tip", "")
+            self._pick_nozzle.setCurrentIndex(0)
+        self._pick_nozzle.blockSignals(False)
+        self._refresh_dirty_state()
+
+    def selected_nozzle_name(self) -> str:
+        data = self._pick_nozzle.currentData()
+        return str(data).strip().upper() if data is not None else ""
+
+    def vacuum_dwell_ms(self) -> int:
+        return int(self._pick_dwell_ms.value())
+
     def show_status(self, text: str, ok: bool = True) -> None:
         color = "#1f8a1f" if ok else "#bb2b2b"
         self._status.setStyleSheet(f"color:{color};")
@@ -1820,6 +1925,7 @@ class ControlWindow(QMainWindow):
         self._camera_thumb_pending: set[str] = set()
 
         self._nozzle_cards: dict[str, NozzleCard] = {}
+        self._nozzle_status_by_name: dict[str, dict[str, Any]] = {}
         self._nozzle_placeholder: QLabel | None = None
         self._feeders_by_id: dict[str, dict[str, Any]] = {}
         self._feeder_tab_index: dict[str, int] = {}
@@ -1842,6 +1948,12 @@ class ControlWindow(QMainWindow):
         self._setup_locations_config_path = self._setup_config_dir / "system.locations.json"
         self._current_x: float | None = None
         self._current_y: float | None = None
+        self._process_queue: list[str] = []
+        self._process_feeder_id: str = ""
+        self._process_nozzle_name: str = ""
+        self._process_dwell_ms: int = 150
+        self._process_single_step: bool = False
+        self._process_busy: bool = False
         self._machine_status = QLabel("X=--  Y=--")
         self._catalog_status = QLabel("Catalog DB: --")
         self._top_left_ratio_min = 0.2
@@ -2292,6 +2404,10 @@ class ControlWindow(QMainWindow):
                 self._tray_editor.set_last_from_camera_requested.connect(self._set_tray_last_from_camera)
                 self._tray_editor.advance_requested.connect(self._advance_feeder_pick)
                 self._tray_editor.reset_requested.connect(self._reset_feeder)
+                self._tray_editor.pick_step_requested.connect(self._on_pick_step_requested)
+                self._tray_editor.bottom_camera_step_requested.connect(self._on_bottom_camera_step_requested)
+                self._tray_editor.process_start_requested.connect(self._on_process_start_requested)
+                self._tray_editor.process_next_requested.connect(self._on_process_next_requested)
                 type_layout.addWidget(self._tray_editor)
             else:
                 note = QLabel("Type-specific editor will be added in a later step.")
@@ -2583,7 +2699,13 @@ class ControlWindow(QMainWindow):
         self._refresh_camera_thumbs()
 
         nozzles = data.get("nozzles", []) if isinstance(data.get("nozzles"), list) else []
+        self._nozzle_status_by_name = {
+            str(nozzle.get("name", "")).strip().upper(): nozzle
+            for nozzle in nozzles
+            if isinstance(nozzle, dict) and str(nozzle.get("name", "")).strip()
+        }
         self._sync_nozzle_cards(nozzles)
+        self._tray_editor.set_nozzle_choices(nozzles)
         self._update_machine_status_bar(positions, nozzles)
 
         feeders = data.get("feeders", []) if isinstance(data.get("feeders"), list) else []
@@ -3777,6 +3899,399 @@ class ControlWindow(QMainWindow):
         self._log_line(f"OK: feeder {feeder_id} advanced")
         self._tray_editor.show_status("Advanced to next pick position.", ok=True)
         self._poll_status()
+
+    def _on_pick_step_requested(self, feeder_id: str, nozzle_name: str, dwell_ms: int) -> None:
+        self._run_pick_step(feeder_id, nozzle_name, dwell_ms, lambda _ok: None)
+
+    def _on_bottom_camera_step_requested(self, _feeder_id: str, nozzle_name: str) -> None:
+        self._run_bottom_camera_step(nozzle_name, lambda _ok: None)
+
+    def _on_process_start_requested(self, feeder_id: str, nozzle_name: str, dwell_ms: int, single_step: bool) -> None:
+        if self._process_busy:
+            self._log_line("ERR: pick/place process already running")
+            self._tray_editor.show_status("Process already running.", ok=False)
+            return
+
+        self._process_feeder_id = str(feeder_id).strip().upper()
+        self._process_nozzle_name = str(nozzle_name).strip().upper()
+        self._process_dwell_ms = max(0, int(dwell_ms))
+        self._process_single_step = bool(single_step)
+        self._process_queue = [
+            "pick_component",
+            "move_to_bottom_camera",
+            "run_bottom_vision_pipeline",
+            "move_to_final_destination",
+        ]
+        self._log_line(
+            f"REQ: start pick/place process feeder={self._process_feeder_id} nozzle={self._process_nozzle_name} single_step={self._process_single_step}"
+        )
+        self._process_run_next()
+
+    def _on_process_next_requested(self) -> None:
+        if self._process_busy:
+            self._tray_editor.show_status("Process step currently running.", ok=False)
+            return
+        if not self._process_queue:
+            self._tray_editor.show_status("No pending process step.", ok=False)
+            return
+        self._process_run_next()
+
+    def _process_run_next(self) -> None:
+        if self._process_busy:
+            return
+        if not self._process_queue:
+            self._tray_editor.show_status("Process complete.", ok=True)
+            return
+
+        step = self._process_queue[0]
+        self._process_busy = True
+        self._tray_editor.show_status(f"Running step: {step}", ok=True)
+
+        if step == "pick_component":
+            self._run_pick_step(
+                self._process_feeder_id,
+                self._process_nozzle_name,
+                self._process_dwell_ms,
+                lambda ok: self._on_process_step_finished("pick_component", ok),
+            )
+            return
+
+        if step == "move_to_bottom_camera":
+            self._run_bottom_camera_step(
+                self._process_nozzle_name,
+                lambda ok: self._on_process_step_finished("move_to_bottom_camera", ok),
+            )
+            return
+
+        if step == "run_bottom_vision_pipeline":
+            self._run_bottom_vision_pipeline_placeholder(
+                self._process_nozzle_name,
+                lambda ok: self._on_process_step_finished("run_bottom_vision_pipeline", ok),
+            )
+            return
+
+        if step == "move_to_final_destination":
+            self._run_move_to_final_destination_placeholder(
+                self._process_nozzle_name,
+                lambda ok: self._on_process_step_finished("move_to_final_destination", ok),
+            )
+            return
+
+        self._on_process_step_finished(step, False)
+
+    def _on_process_step_finished(self, step: str, ok: bool) -> None:
+        self._process_busy = False
+        if not ok:
+            self._process_queue = []
+            self._tray_editor.show_status(f"Process stopped at step {step}.", ok=False)
+            return
+
+        if self._process_queue and self._process_queue[0] == step:
+            self._process_queue.pop(0)
+
+        if not self._process_queue:
+            self._tray_editor.show_status("Process complete.", ok=True)
+            return
+
+        next_step = self._process_queue[0]
+        if self._process_single_step:
+            self._tray_editor.show_status(f"Step done: {step}. Next: {next_step}", ok=True)
+            return
+
+        self._process_run_next()
+
+    def _run_pick_step(
+        self,
+        feeder_id: str,
+        nozzle_name: str,
+        dwell_ms: int,
+        on_done: Callable[[bool], None],
+    ) -> None:
+        feeder_id = str(feeder_id).strip().upper()
+        nozzle_name = str(nozzle_name).strip().upper()
+        nozzle_state = self._nozzle_status_by_name.get(nozzle_name)
+        if nozzle_state is None:
+            self._log_line(f"ERR: pick step failed: nozzle {nozzle_name} not in runtime status")
+            self._tray_editor.show_status(f"Pick failed: nozzle {nozzle_name} unavailable.", ok=False)
+            on_done(False)
+            return
+
+        tip_id = str(nozzle_state.get("tip_id", "") or "").strip()
+        if not tip_id:
+            self._log_line(f"ERR: pick step failed: nozzle {nozzle_name} has no mounted tip")
+            self._tray_editor.show_status(f"Pick failed: nozzle {nozzle_name} has no mounted tip.", ok=False)
+            on_done(False)
+            return
+
+        def _fail(status: int, err: str, msg: str) -> None:
+            self._log_line(f"ERR {status}: {msg}: {err}")
+            self._tray_editor.show_status(f"{msg}: {err}", ok=False)
+            on_done(False)
+
+        self._log_line(f"REQ: feeder {feeder_id} advance for pick")
+        self._api.post_json(
+            f"/api/feeders/{feeder_id}/advance-pick",
+            None,
+            lambda ok, status, data: self._on_pick_step_advanced(
+                feeder_id,
+                nozzle_name,
+                dwell_ms,
+                on_done,
+                ok,
+                status,
+                data,
+                _fail,
+            ),
+        )
+
+    def _on_pick_step_advanced(
+        self,
+        feeder_id: str,
+        nozzle_name: str,
+        dwell_ms: int,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+        fail_cb: Callable[[int, str, str], None],
+    ) -> None:
+        if not ok:
+            fail_cb(status, str(data.get("error", "request_failed")), f"advance feeder {feeder_id} failed")
+            return
+
+        feeder = data.get("feeder") if isinstance(data.get("feeder"), dict) else None
+        if feeder is None:
+            fail_cb(500, "invalid_feeder_payload", "advance feeder response invalid")
+            return
+
+        fid = str(feeder.get("feeder_id", feeder_id)).upper()
+        self._feeders_by_id[fid] = feeder
+        self._selected_feeder_id = fid
+        self._open_feeder_editor(fid, force=True)
+
+        actual = feeder.get("actual_data") if isinstance(feeder.get("actual_data"), dict) else {}
+        current_pick = actual.get("current_pick") if isinstance(actual.get("current_pick"), dict) else {}
+        try:
+            pick_x = float(current_pick.get("x", 0.0) or 0.0)
+            pick_y = float(current_pick.get("y", 0.0) or 0.0)
+        except Exception:
+            fail_cb(400, "invalid_current_pick", "pick position missing after advance")
+            return
+
+        nozzle_state = self._nozzle_status_by_name.get(nozzle_name, {})
+        try:
+            nozzle_off_x = float(nozzle_state.get("offset_x", 0.0) or 0.0)
+            nozzle_off_y = float(nozzle_state.get("offset_y", 0.0) or 0.0)
+        except Exception:
+            nozzle_off_x = 0.0
+            nozzle_off_y = 0.0
+
+        cam_x = pick_x - nozzle_off_x
+        cam_y = pick_y - nozzle_off_y
+        self._log_line(
+            f"REQ: move nozzle {nozzle_name} to pick X={pick_x:.3f} Y={pick_y:.3f} via camera X={cam_x:.3f} Y={cam_y:.3f}"
+        )
+        self._api.post_json(
+            "/api/coord/move-xy",
+            {"x": cam_x, "y": cam_y},
+            lambda move_ok, move_status, move_data: self._on_pick_step_moved(
+                nozzle_name,
+                max(0, int(dwell_ms)),
+                on_done,
+                move_ok,
+                move_status,
+                move_data,
+                fail_cb,
+            ),
+        )
+
+    def _on_pick_step_moved(
+        self,
+        nozzle_name: str,
+        dwell_ms: int,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+        fail_cb: Callable[[int, str, str], None],
+    ) -> None:
+        if not ok:
+            fail_cb(status, str(data.get("error", "request_failed")), "move to pick location failed")
+            return
+
+        self._api.post_json(
+            f"/api/head/nozzle/{nozzle_name}/move-standard-down",
+            None,
+            lambda down_ok, down_status, down_data: self._on_pick_step_down(
+                nozzle_name,
+                dwell_ms,
+                on_done,
+                down_ok,
+                down_status,
+                down_data,
+                fail_cb,
+            ),
+        )
+
+    def _on_pick_step_down(
+        self,
+        nozzle_name: str,
+        dwell_ms: int,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+        fail_cb: Callable[[int, str, str], None],
+    ) -> None:
+        if not ok:
+            fail_cb(status, str(data.get("error", "request_failed")), "move nozzle to standard-down failed")
+            return
+
+        self._api.post_json(
+            f"/api/head/nozzle/{nozzle_name}/vacuum",
+            {"on": True},
+            lambda vac_ok, vac_status, vac_data: self._on_pick_step_vacuum_on(
+                nozzle_name,
+                dwell_ms,
+                on_done,
+                vac_ok,
+                vac_status,
+                vac_data,
+                fail_cb,
+            ),
+        )
+
+    def _on_pick_step_vacuum_on(
+        self,
+        nozzle_name: str,
+        dwell_ms: int,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+        fail_cb: Callable[[int, str, str], None],
+    ) -> None:
+        if not ok:
+            fail_cb(status, str(data.get("error", "request_failed")), "vacuum on failed")
+            return
+
+        self._log_line(f"OK: nozzle {nozzle_name} vacuum on, dwell {dwell_ms} ms")
+
+        def _raise_after_dwell() -> None:
+            self._api.post_json(
+                f"/api/head/nozzle/{nozzle_name}/move-absolute",
+                {"z": 0.0},
+                lambda up_ok, up_status, up_data: self._on_pick_step_raised(
+                    nozzle_name,
+                    on_done,
+                    up_ok,
+                    up_status,
+                    up_data,
+                    fail_cb,
+                ),
+            )
+
+        QTimer.singleShot(max(0, int(dwell_ms)), _raise_after_dwell)
+
+    def _on_pick_step_raised(
+        self,
+        nozzle_name: str,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+        fail_cb: Callable[[int, str, str], None],
+    ) -> None:
+        if not ok:
+            fail_cb(status, str(data.get("error", "request_failed")), "raise nozzle to Z=0.0 failed")
+            return
+
+        self._log_line(f"OK: pick step complete for nozzle {nozzle_name}")
+        self._tray_editor.show_status(f"Pick complete with nozzle {nozzle_name}.", ok=True)
+        self._poll_status()
+        on_done(True)
+
+    def _run_bottom_camera_step(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
+        nozzle_name = str(nozzle_name).strip().upper()
+        if not nozzle_name:
+            self._tray_editor.show_status("Bottom-camera step failed: nozzle not selected.", ok=False)
+            on_done(False)
+            return
+
+        self._api.post_json(
+            f"/api/nozzle/{nozzle_name}/move-to-bottom-camera",
+            None,
+            lambda ok, status, data: self._on_bottom_camera_moved(nozzle_name, on_done, ok, status, data),
+        )
+
+    def _run_bottom_vision_pipeline_placeholder(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
+        # Placeholder for future AOI/orientation pipeline at bottom camera.
+        self._log_line(
+            f"TODO: step 3 not implemented yet: run bottom vision pipeline for nozzle {nozzle_name}"
+        )
+        self._tray_editor.show_status(
+            "Step 3 placeholder: bottom vision pipeline TODO.",
+            ok=True,
+        )
+        on_done(True)
+
+    def _run_move_to_final_destination_placeholder(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
+        # Placeholder for future placement target planning and move/placement actions.
+        self._log_line(
+            f"TODO: step 4 not implemented yet: move nozzle {nozzle_name} to final destination"
+        )
+        self._tray_editor.show_status(
+            "Step 4 placeholder: final destination move TODO.",
+            ok=True,
+        )
+        on_done(True)
+
+    def _on_bottom_camera_moved(
+        self,
+        nozzle_name: str,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+    ) -> None:
+        if not ok:
+            err = str(data.get("error", "request_failed"))
+            self._log_line(f"ERR {status}: move {nozzle_name} to bottom camera failed: {err}")
+            self._tray_editor.show_status(f"Bottom-camera step failed: {err}", ok=False)
+            on_done(False)
+            return
+
+        self._api.post_json(
+            f"/api/head/nozzle/{nozzle_name}/move-standard-down",
+            None,
+            lambda down_ok, down_status, down_data: self._on_bottom_camera_down(
+                nozzle_name,
+                on_done,
+                down_ok,
+                down_status,
+                down_data,
+            ),
+        )
+
+    def _on_bottom_camera_down(
+        self,
+        nozzle_name: str,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+    ) -> None:
+        if not ok:
+            err = str(data.get("error", "request_failed"))
+            self._log_line(f"ERR {status}: bottom-camera down for {nozzle_name} failed: {err}")
+            self._tray_editor.show_status(f"Bottom-camera step failed: {err}", ok=False)
+            on_done(False)
+            return
+
+        self._log_line(f"OK: bottom-camera step complete for nozzle {nozzle_name}")
+        self._tray_editor.show_status(f"Bottom-camera step complete for nozzle {nozzle_name}.", ok=True)
+        self._poll_status()
+        on_done(True)
 
     def _set_tray_pick_from_camera(self, feeder_id: str) -> None:
         if self._current_x is None or self._current_y is None:
