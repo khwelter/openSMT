@@ -5110,7 +5110,11 @@ class ControlWindow(QMainWindow):
         )
         self._api.post_json(
             "/api/coord/move-xy",
-            {"x": cam_x, "y": cam_y},
+            {
+                "x": cam_x,
+                "y": cam_y,
+                "apply_xy_slack_compensation": False,
+            },
             lambda move_ok, move_status, move_data: self._on_pick_step_moved(
                 nozzle_name,
                 cam_x,

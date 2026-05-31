@@ -334,9 +334,18 @@ class CameraVisionModule:
         )
         await self._driver.jog_xy(dx, dy)
 
-    async def _coord_move_xy_with_safe_zone(self, x: float, y: float) -> None:
+    async def _coord_move_xy_with_safe_zone(
+        self,
+        x: float,
+        y: float,
+        *,
+        apply_xy_slack_compensation: bool = True,
+    ) -> None:
         await self._ensure_nozzles_safe_for_xy_move(target_x=float(x), target_y=float(y))
-        await self._driver.move_axes({"X": float(x), "Y": float(y)})
+        await self._driver.move_axes(
+            {"X": float(x), "Y": float(y)},
+            apply_xy_slack_compensation=apply_xy_slack_compensation,
+        )
 
     async def _nozzle_move_to_camera_with_safe_zone(
         self,
@@ -886,13 +895,18 @@ class CameraVisionModule:
             body = await request.json()
             x = float(body.get("x"))
             y = float(body.get("y"))
+            apply_slack = bool(body.get("apply_xy_slack_compensation", True))
         except (json.JSONDecodeError, TypeError, ValueError):
             return web.json_response({"error": "invalid_body"}, status=400)
 
         job_id, canceled_prev = self._submit_domain_command(
             "coord",
             f"coord_move_xy:{x}:{y}",
-            lambda tx=x, ty=y: self._coord_move_xy_with_safe_zone(tx, ty),
+            lambda tx=x, ty=y, asc=apply_slack: self._coord_move_xy_with_safe_zone(
+                tx,
+                ty,
+                apply_xy_slack_compensation=asc,
+            ),
         )
         return web.json_response({
             "status": "accepted",
@@ -900,6 +914,7 @@ class CameraVisionModule:
             "previous_job_canceled": canceled_prev,
             "x": x,
             "y": y,
+            "apply_xy_slack_compensation": apply_slack,
         })
 
     async def _api_coord_positions(self, request: web.Request) -> web.Response:
