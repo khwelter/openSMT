@@ -256,6 +256,35 @@ class HardwareDriver:
         for group in sorted(groups, key=_priority):
             await self.home_group(group)
 
+    async def home_xy_with_z_prehome(self) -> None:
+        """Home Z groups first, then XY groups.
+
+        This is used by the UI's "Home XY" action for machines that require
+        Z clearance before XY homing.
+        """
+        z_groups: list[str] = []
+        xy_groups: list[str] = []
+        for group, axes in self._home_groups.items():
+            has_z = any(str(axis).upper().startswith("Z") for axis in axes)
+            has_xy = any(str(axis).upper() in {"X", "Y"} for axis in axes)
+            if has_z:
+                z_groups.append(group)
+            if has_xy:
+                xy_groups.append(group)
+
+        seen: set[str] = set()
+        for group in sorted(z_groups):
+            if group in seen:
+                continue
+            seen.add(group)
+            await self.home_group(group)
+
+        for group in sorted(xy_groups):
+            if group in seen:
+                continue
+            seen.add(group)
+            await self.home_group(group)
+
     async def move_to_location(self, name: str) -> None:
         """Move to a named location from the LocationStore."""
         location = self._location_store.get(name)

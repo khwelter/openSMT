@@ -673,7 +673,11 @@ class CameraVisionModule:
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_home_xy(self, request: web.Request) -> web.Response:
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_home_xy", lambda: self._driver.home_group("XY"))
+        job_id, canceled_prev = self._submit_domain_command(
+            "coord",
+            "coord_home_xy",
+            self._driver.home_xy_with_z_prehome,
+        )
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_park(self, request: web.Request) -> web.Response:

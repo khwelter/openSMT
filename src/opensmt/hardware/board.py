@@ -153,7 +153,23 @@ class SerialBoard:
 
             await self._write_line(f"G28 {' '.join(gcode_letters)}")
 
-            coords = await self._wait_for_coords(timeout=180.0)
+            # Wait for command acknowledgment and then force motion completion.
+            # Some firmwares acknowledge G28 before homing is physically finished.
+            got_ok = await self._wait_for_ok(timeout=180.0)
+            if not got_ok:
+                raise RuntimeError(
+                    f"Board {self._config.board_id}: no OK after homing command 'G28 {' '.join(gcode_letters)}'"
+                )
+
+            await self._write_line("M400")
+            ok = await self._wait_for_ok(timeout=180.0)
+            if not ok:
+                raise RuntimeError(
+                    f"Board {self._config.board_id}: homing timeout (M400) for axes "
+                    + ", ".join(gcode_letters)
+                )
+
+            coords = await self.query_position(timeout=3.0)
             return coords if coords is not None else {}
 
     # ------------------------------------------------------------------
@@ -280,6 +296,7 @@ class SerialBoard:
                 break
             text = line.decode("utf-8", errors="replace").strip()
             self.last_rx = text
+            print(f"[{self._config.board_id}] RX: {text}")
             log.debug("[%s] RX: %s", self._config.board_id, text)
             await self._line_queue.put(text)
 
