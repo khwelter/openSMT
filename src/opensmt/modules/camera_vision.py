@@ -41,6 +41,7 @@ _COORD_AXES = ["X", "Y", "Z1", "R1", "Z2", "R2", "Z3", "R3", "Z4", "R4"]
 _LIGHT_MIN = 0
 _LIGHT_MAX = 3
 _UI_LIGHT_MAX = 2
+_CUSTOM_VISION_ACTIONS = {"circularMask", "findRectangles", "saveDiagnostic"}
 
 
 def _cv2_resolve_value(value: Any) -> Any:
@@ -79,16 +80,150 @@ def _cv2_to_bgr_for_preview(img: np.ndarray) -> np.ndarray:
     return img
 
 
+def _mm_to_px(radius_mm: float, runtime_params: dict[str, Any]) -> int:
+    dpcm_x = float(runtime_params.get("resolution_dpcm_x", 0.0) or 0.0)
+    dpcm_y = float(runtime_params.get("resolution_dpcm_y", 0.0) or 0.0)
+    if dpcm_x <= 0.0 and dpcm_y <= 0.0:
+        raise ValueError("resolution_unavailable_for_mm_conversion")
+    px_per_mm_x = dpcm_x / 10.0 if dpcm_x > 0.0 else 0.0
+    px_per_mm_y = dpcm_y / 10.0 if dpcm_y > 0.0 else 0.0
+    px_per_mm = px_per_mm_x if px_per_mm_y <= 0.0 else px_per_mm_y if px_per_mm_x <= 0.0 else ((px_per_mm_x + px_per_mm_y) / 2.0)
+    return max(1, int(round(float(radius_mm) * px_per_mm)))
+
+
+def _vision_action_circular_mask(
+    img: np.ndarray,
+    args: list[Any],
+    kwargs: dict[str, Any],
+    runtime_params: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    diameter_mm = float(kwargs.get("diameter_mm", args[0] if args else 1.0))
+    radius_px = _mm_to_px(max(0.001, diameter_mm) / 2.0, runtime_params)
+    h, w = img.shape[:2]
+    center = (w // 2, h // 2)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(mask, center, radius_px, 255, -1)
+    if len(img.shape) == 2:
+        masked = cv2.bitwise_and(img, img, mask=mask)
+    else:
+        masked = cv2.bitwise_and(img, img, mask=mask)
+    return masked, {"diameter_mm": diameter_mm, "radius_px": radius_px, "center": [center[0], center[1]]}
+
+
+def _vision_action_find_rectangles(
+    img: np.ndarray,
+    args: list[Any],
+    kwargs: dict[str, Any],
+    runtime_params: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    draw_all = bool(kwargs.get("draw_all_rectangles", args[0] if len(args) > 0 else True))
+    draw_closest = bool(kwargs.get("draw_closest_rectangle", args[1] if len(args) > 1 else True))
+    draw_line = bool(kwargs.get("draw_center_line", args[2] if len(args) > 2 else True))
+    min_aspect_ratio = float(kwargs.get("min_aspect_ratio", args[3] if len(args) > 3 else 1.0))
+    max_aspect_ratio = float(kwargs.get("max_aspect_ratio", args[4] if len(args) > 4 else 3.0))
+    if min_aspect_ratio > max_aspect_ratio:
+        min_aspect_ratio, max_aspect_ratio = max_aspect_ratio, min_aspect_ratio
+
+    preview = _cv2_to_bgr_for_preview(img).copy()
+    gray = cv2.cvtColor(preview, cv2.COLOR_BGR2GRAY)
+    if np.count_nonzero(gray) == 0:
+        return preview, {"rectangles": [], "closest_index": None, "min_aspect_ratio": min_aspect_ratio, "max_aspect_ratio": max_aspect_ratio}
+
+    _, binary = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+    contours, _hier = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    h, w = gray.shape[:2]
+    cx = w / 2.0
+    cy = h / 2.0
+    found: list[dict[str, Any]] = []
+    closest_index: int | None = None
+    closest_dist: float | None = None
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < 25.0:
+            continue
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.04 * peri, True)
+        if len(approx) != 4 or not cv2.isContourConvex(approx):
+            continue
+
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        box_i = np.int32(box)
+        center_x = float(rect[0][0])
+        center_y = float(rect[0][1])
+        width = float(rect[1][0])
+        height = float(rect[1][1])
+        min_side = min(width, height)
+        max_side = max(width, height)
+        if min_side <= 1e-9:
+            continue
+        aspect_ratio = max_side / min_side
+        if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
+            continue
+        distance = math.hypot(center_x - cx, center_y - cy)
+        found.append(
+            {
+                "center": [center_x, center_y],
+                "width_px": width,
+                "height_px": height,
+                "aspect_ratio": aspect_ratio,
+                "distance_to_center_px": distance,
+                "box": [[float(pt[0]), float(pt[1])] for pt in box],
+            }
+        )
+        idx = len(found) - 1
+        if closest_dist is None or distance < closest_dist:
+            closest_dist = distance
+            closest_index = idx
+
+        if draw_all:
+            cv2.polylines(preview, [box_i], True, (0, 180, 255), 2, cv2.LINE_AA)
+
+    if closest_index is not None and 0 <= closest_index < len(found):
+        closest = found[closest_index]
+        box_i = np.int32(np.array(closest["box"], dtype=np.float32))
+        ccx = int(round(float(closest["center"][0])))
+        ccy = int(round(float(closest["center"][1])))
+        if draw_closest:
+            cv2.polylines(preview, [box_i], True, (0, 255, 0), 3, cv2.LINE_AA)
+            cv2.circle(preview, (ccx, ccy), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        if draw_line:
+            cv2.line(preview, (int(round(cx)), int(round(cy))), (ccx, ccy), (255, 80, 80), 2, cv2.LINE_AA)
+
+    return preview, {
+        "rectangles": found,
+        "rectangle_count": len(found),
+        "closest_index": closest_index,
+        "min_aspect_ratio": min_aspect_ratio,
+        "max_aspect_ratio": max_aspect_ratio,
+    }
+
+
+def _vision_action_save_diagnostic(
+    img: np.ndarray,
+    args: list[Any],
+    kwargs: dict[str, Any],
+    runtime_params: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    stage = str(kwargs.get("stage", args[0] if args else "save"))
+    prefix = str(kwargs.get("prefix", runtime_params.get("diagnostic_prefix", "vision")))
+    return img, {"save_diagnostic": True, "save_stage": stage, "save_prefix": prefix}
+
+
 def _run_opencv_action_steps(
     frame: np.ndarray,
     steps: list[dict[str, Any]],
     *,
     preview_step: int | None = None,
     abort_checker: callable | None = None,
+    runtime_params: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any], list[np.ndarray]]:
     cur = frame.copy()
     history: list[np.ndarray] = []
     per_step: list[dict[str, Any]] = []
+    runtime = dict(runtime_params or {})
 
     for idx, step in enumerate(steps):
         if abort_checker is not None and abort_checker():
@@ -98,10 +233,6 @@ def _run_opencv_action_steps(
         op_name = str(step.get("op", "")).strip()
         if not op_name:
             raise ValueError(f"invalid_step_{idx}: missing op")
-
-        func = getattr(cv2, op_name, None)
-        if not callable(func):
-            raise ValueError(f"invalid_step_{idx}: unknown_op:{op_name}")
 
         raw_args = step.get("args", [])
         raw_kwargs = step.get("kwargs", {})
@@ -113,17 +244,28 @@ def _run_opencv_action_steps(
         args = [_cv2_resolve_value(v) for v in raw_args]
         kwargs = {str(k): _cv2_resolve_value(v) for k, v in raw_kwargs.items()}
 
-        try:
-            out = func(cur, *args, **kwargs)
-        except Exception as exc:
-            raise ValueError(f"opencv_step_failed_{idx}:{op_name}:{exc}") from exc
-
-        cur = _cv2_extract_image(out)
+        step_meta: dict[str, Any] = {}
+        if op_name == "circularMask":
+            cur, step_meta = _vision_action_circular_mask(cur, args, kwargs, runtime)
+        elif op_name == "findRectangles":
+            cur, step_meta = _vision_action_find_rectangles(cur, args, kwargs, runtime)
+        elif op_name == "saveDiagnostic":
+            cur, step_meta = _vision_action_save_diagnostic(cur, args, kwargs, runtime)
+        else:
+            func = getattr(cv2, op_name, None)
+            if not callable(func):
+                raise ValueError(f"invalid_step_{idx}: unknown_op:{op_name}")
+            try:
+                out = func(cur, *args, **kwargs)
+            except Exception as exc:
+                raise ValueError(f"opencv_step_failed_{idx}:{op_name}:{exc}") from exc
+            cur = _cv2_extract_image(out)
         history.append(cur.copy())
         per_step.append({
             "index": idx,
             "op": op_name,
             "shape": list(cur.shape),
+            **step_meta,
         })
 
     preview = cur
@@ -213,7 +355,12 @@ class OpenCVActionsPipeline(VisionPipelineBase):
         steps = [s for s in steps_raw if isinstance(s, dict)]
         preview_step = int(preview_step_raw) if preview_step_raw is not None else None
         try:
-            preview, result, _history = _run_opencv_action_steps(frame, steps, preview_step=preview_step)
+            preview, result, _history = _run_opencv_action_steps(
+                frame,
+                steps,
+                preview_step=preview_step,
+                runtime_params=params,
+            )
             return preview, result
         except Exception as exc:
             return frame, {"error": str(exc)}
@@ -739,7 +886,7 @@ class CameraVisionModule:
             if first not in {"src", "image", "img", "m", "mat", "src1"}:
                 continue
             ops.append(name)
-        return sorted(set(ops))
+        return sorted(set(ops).union(_CUSTOM_VISION_ACTIONS))
 
     def _default_green_nozzle_pipeline_steps(self) -> list[dict[str, Any]]:
         return [
@@ -759,10 +906,18 @@ class CameraVisionModule:
         preview_step: int | None,
         save_diagnostics: bool,
         prefix: str,
+        input_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         frame = await self._camera_frame_copy(camera_name)
         if frame is None:
             raise RuntimeError("camera_frame_unavailable")
+
+        state = self._cameras.get(str(camera_name).upper())
+        runtime_params = dict(input_params or {})
+        if state is not None:
+            runtime_params["resolution_dpcm_x"] = float(state.config.resolution_dpcm_x)
+            runtime_params["resolution_dpcm_y"] = float(state.config.resolution_dpcm_y)
+        runtime_params["diagnostic_prefix"] = prefix
 
         self._vision_abort_requested = False
         preview_frame, result, history = _run_opencv_action_steps(
@@ -770,14 +925,15 @@ class CameraVisionModule:
             steps,
             preview_step=preview_step,
             abort_checker=lambda: bool(self._vision_abort_requested),
+            runtime_params=runtime_params,
         )
 
-        state = self._cameras.get(str(camera_name).upper())
         if state is not None:
             state.active_pipeline = "OPENCV_ACTIONS"
             state.pipeline_params = {
                 "steps": copy.deepcopy(steps),
                 "preview_step": preview_step,
+                **runtime_params,
             }
             state.last_pipeline_result = dict(result)
 
@@ -791,23 +947,21 @@ class CameraVisionModule:
                     stage="input",
                 )
             )
-            for idx, img in enumerate(history):
+
+        for idx, step_info in enumerate(result.get("steps", [])):
+            if not isinstance(step_info, dict) or not step_info.get("save_diagnostic"):
+                continue
+            save_prefix = str(step_info.get("save_prefix", prefix) or prefix)
+            save_stage = str(step_info.get("save_stage", f"step_{idx:02d}") or f"step_{idx:02d}")
+            if 0 <= idx < len(history):
                 saved_files.append(
                     await self._save_diagnostic_image(
-                        _cv2_to_bgr_for_preview(img),
-                        prefix=prefix,
+                        _cv2_to_bgr_for_preview(history[idx]),
+                        prefix=save_prefix,
                         camera_name=camera_name,
-                        stage=f"step_{idx:02d}",
+                        stage=save_stage,
                     )
                 )
-            saved_files.append(
-                await self._save_diagnostic_image(
-                    preview_frame,
-                    prefix=prefix,
-                    camera_name=camera_name,
-                    stage="preview",
-                )
-            )
 
         return {
             "camera": str(camera_name).upper(),
@@ -1801,6 +1955,7 @@ class CameraVisionModule:
             camera = str(body.get("camera", "BOTTOM")).upper()
             steps = body.get("steps")
             preview_step_raw = body.get("preview_step")
+            input_params = body.get("input_params") if isinstance(body.get("input_params"), dict) else {}
         except Exception:
             return web.json_response({"error": "invalid_body"}, status=400)
 
@@ -1824,6 +1979,9 @@ class CameraVisionModule:
         state.pipeline_params = {
             "steps": copy.deepcopy([s for s in steps if isinstance(s, dict)]),
             "preview_step": preview_step,
+            **dict(input_params),
+            "resolution_dpcm_x": float(state.config.resolution_dpcm_x),
+            "resolution_dpcm_y": float(state.config.resolution_dpcm_y),
         }
         return web.json_response(
             {
@@ -1843,6 +2001,7 @@ class CameraVisionModule:
             preview_step_raw = body.get("preview_step")
             save_diagnostics = bool(body.get("save_diagnostics", True))
             prefix = str(body.get("prefix", "vision") or "vision")
+            input_params = body.get("input_params") if isinstance(body.get("input_params"), dict) else {}
         except Exception:
             return web.json_response({"error": "invalid_body"}, status=400)
 
@@ -1867,6 +2026,7 @@ class CameraVisionModule:
                 preview_step=preview_step,
                 save_diagnostics=save_diagnostics,
                 prefix=prefix,
+                input_params=dict(input_params),
             )
         except RuntimeError as exc:
             err = str(exc)

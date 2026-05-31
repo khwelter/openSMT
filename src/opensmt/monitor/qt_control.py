@@ -2076,6 +2076,9 @@ class VisionPipelineDialog(QDialog):
         "morphologyEx",
         "Canny",
         "threshold",
+        "saveDiagnostic",
+        "circularMask",
+        "findRectangles",
     ]
 
     def __init__(self, api: ControlApiClient, base_url: str, parent: QWidget | None = None) -> None:
@@ -2193,6 +2196,25 @@ class VisionPipelineDialog(QDialog):
         self._q_thresh.setValue(127.0)
         self._q_maxval.setValue(255.0)
 
+        self._q_circle_diam_mm = QDoubleSpinBox()
+        self._q_circle_diam_mm.setRange(0.001, 500.0)
+        self._q_circle_diam_mm.setDecimals(3)
+        self._q_circle_diam_mm.setValue(6.0)
+
+        self._q_rect_draw_all = QCheckBox("Draw all found rectangles")
+        self._q_rect_draw_closest = QCheckBox("Draw closest-to-center rectangle")
+        self._q_rect_draw_line = QCheckBox("Draw line from view center")
+        self._q_rect_aspect_min = QDoubleSpinBox()
+        self._q_rect_aspect_max = QDoubleSpinBox()
+        self._q_rect_draw_all.setChecked(True)
+        self._q_rect_draw_closest.setChecked(True)
+        self._q_rect_draw_line.setChecked(True)
+        for w, value in ((self._q_rect_aspect_min, 1.0), (self._q_rect_aspect_max, 3.0)):
+            w.setRange(0.001, 100.0)
+            w.setDecimals(3)
+            w.setSingleStep(0.1)
+            w.setValue(value)
+
         k_row = QWidget(); k_row_l = QHBoxLayout(k_row); k_row_l.setContentsMargins(0, 0, 0, 0); k_row_l.addWidget(QLabel("X")); k_row_l.addWidget(self._q_kernel_x); k_row_l.addWidget(QLabel("Y")); k_row_l.addWidget(self._q_kernel_y)
         low_row = QWidget(); low_row_l = QHBoxLayout(low_row); low_row_l.setContentsMargins(0, 0, 0, 0); low_row_l.addWidget(QLabel("H")); low_row_l.addWidget(self._q_low_h); low_row_l.addWidget(QLabel("S")); low_row_l.addWidget(self._q_low_s); low_row_l.addWidget(QLabel("V")); low_row_l.addWidget(self._q_low_v)
         high_row = QWidget(); high_row_l = QHBoxLayout(high_row); high_row_l.setContentsMargins(0, 0, 0, 0); high_row_l.addWidget(QLabel("H")); high_row_l.addWidget(self._q_high_h); high_row_l.addWidget(QLabel("S")); high_row_l.addWidget(self._q_high_s); high_row_l.addWidget(QLabel("V")); high_row_l.addWidget(self._q_high_v)
@@ -2204,6 +2226,14 @@ class VisionPipelineDialog(QDialog):
             "morphologyEx": [self._q_morph_op, self._q_morph_k],
             "Canny": [self._q_canny_t1, self._q_canny_t2],
             "threshold": [self._q_thresh, self._q_maxval, self._q_thresh_type],
+            "circularMask": [self._q_circle_diam_mm],
+            "findRectangles": [
+                self._q_rect_draw_all,
+                self._q_rect_draw_closest,
+                self._q_rect_draw_line,
+                self._q_rect_aspect_min,
+                self._q_rect_aspect_max,
+            ],
         }
 
         quick_layout.addRow("Kernel", k_row)
@@ -2218,6 +2248,12 @@ class VisionPipelineDialog(QDialog):
         quick_layout.addRow("Threshold", self._q_thresh)
         quick_layout.addRow("Max value", self._q_maxval)
         quick_layout.addRow("Thresh type", self._q_thresh_type)
+        quick_layout.addRow("Circle diameter (mm)", self._q_circle_diam_mm)
+        quick_layout.addRow(self._q_rect_draw_all)
+        quick_layout.addRow(self._q_rect_draw_closest)
+        quick_layout.addRow(self._q_rect_draw_line)
+        quick_layout.addRow("Aspect ratio min", self._q_rect_aspect_min)
+        quick_layout.addRow("Aspect ratio max", self._q_rect_aspect_max)
         self._btn_apply_quick = QPushButton("Apply Quick Params")
 
         self._args = QTextEdit()
@@ -2410,6 +2446,22 @@ class VisionPipelineDialog(QDialog):
             return {"op": op, "args": [60, 160], "kwargs": {}}
         if op == "threshold":
             return {"op": op, "args": [127, 255, "THRESH_BINARY"], "kwargs": {}}
+        if op == "saveDiagnostic":
+            return {"op": op, "args": [], "kwargs": {"stage": "original"}}
+        if op == "circularMask":
+            return {"op": op, "args": [6.0], "kwargs": {"diameter_mm": 6.0}}
+        if op == "findRectangles":
+            return {
+                "op": op,
+                "args": [],
+                "kwargs": {
+                    "draw_all_rectangles": True,
+                    "draw_closest_rectangle": True,
+                    "draw_center_line": True,
+                    "min_aspect_ratio": 1.0,
+                    "max_aspect_ratio": 3.0,
+                },
+            }
         return {"op": op, "args": [], "kwargs": {}}
 
     def _set_quick_visibility(self, op: str) -> None:
@@ -2427,6 +2479,7 @@ class VisionPipelineDialog(QDialog):
 
     def _sync_quick_from_step(self, op: str, step: dict[str, Any]) -> None:
         args = step.get("args", []) if isinstance(step.get("args", []), list) else []
+        kwargs = step.get("kwargs", {}) if isinstance(step.get("kwargs", {}), dict) else {}
         if op == "GaussianBlur" and len(args) >= 2:
             k = args[0] if isinstance(args[0], (list, tuple)) else [5, 5]
             if len(k) >= 2:
@@ -2468,6 +2521,18 @@ class VisionPipelineDialog(QDialog):
             idx = self._q_thresh_type.findText(str(args[2]))
             if idx >= 0:
                 self._q_thresh_type.setCurrentIndex(idx)
+            return
+        if op == "circularMask":
+            diameter = kwargs.get("diameter_mm", args[0] if args else 6.0)
+            self._q_circle_diam_mm.setValue(float(diameter))
+            return
+        if op == "findRectangles":
+            self._q_rect_draw_all.setChecked(bool(kwargs.get("draw_all_rectangles", True)))
+            self._q_rect_draw_closest.setChecked(bool(kwargs.get("draw_closest_rectangle", True)))
+            self._q_rect_draw_line.setChecked(bool(kwargs.get("draw_center_line", True)))
+            self._q_rect_aspect_min.setValue(float(kwargs.get("min_aspect_ratio", 1.0) or 1.0))
+            self._q_rect_aspect_max.setValue(float(kwargs.get("max_aspect_ratio", 3.0) or 3.0))
+            return
 
     def _apply_quick_params(self) -> None:
         row = self._steps_list.currentRow()
@@ -2497,13 +2562,35 @@ class VisionPipelineDialog(QDialog):
             args = [float(self._q_canny_t1.value()), float(self._q_canny_t2.value())]
         elif op == "threshold":
             args = [float(self._q_thresh.value()), float(self._q_maxval.value()), str(self._q_thresh_type.currentText())]
+        elif op == "circularMask":
+            diameter = float(self._q_circle_diam_mm.value())
+            args = [diameter]
+        elif op == "findRectangles":
+            args = []
         else:
             args = self._steps[row].get("args", [])
 
         self._steps[row]["args"] = args
-        self._steps[row]["kwargs"] = {}
+        if op == "circularMask":
+            self._steps[row]["kwargs"] = {"diameter_mm": float(self._q_circle_diam_mm.value())}
+        elif op == "findRectangles":
+            min_aspect = float(self._q_rect_aspect_min.value())
+            max_aspect = float(self._q_rect_aspect_max.value())
+            if min_aspect > max_aspect:
+                min_aspect, max_aspect = max_aspect, min_aspect
+                self._q_rect_aspect_min.setValue(min_aspect)
+                self._q_rect_aspect_max.setValue(max_aspect)
+            self._steps[row]["kwargs"] = {
+                "draw_all_rectangles": bool(self._q_rect_draw_all.isChecked()),
+                "draw_closest_rectangle": bool(self._q_rect_draw_closest.isChecked()),
+                "draw_center_line": bool(self._q_rect_draw_line.isChecked()),
+                "min_aspect_ratio": min_aspect,
+                "max_aspect_ratio": max_aspect,
+            }
+        else:
+            self._steps[row]["kwargs"] = {}
         self._args.setPlainText(json.dumps(args, indent=2))
-        self._kwargs.setPlainText("{}")
+        self._kwargs.setPlainText(json.dumps(self._steps[row].get("kwargs", {}), indent=2))
         self._set_status("Quick parameters applied")
 
     def _remove_action(self) -> None:
@@ -2562,7 +2649,7 @@ class VisionPipelineDialog(QDialog):
             "camera": self._camera_name,
             "steps": self._steps,
             "preview_step": (None if self._preview_step < 0 else self._preview_step),
-            "save_diagnostics": True,
+            "save_diagnostics": False,
             "prefix": f"vispip_{self.pipeline_name()}",
             "pipeline_name": self.pipeline_name(),
             "input_params": self.input_params(),
@@ -5972,7 +6059,7 @@ class ControlWindow(QMainWindow):
             "camera": "BOTTOM",
             "steps": steps,
             "preview_step": self._tray_editor.vision_preview_step(),
-            "save_diagnostics": True,
+            "save_diagnostics": False,
             "prefix": f"pick_step2_{str(nozzle_name).strip().upper()}",
             "pipeline_name": self._tray_editor.vision_pipeline_name(),
             "input_params": self._tray_editor.vision_input_params(),
