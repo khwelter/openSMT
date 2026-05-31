@@ -260,12 +260,36 @@ class SerialBoard:
 
             await self._write_line(f"G28 {' '.join(gcode_letters)}")
 
-            # Wait for command acknowledgment and then force motion completion.
-            # Some firmwares acknowledge G28 before homing is physically finished.
-            got_ok = await self._wait_for_ok(timeout=180.0)
-            if not got_ok:
+            # Firmware behavior differs for G28:
+            # - some send explicit OK
+            # - some primarily send coordinates
+            # Accept either as initial completion signal.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 180.0
+            saw_completion_signal = False
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    line = await asyncio.wait_for(self._line_queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+
+                if _BUSY_RE.search(line):
+                    continue
+
+                if _OK_RE.match(line.strip()):
+                    saw_completion_signal = True
+                    break
+
+                if _parse_coords(line):
+                    saw_completion_signal = True
+                    break
+
+            if not saw_completion_signal:
                 raise RuntimeError(
-                    f"Board {self._config.board_id}: no OK after homing command 'G28 {' '.join(gcode_letters)}'"
+                    f"Board {self._config.board_id}: no completion signal after homing command 'G28 {' '.join(gcode_letters)}'"
                 )
 
             await self._write_line("M400")
@@ -294,12 +318,25 @@ class SerialBoard:
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
+        busy_count = 0
         while True:
             line = await self._reader.readline()
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()
             self.last_rx = text
+
+            if _BUSY_RE.search(text):
+                busy_count += 1
+                # Avoid overwhelming stdout and log collectors when firmware is chatty.
+                if busy_count == 1 or busy_count % 50 == 0:
+                    print(f"[{self._config.board_id}] RX: echo:busy: processing (x{busy_count})")
+                continue
+
+            if busy_count:
+                print(f"[{self._config.board_id}] RX: busy burst ended (total {busy_count})")
+                busy_count = 0
+
             print(f"[{self._config.board_id}] RX: {text}")
             log.debug("[%s] RX: %s", self._config.board_id, text)
             await self._line_queue.put(text)
