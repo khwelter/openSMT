@@ -155,6 +155,11 @@ def _make_camera_pm(
     return pm
 
 
+def _opencv_color_code_names() -> list[str]:
+    names = [name for name in dir(cv2) if name.startswith("COLOR_") and isinstance(getattr(cv2, name, None), int)]
+    return sorted(set(names))
+
+
 def _make_arrow_pm(w: int = _ARROW_W, h: int = _ICON_SZ) -> QPixmap:
     key = f"__arrow@{w}x{h}"
     if key in _pm_cache:
@@ -2174,13 +2179,7 @@ class VisionPipelineDialog(QDialog):
         self._q_sigma.setValue(0.0)
 
         self._q_color_code = QComboBox()
-        self._q_color_code.addItems([
-            "COLOR_BGR2HSV",
-            "COLOR_BGR2GRAY",
-            "COLOR_GRAY2BGR",
-            "COLOR_BGR2RGB",
-            "COLOR_RGB2HSV",
-        ])
+        self._q_color_code.addItems(_opencv_color_code_names())
 
         self._q_low_h = QSpinBox(); self._q_low_s = QSpinBox(); self._q_low_v = QSpinBox()
         self._q_high_h = QSpinBox(); self._q_high_s = QSpinBox(); self._q_high_v = QSpinBox()
