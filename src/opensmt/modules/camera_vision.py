@@ -257,6 +257,107 @@ class CameraVisionModule:
         )
         return job_id, canceled_job_id
 
+    async def _ensure_nozzles_safe_for_xy_move(
+        self,
+        *,
+        target_x: float | None,
+        target_y: float | None,
+        move_distance_mm: float | None = None,
+        threshold_mm: float = 5.0,
+    ) -> None:
+        """Raise nozzles into safe zone before long XY moves.
+
+        Rule:
+        - If XY move distance is greater than threshold_mm, each nozzle with
+          current Z below its configured safe_zone_z is raised to safe_zone_z.
+        """
+        if self._nozzle_config_store is None:
+            return
+
+        if move_distance_mm is None:
+            cur_x = self._position_store.get("X")
+            cur_y = self._position_store.get("Y")
+            if cur_x is None or cur_y is None or target_x is None or target_y is None:
+                move_distance_mm = threshold_mm + 1.0
+            else:
+                move_distance_mm = math.hypot(float(target_x) - float(cur_x), float(target_y) - float(cur_y))
+
+        if float(move_distance_mm) <= float(threshold_mm):
+            return
+
+        for nozzle_name in self._nozzle_config_store.names():
+            cfg = self._nozzle_config_store.get(nozzle_name)
+            if cfg is None:
+                continue
+
+            cur_z = self._position_store.get(cfg.z_axis)
+            if cur_z is None:
+                continue
+
+            safe_z_cfg = float(getattr(cfg, "safe_zone_z", -10.0))
+            safe_z = min(max(safe_z_cfg, float(cfg.min_z)), float(cfg.max_z))
+
+            # More negative means deeper down. Raise when currently below safe zone.
+            if float(cur_z) < safe_z:
+                print(
+                    f"[SAFE ZONE] lift {cfg.name} axis={cfg.z_axis} "
+                    f"from {float(cur_z):.3f} to {safe_z:.3f} before XY move {float(move_distance_mm):.3f} mm"
+                )
+                await self._driver.move_axis(cfg.z_axis, safe_z)
+
+    async def _move_to_location_with_safe_zone(self, location_name: str) -> None:
+        location = self._location_store.get(location_name)
+        target_x: float | None = None
+        target_y: float | None = None
+        if isinstance(location, dict):
+            try:
+                if location.get("X") is not None:
+                    target_x = float(location.get("X"))
+                if location.get("Y") is not None:
+                    target_y = float(location.get("Y"))
+            except Exception:
+                target_x = None
+                target_y = None
+
+        await self._ensure_nozzles_safe_for_xy_move(target_x=target_x, target_y=target_y)
+        await self._driver.move_to_location(location_name)
+
+    async def _coord_jog_with_safe_zone(self, dx: float, dy: float) -> None:
+        cur_x = self._position_store.get("X")
+        cur_y = self._position_store.get("Y")
+        target_x = (float(cur_x) + float(dx)) if cur_x is not None else None
+        target_y = (float(cur_y) + float(dy)) if cur_y is not None else None
+        await self._ensure_nozzles_safe_for_xy_move(
+            target_x=target_x,
+            target_y=target_y,
+            move_distance_mm=math.hypot(float(dx), float(dy)),
+        )
+        await self._driver.jog_xy(dx, dy)
+
+    async def _coord_move_xy_with_safe_zone(self, x: float, y: float) -> None:
+        await self._ensure_nozzles_safe_for_xy_move(target_x=float(x), target_y=float(y))
+        await self._driver.move_axes({"X": float(x), "Y": float(y)})
+
+    async def _nozzle_move_to_camera_with_safe_zone(
+        self,
+        nozzle_cfg: NozzleConfig,
+        camera_xy: tuple[float, float],
+    ) -> None:
+        cam_x, cam_y = camera_xy
+        target_x = float(cam_x) - float(nozzle_cfg.offset_x)
+        target_y = float(cam_y) - float(nozzle_cfg.offset_y)
+        await self._ensure_nozzles_safe_for_xy_move(target_x=target_x, target_y=target_y)
+        await self._driver.jog_nozzle_to_camera_position(nozzle_cfg, (float(cam_x), float(cam_y)))
+
+    async def _camera_move_to_nozzle_with_safe_zone(
+        self,
+        nozzle_cfg: NozzleConfig,
+        nozzle_xy: tuple[float, float],
+    ) -> None:
+        target_x, target_y = nozzle_xy
+        await self._ensure_nozzles_safe_for_xy_move(target_x=float(target_x), target_y=float(target_y))
+        await self._driver.jog_camera_to_nozzle_position(nozzle_cfg, (float(target_x), float(target_y)))
+
     async def start(self) -> None:
         for state in self._cameras.values():
             await self._open_camera(state)
@@ -694,7 +795,7 @@ class CameraVisionModule:
         job_id, canceled_prev = self._submit_domain_command(
             "coord",
             "coord_jog_xy",
-            lambda x=dx, y=dy: self._driver.jog_xy(x, y),
+            lambda x=dx, y=dy: self._coord_jog_with_safe_zone(x, y),
         )
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev, "dx": dx, "dy": dy})
 
@@ -713,37 +814,37 @@ class CameraVisionModule:
     async def _api_coord_park(self, request: web.Request) -> web.Response:
         if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
             return web.json_response({"error": "xy_not_homed"}, status=409)
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:park", lambda: self._driver.move_to_location("park"))
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:park", lambda: self._move_to_location_with_safe_zone("park"))
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_dispose(self, request: web.Request) -> web.Response:
         if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
             return web.json_response({"error": "xy_not_homed"}, status=409)
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:dispose", lambda: self._driver.move_to_location("dispose"))
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:dispose", lambda: self._move_to_location_with_safe_zone("dispose"))
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_homing_fiducial_main(self, request: web.Request) -> web.Response:
         if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
             return web.json_response({"error": "xy_not_homed"}, status=409)
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:fiducial_main", lambda: self._driver.move_to_location("fiducial_main"))
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:fiducial_main", lambda: self._move_to_location_with_safe_zone("fiducial_main"))
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_secondary_fiducial(self, request: web.Request) -> web.Response:
         if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
             return web.json_response({"error": "xy_not_homed"}, status=409)
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:fiducial_second", lambda: self._driver.move_to_location("fiducial_second"))
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:fiducial_second", lambda: self._move_to_location_with_safe_zone("fiducial_second"))
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_nozzle_change(self, request: web.Request) -> web.Response:
         if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
             return web.json_response({"error": "xy_not_homed"}, status=409)
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:nozzle_change", lambda: self._driver.move_to_location("nozzle_change"))
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:nozzle_change", lambda: self._move_to_location_with_safe_zone("nozzle_change"))
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_calibration_spot(self, request: web.Request) -> web.Response:
         if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
             return web.json_response({"error": "xy_not_homed"}, status=409)
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:calibration_spot", lambda: self._driver.move_to_location("calibration_spot"))
+        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:calibration_spot", lambda: self._move_to_location_with_safe_zone("calibration_spot"))
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_set_home_here(self, request: web.Request) -> web.Response:
@@ -791,7 +892,7 @@ class CameraVisionModule:
         job_id, canceled_prev = self._submit_domain_command(
             "coord",
             f"coord_move_xy:{x}:{y}",
-            lambda tx=x, ty=y: self._driver.move_axes({"X": tx, "Y": ty}),
+            lambda tx=x, ty=y: self._coord_move_xy_with_safe_zone(tx, ty),
         )
         return web.json_response({
             "status": "accepted",
@@ -1192,6 +1293,7 @@ class CameraVisionModule:
                 item["offset_y"] = float(cfg.offset_y)
                 item["tip_id"] = cfg.tip_id
                 item["standard_down_z"] = float(cfg.standard_down_z) if cfg.standard_down_z is not None else None
+                item["safe_zone_z"] = float(cfg.safe_zone_z)
                 item["vacuum_valve"] = {
                     "board": cfg.vacuum_valve.board,
                     "io_type": cfg.vacuum_valve.io_type,
@@ -1685,7 +1787,7 @@ class CameraVisionModule:
         job_id, canceled_prev = self._submit_domain_command(
             "nozzle",
             f"nozzle_move_to_camera:{nozzle_name}",
-            lambda: self._driver.jog_nozzle_to_camera_position(
+            lambda: self._nozzle_move_to_camera_with_safe_zone(
                 nozzle_cfg, (cam_x, cam_y)
             ),
         )
@@ -1737,7 +1839,7 @@ class CameraVisionModule:
         job_id, canceled_prev = self._submit_domain_command(
             "nozzle",
             f"nozzle_move_to_bottom_camera:{nozzle_name}",
-            lambda: self._driver.jog_nozzle_to_camera_position(
+            lambda: self._nozzle_move_to_camera_with_safe_zone(
                 nozzle_cfg, (cam_x, cam_y)
             ),
         )
@@ -1791,7 +1893,7 @@ class CameraVisionModule:
         job_id, canceled_prev = self._submit_domain_command(
             "nozzle",
             f"nozzle_move_camera_here:{nozzle_name}",
-            lambda: self._driver.jog_camera_to_nozzle_position(
+            lambda: self._camera_move_to_nozzle_with_safe_zone(
                 nozzle_cfg, (nozzle_x, nozzle_y)
             ),
         )

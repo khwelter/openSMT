@@ -94,6 +94,7 @@ class HardwareDriver:
             for name, axes in config.get("home_groups", {}).items()
         }
         self._homed_axes: set[str] = set()
+        self._xy_slack_comp_mm: float = float(config.get("xy_slack_compensation_mm", 1.0))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -127,7 +128,7 @@ class HardwareDriver:
         await board.move([(cfg.gcode_letter, position)], velocity)
         await self._position_store.update(axis, position)
 
-    async def move_axes(self, moves: dict[str, float]) -> None:
+    async def move_axes(self, moves: dict[str, float], *, apply_xy_slack_compensation: bool = True) -> None:
         """Move multiple logical axes.
 
         Axes on the same board are moved simultaneously (single G0 command).
@@ -140,44 +141,70 @@ class HardwareDriver:
             if axis in {"X", "Y"} and axis not in self._homed_axes:
                 raise RuntimeError(f"Axis {axis} must be homed before movement")
 
-        # Group by board
-        by_board: dict[str, list[tuple[str, str, float]]] = {}
-        for axis, position in axes.items():
-            cfg = self._axes.get(axis)
-            if cfg is None:
-                raise ValueError(f"Unknown axis: {axis}")
-            by_board.setdefault(cfg.board_id, []).append(
-                (axis, cfg.gcode_letter, position)
-            )
+        async def _execute_absolute_axes(target_axes: dict[str, float]) -> None:
+            # Group by board
+            by_board: dict[str, list[tuple[str, str, float]]] = {}
+            for axis, position in target_axes.items():
+                cfg = self._axes.get(axis)
+                if cfg is None:
+                    raise ValueError(f"Unknown axis: {axis}")
+                by_board.setdefault(cfg.board_id, []).append(
+                    (axis, cfg.gcode_letter, position)
+                )
 
-        # Execute per-board groups in parallel
-        async def _run_board(board_id: str, triplets: list[tuple[str, str, float]]) -> None:
-            board = self._boards.get(board_id)
-            if board is None:
-                raise ValueError(f"Board not found: {board_id}")
-            velocity = (
-                min(self._axes[ax].velocity for ax, _, _ in triplets)
-                * self._speed_factor / 100.0
-            )
-            axis_moves = [(letter, pos) for _, letter, pos in triplets]
-            await board.move(axis_moves, velocity)
+            # Execute per-board groups in parallel
+            async def _run_board(board_id: str, triplets: list[tuple[str, str, float]]) -> None:
+                board = self._boards.get(board_id)
+                if board is None:
+                    raise ValueError(f"Board not found: {board_id}")
+                velocity = (
+                    min(self._axes[ax].velocity for ax, _, _ in triplets)
+                    * self._speed_factor / 100.0
+                )
+                axis_moves = [(letter, pos) for _, letter, pos in triplets]
+                await board.move(axis_moves, velocity)
 
-        tasks = [
-            asyncio.create_task(_run_board(board_id, triplets))
-            for board_id, triplets in by_board.items()
-        ]
-        if tasks:
-            await asyncio.gather(*tasks)
+            tasks = [
+                asyncio.create_task(_run_board(board_id, triplets))
+                for board_id, triplets in by_board.items()
+            ]
+            if tasks:
+                await asyncio.gather(*tasks)
 
-        # Update PositionStore (all boards confirmed)
-        for axis, position in axes.items():
-            await self._position_store.update(axis, position)
+            # Update PositionStore (all boards confirmed)
+            for axis, position in target_axes.items():
+                await self._position_store.update(axis, position)
+
+        # XY slack compensation: when an XY axis moves in negative direction,
+        # first overshoot by -1 mm on that axis, then settle at final target.
+        only_xy_move = all(axis in {"X", "Y"} for axis in axes)
+        if apply_xy_slack_compensation and only_xy_move and self._xy_slack_comp_mm > 0.0:
+            pre_target = dict(axes)
+            needs_compensation = False
+            for axis in ("X", "Y"):
+                if axis not in axes:
+                    continue
+                current = self._position_store.get(axis)
+                if current is None:
+                    continue
+                target = float(axes[axis])
+                if target < float(current):
+                    pre_target[axis] = target - self._xy_slack_comp_mm
+                    needs_compensation = True
+
+            if needs_compensation:
+                await _execute_absolute_axes(pre_target)
+
+        await _execute_absolute_axes(axes)
 
     async def jog_xy(self, dx: float, dy: float) -> None:
         """Move X and Y by relative amounts from their current positions."""
         current_x = self._position_store.get("X") or 0.0
         current_y = self._position_store.get("Y") or 0.0
-        await self.move_axes({"X": current_x + dx, "Y": current_y + dy})
+        await self.move_axes(
+            {"X": current_x + dx, "Y": current_y + dy},
+            apply_xy_slack_compensation=False,
+        )
 
     async def home_group(self, group: str) -> None:
         """Home a named group of axes (e.g. 'XY', 'Z1Z2', 'Z3Z4')."""

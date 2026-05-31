@@ -1,6 +1,7 @@
 {
   "driver": {
     "speed_factor": 100.0,
+    "xy_slack_compensation_mm": 1.0,
     "default_velocity": 25000.0,
     "default_homing_velocity": 5000.0,
 

@@ -123,6 +123,9 @@ async def run_from_config(config_path: str) -> None:
                 pin=int(air_cfg_dict.get("pin", 0)),
             )
 
+        safe_zone_raw = item.get("safe_zone_z")
+        safe_zone_z = float(safe_zone_raw) if safe_zone_raw is not None else -10.0
+
         nozzle_cfg = NozzleConfig(
             name=str(item["name"]),
             z_axis=str(item["z_axis"]),
@@ -133,6 +136,7 @@ async def run_from_config(config_path: str) -> None:
             vacuum_valve=vacuum_cfg,
             tip_id=str(item.get("tip_id")) if item.get("tip_id") is not None else None,
             standard_down_z=(float(item.get("standard_down_z")) if item.get("standard_down_z") is not None else None),
+            safe_zone_z=safe_zone_z,
             air_valve=air_cfg,
         )
         nozzle_configs.append(nozzle_cfg)

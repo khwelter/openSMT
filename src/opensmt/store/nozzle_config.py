@@ -25,6 +25,7 @@ class NozzleConfig:
     vacuum_valve: ValveConfig  # Always present
     tip_id: str | None = None  # e.g. "501" (Juki 500-series tip id)
     standard_down_z: float | None = None  # PCB placement level for current tip/nozzle
+    safe_zone_z: float = -10.0  # Z level above which XY movement is considered safe
     air_valve: ValveConfig | None = None  # Optional pressurized air valve
 
 
