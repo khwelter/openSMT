@@ -132,46 +132,6 @@ class SerialBoard:
                     + ", ".join(letter for letter, _ in axis_moves)
                 )
 
-    async def home(
-        self,
-        gcode_letters: list[str],
-        homing_velocities: dict[str, float],
-    ) -> dict[str, float]:
-        """Home the given GCode axes.
-
-        Returns a dict of gcode_letter → position as reported by the firmware.
-        Empty dict if the firmware did not send a coordinate report.
-        """
-        async with self._lock:
-            m210_parts = [
-                f"{letter}{homing_velocities[letter]:g}"
-                for letter in gcode_letters
-                if letter in homing_velocities
-            ]
-            if m210_parts:
-                await self._write_line(f"M210 {' '.join(m210_parts)}")
-
-            await self._write_line(f"G28 {' '.join(gcode_letters)}")
-
-            # Wait for command acknowledgment and then force motion completion.
-            # Some firmwares acknowledge G28 before homing is physically finished.
-            got_ok = await self._wait_for_ok(timeout=180.0)
-            if not got_ok:
-                raise RuntimeError(
-                    f"Board {self._config.board_id}: no OK after homing command 'G28 {' '.join(gcode_letters)}'"
-                )
-
-            await self._write_line("M400")
-            ok = await self._wait_for_ok(timeout=180.0)
-            if not ok:
-                raise RuntimeError(
-                    f"Board {self._config.board_id}: homing timeout (M400) for axes "
-                    + ", ".join(gcode_letters)
-                )
-
-            coords = await self.query_position(timeout=3.0)
-            return coords if coords is not None else {}
-
     # ------------------------------------------------------------------
     # IO
     # ------------------------------------------------------------------
@@ -236,44 +196,88 @@ class SerialBoard:
         Returns GCode-letter keyed coordinates (e.g. {"X": 10.0, "Y": 20.0}).
         """
         async with self._lock:
-            # Drop stale lines so we evaluate the fresh M114 answer only.
-            while True:
-                try:
-                    self._line_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            return await self._query_position_locked(timeout=timeout)
 
-            await self._write_line("M114")
+    async def _query_position_locked(self, timeout: float = 2.0) -> dict[str, float] | None:
+        """Query current firmware position via M114 while the board lock is held."""
+        # Drop stale lines so we evaluate the fresh M114 answer only.
+        while True:
+            try:
+                self._line_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + max(0.1, float(timeout))
-            coords: dict[str, float] | None = None
-            saw_ok = False
+        await self._write_line("M114")
 
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                try:
-                    line = await asyncio.wait_for(self._line_queue.get(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.1, float(timeout))
+        coords: dict[str, float] | None = None
+        saw_ok = False
 
-                if _BUSY_RE.search(line):
-                    continue
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                line = await asyncio.wait_for(self._line_queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
 
-                parsed = _parse_coords(line)
-                if parsed:
-                    coords = parsed
+            if _BUSY_RE.search(line):
+                continue
 
-                if _OK_RE.match(line.strip()):
-                    saw_ok = True
+            parsed = _parse_coords(line)
+            if parsed:
+                coords = parsed
 
-                if coords is not None and saw_ok:
-                    return coords
+            if _OK_RE.match(line.strip()):
+                saw_ok = True
 
-            # Some firmware variants emit coords without an explicit trailing OK.
-            return coords
+            if coords is not None and saw_ok:
+                return coords
+
+        # Some firmware variants emit coords without an explicit trailing OK.
+        return coords
+
+    async def home(
+        self,
+        gcode_letters: list[str],
+        homing_velocities: dict[str, float],
+    ) -> dict[str, float]:
+        """Home the given GCode axes.
+
+        Returns a dict of gcode_letter → position as reported by the firmware.
+        Empty dict if the firmware did not send a coordinate report.
+        """
+        async with self._lock:
+            m210_parts = [
+                f"{letter}{homing_velocities[letter]:g}"
+                for letter in gcode_letters
+                if letter in homing_velocities
+            ]
+            if m210_parts:
+                await self._write_line(f"M210 {' '.join(m210_parts)}")
+
+            await self._write_line(f"G28 {' '.join(gcode_letters)}")
+
+            # Wait for command acknowledgment and then force motion completion.
+            # Some firmwares acknowledge G28 before homing is physically finished.
+            got_ok = await self._wait_for_ok(timeout=180.0)
+            if not got_ok:
+                raise RuntimeError(
+                    f"Board {self._config.board_id}: no OK after homing command 'G28 {' '.join(gcode_letters)}'"
+                )
+
+            await self._write_line("M400")
+            ok = await self._wait_for_ok(timeout=180.0)
+            if not ok:
+                raise RuntimeError(
+                    f"Board {self._config.board_id}: homing timeout (M400) for axes "
+                    + ", ".join(gcode_letters)
+                )
+
+            coords = await self._query_position_locked(timeout=3.0)
+            return coords if coords is not None else {}
 
     # ------------------------------------------------------------------
     # Internal helpers
