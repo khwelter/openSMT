@@ -250,7 +250,12 @@ class CameraVisionModule:
         command: callable,
     ) -> tuple[str, str | None]:
         canceled_job_id = self._cancel_latest_active_domain_job(domain)
-        return self._commands.submit(name, command), canceled_job_id
+        job_id = self._commands.submit(name, command)
+        print(
+            f"[CMD QUEUE] domain={domain} name={name} job_id={job_id} "
+            f"canceled_prev={canceled_job_id}"
+        )
+        return job_id, canceled_job_id
 
     async def start(self) -> None:
         for state in self._cameras.values():
@@ -444,7 +449,24 @@ class CameraVisionModule:
     # ------------------------------------------------------------------
 
     async def _start_web(self) -> None:
-        app = web.Application()
+        @web.middleware
+        async def _trace_api_requests(
+            request: web.Request,
+            handler: callable,
+        ) -> web.StreamResponse:
+            if request.path.startswith("/api/"):
+                print(f"[API RX] {request.method} {request.path}")
+            try:
+                response = await handler(request)
+                if request.path.startswith("/api/"):
+                    print(f"[API TX] {request.method} {request.path} -> {response.status}")
+                return response
+            except web.HTTPException as exc:
+                if request.path.startswith("/api/"):
+                    print(f"[API TX] {request.method} {request.path} -> {exc.status}")
+                raise
+
+        app = web.Application(middlewares=[_trace_api_requests])
         app.router.add_get("/thumb/{name}", self._web_thumb)
         app.router.add_post("/api/coord/jog", self._api_coord_jog)
         app.router.add_post("/api/coord/home", self._api_coord_home)
