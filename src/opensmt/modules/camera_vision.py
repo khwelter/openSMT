@@ -135,8 +135,6 @@ def _vision_action_find_rectangles(
         return preview, {"rectangles": [], "closest_index": None, "min_aspect_ratio": min_aspect_ratio, "max_aspect_ratio": max_aspect_ratio}
 
     _, binary = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
-    contours, _hier = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
     h, w = gray.shape[:2]
     cx = w / 2.0
     cy = h / 2.0
@@ -144,30 +142,37 @@ def _vision_action_find_rectangles(
     closest_index: int | None = None
     closest_dist: float | None = None
 
-    for contour in contours:
-        area = cv2.contourArea(contour)
+    num_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    for label in range(1, int(num_labels)):
+        area = float(stats[label, cv2.CC_STAT_AREA])
         if area < 25.0:
             continue
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.04 * peri, True)
-        if len(approx) != 4 or not cv2.isContourConvex(approx):
+
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        width = float(stats[label, cv2.CC_STAT_WIDTH])
+        height = float(stats[label, cv2.CC_STAT_HEIGHT])
+        if width <= 1e-9 or height <= 1e-9:
             continue
 
-        rect = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(rect)
-        box_i = np.int32(box)
-        center_x = float(rect[0][0])
-        center_y = float(rect[0][1])
-        width = float(rect[1][0])
-        height = float(rect[1][1])
+        center_x = float(centroids[label][0])
+        center_y = float(centroids[label][1])
         min_side = min(width, height)
         max_side = max(width, height)
-        if min_side <= 1e-9:
-            continue
         aspect_ratio = max_side / min_side
         if aspect_ratio < min_aspect_ratio or aspect_ratio > max_aspect_ratio:
             continue
         distance = math.hypot(center_x - cx, center_y - cy)
+        box_i = np.array(
+            [
+                [x, y],
+                [x + int(width) - 1, y],
+                [x + int(width) - 1, y + int(height) - 1],
+                [x, y + int(height) - 1],
+            ],
+            dtype=np.int32,
+        )
         found.append(
             {
                 "center": [center_x, center_y],
@@ -175,7 +180,7 @@ def _vision_action_find_rectangles(
                 "height_px": height,
                 "aspect_ratio": aspect_ratio,
                 "distance_to_center_px": distance,
-                "box": [[float(pt[0]), float(pt[1])] for pt in box],
+                "box": [[float(pt[0]), float(pt[1])] for pt in box_i],
             }
         )
         idx = len(found) - 1
