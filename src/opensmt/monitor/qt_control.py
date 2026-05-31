@@ -2069,11 +2069,20 @@ class StepperPopup(QDialog):
 class VisionPipelineDialog(QDialog):
     """Modal editor/debugger for vision pipelines (vispip)."""
 
+    _DEFAULT_ACTIONS: list[str] = [
+        "GaussianBlur",
+        "cvtColor",
+        "inRange",
+        "morphologyEx",
+        "Canny",
+        "threshold",
+    ]
+
     def __init__(self, api: ControlApiClient, base_url: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Vision Pipeline Editor")
         self.setModal(True)
-        self.resize(1180, 760)
+        self.resize(1120, 640)
 
         self._api = api
         self._base_url = base_url.rstrip("/")
@@ -2084,7 +2093,7 @@ class VisionPipelineDialog(QDialog):
 
         self._camera_name = "BOTTOM"
         self._steps: list[dict[str, Any]] = []
-        self._actions: list[str] = []
+        self._actions: list[str] = list(self._DEFAULT_ACTIONS)
         self._preview_step = -1
 
         meta_box = QGroupBox("Pipeline Metadata")
@@ -2104,6 +2113,8 @@ class VisionPipelineDialog(QDialog):
         actions_layout = QVBoxLayout(actions_box)
         add_row = QHBoxLayout()
         self._action_pick = QComboBox()
+        self._action_pick.setMinimumWidth(220)
+        self._action_pick.addItems(self._actions)
         self._btn_add = QPushButton("Add")
         self._btn_del = QPushButton("Remove")
         self._btn_up = QPushButton("Up")
@@ -2243,7 +2254,7 @@ class VisionPipelineDialog(QDialog):
         nav.addWidget(self._preview_label)
         self._img = QLabel("No image")
         self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._img.setMinimumSize(620, 460)
+        self._img.setMinimumSize(620, 340)
         self._img.setStyleSheet("QLabel { background:#0b111b; color:#9bb3d1; border:1px solid #243044; }")
         self._status = QLabel("Idle")
         result_layout.addLayout(nav)
@@ -2255,6 +2266,8 @@ class VisionPipelineDialog(QDialog):
         main_split.addWidget(result_box)
         main_split.setStretchFactor(0, 1)
         main_split.setStretchFactor(1, 2)
+        main_split.setSizes([340, 760])
+        left_split.setSizes([300, 220])
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -2325,12 +2338,18 @@ class VisionPipelineDialog(QDialog):
 
     def _on_actions_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
         if not ok:
-            self._set_status(f"Failed loading OpenCV actions ({status}): {data.get('error', 'request_failed')}")
+            self._action_pick.clear()
+            self._action_pick.addItems(self._actions)
+            self._action_pick.setCurrentIndex(0 if self._action_pick.count() > 0 else -1)
+            self._set_status(f"Using built-in action list. OpenCV action fetch failed ({status}): {data.get('error', 'request_failed')}")
             return
         values = data.get("actions") if isinstance(data.get("actions"), list) else []
-        self._actions = [str(v) for v in values if str(v).strip()]
+        loaded = [str(v) for v in values if str(v).strip()]
+        self._actions = sorted(set(self._DEFAULT_ACTIONS + loaded))
         self._action_pick.clear()
         self._action_pick.addItems(self._actions)
+        self._action_pick.setCurrentIndex(0 if self._action_pick.count() > 0 else -1)
+        self._set_status(f"Loaded {len(self._actions)} vision actions")
 
     def _rebuild_steps_list(self) -> None:
         self._steps_list.clear()
@@ -2366,10 +2385,16 @@ class VisionPipelineDialog(QDialog):
     def _add_action(self) -> None:
         op = str(self._action_pick.currentText()).strip()
         if not op:
+            if self._action_pick.count() > 0:
+                self._action_pick.setCurrentIndex(0)
+                op = str(self._action_pick.currentText()).strip()
+        if not op:
+            self._set_status("No vision action available to add")
             return
         self._steps.append(self._default_step_for_op(op))
         self._rebuild_steps_list()
         self._steps_list.setCurrentRow(len(self._steps) - 1)
+        self._set_status(f"Added action: {op}")
 
     def _default_step_for_op(self, op: str) -> dict[str, Any]:
         op = str(op)
