@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-import cv2
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -154,11 +153,6 @@ def _make_camera_pm(
 
     _pm_cache[key] = pm
     return pm
-
-
-def _opencv_color_code_names() -> list[str]:
-    names = [name for name in dir(cv2) if name.startswith("COLOR_") and isinstance(getattr(cv2, name, None), int)]
-    return sorted(set(names))
 
 
 def _make_arrow_pm(w: int = _ARROW_W, h: int = _ICON_SZ) -> QPixmap:
@@ -2087,6 +2081,20 @@ class VisionPipelineDialog(QDialog):
         "findRectangles",
     ]
 
+    _DEFAULT_COLOR_CODES: list[str] = [
+        "COLOR_BGR2RGB",
+        "COLOR_BGR2GRAY",
+        "COLOR_BGR2HSV",
+        "COLOR_BGR2HLS",
+        "COLOR_BGR2LAB",
+        "COLOR_BGR2YCrCb",
+        "COLOR_GRAY2BGR",
+        "COLOR_GRAY2RGB",
+        "COLOR_RGB2BGR",
+        "COLOR_RGB2GRAY",
+        "COLOR_RGB2HSV",
+    ]
+
     def __init__(self, api: ControlApiClient, base_url: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Vision Pipeline Editor")
@@ -2180,7 +2188,7 @@ class VisionPipelineDialog(QDialog):
         self._q_sigma.setValue(0.0)
 
         self._q_color_code = QComboBox()
-        self._q_color_code.addItems(_opencv_color_code_names())
+        self._q_color_code.addItems(self._DEFAULT_COLOR_CODES)
 
         self._q_low_h = QSpinBox(); self._q_low_s = QSpinBox(); self._q_low_v = QSpinBox()
         self._q_high_h = QSpinBox(); self._q_high_s = QSpinBox(); self._q_high_v = QSpinBox()
@@ -2408,6 +2416,16 @@ class VisionPipelineDialog(QDialog):
         self._action_pick.clear()
         self._action_pick.addItems(self._actions)
         self._action_pick.setCurrentIndex(0 if self._action_pick.count() > 0 else -1)
+        color_codes = data.get("color_codes") if isinstance(data.get("color_codes"), list) else []
+        loaded_colors = [str(v) for v in color_codes if str(v).strip().startswith("COLOR_")]
+        if loaded_colors:
+            current = self._q_color_code.currentText()
+            self._q_color_code.clear()
+            self._q_color_code.addItems(sorted(set(loaded_colors)))
+            if current:
+                idx = self._q_color_code.findText(current)
+                if idx >= 0:
+                    self._q_color_code.setCurrentIndex(idx)
         self._set_status(f"Loaded {len(self._actions)} vision actions")
 
     def _rebuild_steps_list(self) -> None:

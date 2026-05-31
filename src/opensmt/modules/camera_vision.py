@@ -80,6 +80,11 @@ def _cv2_to_bgr_for_preview(img: np.ndarray) -> np.ndarray:
     return img
 
 
+def _cv2_color_code_names() -> list[str]:
+    names = [name for name in dir(cv2) if name.startswith("COLOR_") and isinstance(getattr(cv2, name, None), int)]
+    return sorted(set(names))
+
+
 def _mm_to_px(radius_mm: float, runtime_params: dict[str, Any]) -> int:
     dpcm_x = float(runtime_params.get("resolution_dpcm_x", 0.0) or 0.0)
     dpcm_y = float(runtime_params.get("resolution_dpcm_y", 0.0) or 0.0)
@@ -1947,7 +1952,7 @@ class CameraVisionModule:
         return web.json_response({"status": "ok", "camera": cam_name, "saved_file": saved})
 
     async def _api_vision_actions(self, request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "actions": self._available_cv2_actions()})
+        return web.json_response({"status": "ok", "actions": self._available_cv2_actions(), "color_codes": _cv2_color_code_names()})
 
     async def _api_vision_pipeline_set(self, request: web.Request) -> web.Response:
         try:
