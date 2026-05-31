@@ -1348,6 +1348,7 @@ class TrayFeederEditor(QWidget):
     pick_step_requested = Signal(str, str, int)
     bottom_camera_step_requested = Signal(str, str)
     vision_abort_requested = Signal()
+    vision_editor_requested = Signal()
     process_start_requested = Signal(str, str, int, bool)
     process_next_requested = Signal()
 
@@ -1478,29 +1479,21 @@ class TrayFeederEditor(QWidget):
         self._btn_bottom_step = QPushButton("Step 2: Bottom Camera")
         self._btn_start_process = QPushButton("Start Sequence")
         self._btn_next_process = QPushButton("Run Next Step")
-        self._btn_vision_adv = QPushButton("Vision...")
-        self._btn_abort_vision = QPushButton("Abort Vision")
+        self._btn_vision_editor = QPushButton("Vision Pipeline...")
+
+        # Backing stores for modal pipeline editor.
+        self._vision_pipeline_name = QLineEdit("GREEN_NOZZLE_2PAD")
         self._vision_pipeline = QTextEdit()
         self._vision_preview_step = QSpinBox()
         self._vision_preview_step.setRange(-1, 999)
         self._vision_preview_step.setValue(-1)
-        self._vision_preview_step.setToolTip("-1 = final output, 0..N = show intermediate step")
-        self._vision_pipeline.setPlaceholderText(
-            '[{"op":"GaussianBlur","args":[[5,5],0]},{"op":"cvtColor","args":["COLOR_BGR2HSV"]}]'
-        )
-        self._vision_pipeline.setFixedHeight(88)
-
-        self._vision_advanced = QWidget()
-        vision_adv_layout = QGridLayout(self._vision_advanced)
-        vision_adv_layout.setContentsMargins(0, 0, 0, 0)
-        vision_adv_layout.setHorizontalSpacing(6)
-        vision_adv_layout.setVerticalSpacing(4)
-        vision_adv_layout.addWidget(QLabel("Preview step"), 0, 0)
-        vision_adv_layout.addWidget(self._vision_preview_step, 0, 1)
-        vision_adv_layout.addWidget(self._btn_abort_vision, 0, 2)
-        vision_adv_layout.addWidget(QLabel("Step 2 Vision Pipeline (JSON steps)"), 1, 0, 1, 3)
-        vision_adv_layout.addWidget(self._vision_pipeline, 2, 0, 1, 3)
-        self._vision_advanced.setVisible(False)
+        self._vision_input_width_mm = QDoubleSpinBox()
+        self._vision_input_length_mm = QDoubleSpinBox()
+        for _w in (self._vision_input_width_mm, self._vision_input_length_mm):
+            _w.setRange(0.0, 500.0)
+            _w.setDecimals(3)
+            _w.setSingleStep(0.1)
+            _w.setValue(0.0)
 
         process_layout.addWidget(QLabel("Nozzle"), 0, 0)
         process_layout.addWidget(self._pick_nozzle, 0, 1)
@@ -1512,8 +1505,7 @@ class TrayFeederEditor(QWidget):
         process_layout.addWidget(self._btn_bottom_step, 1, 1)
         process_layout.addWidget(self._btn_start_process, 1, 2)
         process_layout.addWidget(self._btn_next_process, 1, 3)
-        process_layout.addWidget(self._btn_vision_adv, 1, 4)
-        process_layout.addWidget(self._vision_advanced, 2, 0, 1, 5)
+        process_layout.addWidget(self._btn_vision_editor, 1, 4)
         process_layout.setColumnStretch(5, 1)
 
         root.addWidget(process_box)
@@ -1630,8 +1622,7 @@ class TrayFeederEditor(QWidget):
         self._btn_bottom_step.clicked.connect(self._emit_bottom_step)
         self._btn_start_process.clicked.connect(self._emit_start_process)
         self._btn_next_process.clicked.connect(self._emit_next_process)
-        self._btn_vision_adv.clicked.connect(self._toggle_vision_advanced)
-        self._btn_abort_vision.clicked.connect(self.vision_abort_requested.emit)
+        self._btn_vision_editor.clicked.connect(self.vision_editor_requested.emit)
         self._part_number.currentTextChanged.connect(self._on_fields_changed)
         if self._part_number.lineEdit() is not None:
             self._part_number.lineEdit().textChanged.connect(self._on_fields_changed)
@@ -1725,8 +1716,7 @@ class TrayFeederEditor(QWidget):
             self._btn_bottom_step,
             self._btn_start_process,
             self._btn_next_process,
-            self._btn_vision_adv,
-            self._btn_abort_vision,
+            self._btn_vision_editor,
             self._btn_move_base,
             self._btn_move_current,
             self._btn_pick_from_camera,
@@ -1738,14 +1728,22 @@ class TrayFeederEditor(QWidget):
             self._btn_cancel,
         ):
             w.setEnabled(enabled)
-        self._vision_pipeline.setEnabled(enabled)
-        self._vision_preview_step.setEnabled(enabled)
         self._parts_picked.setEnabled(False)
 
-    def _toggle_vision_advanced(self) -> None:
-        show = not self._vision_advanced.isVisible()
-        self._vision_advanced.setVisible(show)
-        self._btn_vision_adv.setText("Vision Hide" if show else "Vision...")
+    def vision_pipeline_name(self) -> str:
+        name = self._vision_pipeline_name.text().strip()
+        return name if name else "GREEN_NOZZLE_2PAD"
+
+    def vision_input_params(self) -> dict[str, float]:
+        return {
+            "component_width_mm": float(self._vision_input_width_mm.value()),
+            "component_length_mm": float(self._vision_input_length_mm.value()),
+        }
+
+    def set_vision_pipeline_metadata(self, name: str, *, component_width_mm: float, component_length_mm: float) -> None:
+        self._vision_pipeline_name.setText(str(name).strip() or "GREEN_NOZZLE_2PAD")
+        self._vision_input_width_mm.setValue(float(component_width_mm))
+        self._vision_input_length_mm.setValue(float(component_length_mm))
 
     def _on_fields_changed(self, *_args: Any) -> None:
         if self._loading_values:
@@ -1995,6 +1993,12 @@ class TrayFeederEditor(QWidget):
         except Exception:
             pass
 
+    def set_vision_pipeline_steps(self, steps: list[dict[str, Any]]) -> None:
+        try:
+            self._vision_pipeline.setPlainText(json.dumps(list(steps), indent=2))
+        except Exception:
+            self._vision_pipeline.setPlainText("[]")
+
     def show_status(self, text: str, ok: bool = True) -> None:
         color = "#1f8a1f" if ok else "#bb2b2b"
         self._status.setStyleSheet(f"color:{color};")
@@ -2061,6 +2065,528 @@ class StepperPopup(QDialog):
                 item.setForeground(QColor("#ffffff"))
 
 
+class VisionPipelineDialog(QDialog):
+    """Modal editor/debugger for vision pipelines (vispip)."""
+
+    def __init__(self, api: ControlApiClient, base_url: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Vision Pipeline Editor")
+        self.setModal(True)
+        self.resize(1180, 760)
+
+        self._api = api
+        self._base_url = base_url.rstrip("/")
+        self._net = QNetworkAccessManager(self)
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(250)
+        self._thumb_timer.timeout.connect(self._refresh_thumb)
+
+        self._camera_name = "BOTTOM"
+        self._steps: list[dict[str, Any]] = []
+        self._actions: list[str] = []
+        self._preview_step = -1
+
+        meta_box = QGroupBox("Pipeline Metadata")
+        meta_form = QFormLayout(meta_box)
+        self._name = QLineEdit("GREEN_NOZZLE_2PAD")
+        self._width_mm = QDoubleSpinBox()
+        self._length_mm = QDoubleSpinBox()
+        for w in (self._width_mm, self._length_mm):
+            w.setRange(0.0, 500.0)
+            w.setDecimals(3)
+            w.setSingleStep(0.1)
+        meta_form.addRow("Pipeline name", self._name)
+        meta_form.addRow("Component width (mm)", self._width_mm)
+        meta_form.addRow("Component length (mm)", self._length_mm)
+
+        actions_box = QGroupBox("Vision Pipeline Actions")
+        actions_layout = QVBoxLayout(actions_box)
+        add_row = QHBoxLayout()
+        self._action_pick = QComboBox()
+        self._btn_add = QPushButton("Add")
+        self._btn_del = QPushButton("Remove")
+        self._btn_up = QPushButton("Up")
+        self._btn_down = QPushButton("Down")
+        add_row.addWidget(self._action_pick, 1)
+        add_row.addWidget(self._btn_add)
+        add_row.addWidget(self._btn_del)
+        add_row.addWidget(self._btn_up)
+        add_row.addWidget(self._btn_down)
+        self._steps_list = QListWidget()
+        actions_layout.addLayout(add_row)
+        actions_layout.addWidget(self._steps_list, 1)
+
+        params_box = QGroupBox("Parameters For Selected Action")
+        params_layout = QFormLayout(params_box)
+        self._selected_op = QLabel("--")
+
+        # Quick parameter form for common operations (non-JSON path)
+        self._quick_panel = QWidget()
+        quick_layout = QFormLayout(self._quick_panel)
+        quick_layout.setContentsMargins(0, 0, 0, 0)
+        quick_layout.setSpacing(3)
+
+        self._q_kernel_x = QSpinBox()
+        self._q_kernel_y = QSpinBox()
+        self._q_sigma = QDoubleSpinBox()
+        for w in (self._q_kernel_x, self._q_kernel_y):
+            w.setRange(1, 99)
+            w.setSingleStep(2)
+            w.setValue(5)
+        self._q_sigma.setRange(0.0, 100.0)
+        self._q_sigma.setDecimals(3)
+        self._q_sigma.setValue(0.0)
+
+        self._q_color_code = QComboBox()
+        self._q_color_code.addItems([
+            "COLOR_BGR2HSV",
+            "COLOR_BGR2GRAY",
+            "COLOR_GRAY2BGR",
+            "COLOR_BGR2RGB",
+            "COLOR_RGB2HSV",
+        ])
+
+        self._q_low_h = QSpinBox(); self._q_low_s = QSpinBox(); self._q_low_v = QSpinBox()
+        self._q_high_h = QSpinBox(); self._q_high_s = QSpinBox(); self._q_high_v = QSpinBox()
+        for w in (self._q_low_h, self._q_high_h):
+            w.setRange(0, 179)
+        for w in (self._q_low_s, self._q_low_v, self._q_high_s, self._q_high_v):
+            w.setRange(0, 255)
+        self._q_low_h.setValue(35)
+        self._q_low_s.setValue(35)
+        self._q_low_v.setValue(35)
+        self._q_high_h.setValue(95)
+        self._q_high_s.setValue(255)
+        self._q_high_v.setValue(255)
+
+        self._q_morph_op = QComboBox()
+        self._q_morph_op.addItems(["MORPH_OPEN", "MORPH_CLOSE", "MORPH_ERODE", "MORPH_DILATE"])
+        self._q_morph_k = QSpinBox()
+        self._q_morph_k.setRange(1, 31)
+        self._q_morph_k.setValue(3)
+
+        self._q_canny_t1 = QDoubleSpinBox()
+        self._q_canny_t2 = QDoubleSpinBox()
+        for w, v in ((self._q_canny_t1, 60.0), (self._q_canny_t2, 160.0)):
+            w.setRange(0.0, 10000.0)
+            w.setDecimals(3)
+            w.setValue(v)
+
+        self._q_thresh = QDoubleSpinBox()
+        self._q_maxval = QDoubleSpinBox()
+        self._q_thresh_type = QComboBox()
+        self._q_thresh_type.addItems(["THRESH_BINARY", "THRESH_BINARY_INV", "THRESH_OTSU", "THRESH_TRIANGLE"])
+        self._q_thresh.setRange(0.0, 255.0)
+        self._q_maxval.setRange(0.0, 255.0)
+        self._q_thresh.setValue(127.0)
+        self._q_maxval.setValue(255.0)
+
+        k_row = QWidget(); k_row_l = QHBoxLayout(k_row); k_row_l.setContentsMargins(0, 0, 0, 0); k_row_l.addWidget(QLabel("X")); k_row_l.addWidget(self._q_kernel_x); k_row_l.addWidget(QLabel("Y")); k_row_l.addWidget(self._q_kernel_y)
+        low_row = QWidget(); low_row_l = QHBoxLayout(low_row); low_row_l.setContentsMargins(0, 0, 0, 0); low_row_l.addWidget(QLabel("H")); low_row_l.addWidget(self._q_low_h); low_row_l.addWidget(QLabel("S")); low_row_l.addWidget(self._q_low_s); low_row_l.addWidget(QLabel("V")); low_row_l.addWidget(self._q_low_v)
+        high_row = QWidget(); high_row_l = QHBoxLayout(high_row); high_row_l.setContentsMargins(0, 0, 0, 0); high_row_l.addWidget(QLabel("H")); high_row_l.addWidget(self._q_high_h); high_row_l.addWidget(QLabel("S")); high_row_l.addWidget(self._q_high_s); high_row_l.addWidget(QLabel("V")); high_row_l.addWidget(self._q_high_v)
+
+        self._quick_rows: dict[str, list[QWidget]] = {
+            "GaussianBlur": [k_row, self._q_sigma],
+            "cvtColor": [self._q_color_code],
+            "inRange": [low_row, high_row],
+            "morphologyEx": [self._q_morph_op, self._q_morph_k],
+            "Canny": [self._q_canny_t1, self._q_canny_t2],
+            "threshold": [self._q_thresh, self._q_maxval, self._q_thresh_type],
+        }
+
+        quick_layout.addRow("Kernel", k_row)
+        quick_layout.addRow("Sigma", self._q_sigma)
+        quick_layout.addRow("Color code", self._q_color_code)
+        quick_layout.addRow("Lower HSV", low_row)
+        quick_layout.addRow("Upper HSV", high_row)
+        quick_layout.addRow("Morph op", self._q_morph_op)
+        quick_layout.addRow("Morph kernel", self._q_morph_k)
+        quick_layout.addRow("Canny t1", self._q_canny_t1)
+        quick_layout.addRow("Canny t2", self._q_canny_t2)
+        quick_layout.addRow("Threshold", self._q_thresh)
+        quick_layout.addRow("Max value", self._q_maxval)
+        quick_layout.addRow("Thresh type", self._q_thresh_type)
+        self._btn_apply_quick = QPushButton("Apply Quick Params")
+
+        self._args = QTextEdit()
+        self._kwargs = QTextEdit()
+        self._args.setFixedHeight(88)
+        self._kwargs.setFixedHeight(88)
+        self._btn_apply_params = QPushButton("Apply Parameters")
+        params_layout.addRow("Operation", self._selected_op)
+        params_layout.addRow(self._quick_panel)
+        params_layout.addRow(self._btn_apply_quick)
+        params_layout.addRow("args (JSON list)", self._args)
+        params_layout.addRow("kwargs (JSON object)", self._kwargs)
+        params_layout.addRow(self._btn_apply_params)
+
+        left_split = QSplitter(Qt.Orientation.Vertical)
+        left_split.addWidget(actions_box)
+        left_split.addWidget(params_box)
+        left_split.setStretchFactor(0, 3)
+        left_split.setStretchFactor(1, 2)
+
+        result_box = QGroupBox("Result Window")
+        result_layout = QVBoxLayout(result_box)
+        nav = QHBoxLayout()
+        self._btn_prev = QPushButton("Step Back")
+        self._btn_next = QPushButton("Step Forward")
+        self._btn_run = QPushButton("Run")
+        self._btn_abort = QPushButton("Abort")
+        self._preview_label = QLabel("Preview step: final")
+        nav.addWidget(self._btn_prev)
+        nav.addWidget(self._btn_next)
+        nav.addWidget(self._btn_run)
+        nav.addWidget(self._btn_abort)
+        nav.addStretch(1)
+        nav.addWidget(self._preview_label)
+        self._img = QLabel("No image")
+        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img.setMinimumSize(620, 460)
+        self._img.setStyleSheet("QLabel { background:#0b111b; color:#9bb3d1; border:1px solid #243044; }")
+        self._status = QLabel("Idle")
+        result_layout.addLayout(nav)
+        result_layout.addWidget(self._img, 1)
+        result_layout.addWidget(self._status)
+
+        main_split = QSplitter(Qt.Orientation.Horizontal)
+        main_split.addWidget(left_split)
+        main_split.addWidget(result_box)
+        main_split.setStretchFactor(0, 1)
+        main_split.setStretchFactor(1, 2)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addWidget(meta_box)
+        root.addWidget(main_split, 1)
+        root.addWidget(buttons)
+
+        self._btn_add.clicked.connect(self._add_action)
+        self._btn_del.clicked.connect(self._remove_action)
+        self._btn_up.clicked.connect(lambda: self._move_action(-1))
+        self._btn_down.clicked.connect(lambda: self._move_action(1))
+        self._steps_list.currentRowChanged.connect(self._on_step_selected)
+        self._btn_apply_quick.clicked.connect(self._apply_quick_params)
+        self._btn_apply_params.clicked.connect(self._apply_step_params)
+        self._btn_prev.clicked.connect(lambda: self._step_preview(-1))
+        self._btn_next.clicked.connect(lambda: self._step_preview(1))
+        self._btn_run.clicked.connect(self._run_pipeline)
+        self._btn_abort.clicked.connect(self._abort_pipeline)
+        self._set_quick_visibility("")
+
+    def set_base_url(self, base_url: str) -> None:
+        self._base_url = str(base_url).rstrip("/")
+
+    def set_pipeline(
+        self,
+        *,
+        name: str,
+        steps: list[dict[str, Any]],
+        input_params: dict[str, Any],
+    ) -> None:
+        self._name.setText(str(name).strip() or "GREEN_NOZZLE_2PAD")
+        self._steps = [copy.deepcopy(s) for s in steps if isinstance(s, dict)]
+        self._width_mm.setValue(float(input_params.get("component_width_mm", 0.0) or 0.0))
+        self._length_mm.setValue(float(input_params.get("component_length_mm", 0.0) or 0.0))
+        self._preview_step = -1
+        self._rebuild_steps_list()
+
+    def pipeline_name(self) -> str:
+        return self._name.text().strip() or "GREEN_NOZZLE_2PAD"
+
+    def pipeline_steps(self) -> list[dict[str, Any]]:
+        return [copy.deepcopy(s) for s in self._steps]
+
+    def input_params(self) -> dict[str, float]:
+        return {
+            "component_width_mm": float(self._width_mm.value()),
+            "component_length_mm": float(self._length_mm.value()),
+        }
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self._load_actions()
+        self._thumb_timer.start()
+        self._refresh_thumb()
+
+    def hideEvent(self, event: Any) -> None:
+        self._thumb_timer.stop()
+        super().hideEvent(event)
+
+    def _set_status(self, text: str) -> None:
+        self._status.setText(text)
+
+    def _load_actions(self) -> None:
+        self._api.get_json("/api/vision/actions", self._on_actions_loaded)
+
+    def _on_actions_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._set_status(f"Failed loading OpenCV actions ({status}): {data.get('error', 'request_failed')}")
+            return
+        values = data.get("actions") if isinstance(data.get("actions"), list) else []
+        self._actions = [str(v) for v in values if str(v).strip()]
+        self._action_pick.clear()
+        self._action_pick.addItems(self._actions)
+
+    def _rebuild_steps_list(self) -> None:
+        self._steps_list.clear()
+        for idx, step in enumerate(self._steps):
+            op = str(step.get("op", ""))
+            self._steps_list.addItem(QListWidgetItem(f"{idx + 1:02d}. {op}"))
+        if self._steps:
+            cur = min(max(0, self._steps_list.currentRow()), len(self._steps) - 1)
+            self._steps_list.setCurrentRow(cur)
+        else:
+            self._selected_op.setText("--")
+            self._args.setPlainText("[]")
+            self._kwargs.setPlainText("{}")
+            self._set_quick_visibility("")
+        self._preview_step = min(self._preview_step, len(self._steps) - 1)
+        self._update_preview_label()
+
+    def _on_step_selected(self, row: int) -> None:
+        if row < 0 or row >= len(self._steps):
+            self._selected_op.setText("--")
+            self._args.setPlainText("[]")
+            self._kwargs.setPlainText("{}")
+            self._set_quick_visibility("")
+            return
+        step = self._steps[row]
+        op = str(step.get("op", ""))
+        self._selected_op.setText(op)
+        self._args.setPlainText(json.dumps(step.get("args", []), indent=2))
+        self._kwargs.setPlainText(json.dumps(step.get("kwargs", {}), indent=2))
+        self._set_quick_visibility(op)
+        self._sync_quick_from_step(op, step)
+
+    def _add_action(self) -> None:
+        op = str(self._action_pick.currentText()).strip()
+        if not op:
+            return
+        self._steps.append(self._default_step_for_op(op))
+        self._rebuild_steps_list()
+        self._steps_list.setCurrentRow(len(self._steps) - 1)
+
+    def _default_step_for_op(self, op: str) -> dict[str, Any]:
+        op = str(op)
+        if op == "GaussianBlur":
+            return {"op": op, "args": [[5, 5], 0], "kwargs": {}}
+        if op == "cvtColor":
+            return {"op": op, "args": ["COLOR_BGR2HSV"], "kwargs": {}}
+        if op == "inRange":
+            return {"op": op, "args": [[35, 35, 35], [95, 255, 255]], "kwargs": {}}
+        if op == "morphologyEx":
+            return {"op": op, "args": ["MORPH_OPEN", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]], "kwargs": {}}
+        if op == "Canny":
+            return {"op": op, "args": [60, 160], "kwargs": {}}
+        if op == "threshold":
+            return {"op": op, "args": [127, 255, "THRESH_BINARY"], "kwargs": {}}
+        return {"op": op, "args": [], "kwargs": {}}
+
+    def _set_quick_visibility(self, op: str) -> None:
+        op = str(op)
+        for op_name, widgets in self._quick_rows.items():
+            visible = (op_name == op)
+            for w in widgets:
+                w.setVisible(visible)
+        self._btn_apply_quick.setEnabled(op in self._quick_rows)
+
+    @staticmethod
+    def _odd_at_least_one(value: int) -> int:
+        v = max(1, int(value))
+        return v if (v % 2 == 1) else (v + 1)
+
+    def _sync_quick_from_step(self, op: str, step: dict[str, Any]) -> None:
+        args = step.get("args", []) if isinstance(step.get("args", []), list) else []
+        if op == "GaussianBlur" and len(args) >= 2:
+            k = args[0] if isinstance(args[0], (list, tuple)) else [5, 5]
+            if len(k) >= 2:
+                self._q_kernel_x.setValue(self._odd_at_least_one(int(k[0])))
+                self._q_kernel_y.setValue(self._odd_at_least_one(int(k[1])))
+            self._q_sigma.setValue(float(args[1]))
+            return
+        if op == "cvtColor" and args:
+            code = str(args[0])
+            idx = self._q_color_code.findText(code)
+            if idx >= 0:
+                self._q_color_code.setCurrentIndex(idx)
+            return
+        if op == "inRange" and len(args) >= 2:
+            low = args[0] if isinstance(args[0], (list, tuple)) else [35, 35, 35]
+            high = args[1] if isinstance(args[1], (list, tuple)) else [95, 255, 255]
+            if len(low) >= 3 and len(high) >= 3:
+                self._q_low_h.setValue(int(low[0])); self._q_low_s.setValue(int(low[1])); self._q_low_v.setValue(int(low[2]))
+                self._q_high_h.setValue(int(high[0])); self._q_high_s.setValue(int(high[1])); self._q_high_v.setValue(int(high[2]))
+            return
+        if op == "morphologyEx" and len(args) >= 2:
+            morph = str(args[0])
+            idx = self._q_morph_op.findText(morph)
+            if idx >= 0:
+                self._q_morph_op.setCurrentIndex(idx)
+            kernel = args[1] if isinstance(args[1], (list, tuple)) else [[1]]
+            try:
+                ksize = len(kernel)
+                self._q_morph_k.setValue(self._odd_at_least_one(ksize))
+            except Exception:
+                pass
+            return
+        if op == "Canny" and len(args) >= 2:
+            self._q_canny_t1.setValue(float(args[0])); self._q_canny_t2.setValue(float(args[1]))
+            return
+        if op == "threshold" and len(args) >= 3:
+            self._q_thresh.setValue(float(args[0]))
+            self._q_maxval.setValue(float(args[1]))
+            idx = self._q_thresh_type.findText(str(args[2]))
+            if idx >= 0:
+                self._q_thresh_type.setCurrentIndex(idx)
+
+    def _apply_quick_params(self) -> None:
+        row = self._steps_list.currentRow()
+        if row < 0 or row >= len(self._steps):
+            return
+        op = str(self._steps[row].get("op", ""))
+        if op not in self._quick_rows:
+            self._set_status("No quick form available for this operation")
+            return
+
+        if op == "GaussianBlur":
+            kx = self._odd_at_least_one(self._q_kernel_x.value())
+            ky = self._odd_at_least_one(self._q_kernel_y.value())
+            args = [[kx, ky], float(self._q_sigma.value())]
+        elif op == "cvtColor":
+            args = [str(self._q_color_code.currentText())]
+        elif op == "inRange":
+            args = [
+                [int(self._q_low_h.value()), int(self._q_low_s.value()), int(self._q_low_v.value())],
+                [int(self._q_high_h.value()), int(self._q_high_s.value()), int(self._q_high_v.value())],
+            ]
+        elif op == "morphologyEx":
+            k = self._odd_at_least_one(self._q_morph_k.value())
+            kernel = [[1 for _ in range(k)] for _ in range(k)]
+            args = [str(self._q_morph_op.currentText()), kernel]
+        elif op == "Canny":
+            args = [float(self._q_canny_t1.value()), float(self._q_canny_t2.value())]
+        elif op == "threshold":
+            args = [float(self._q_thresh.value()), float(self._q_maxval.value()), str(self._q_thresh_type.currentText())]
+        else:
+            args = self._steps[row].get("args", [])
+
+        self._steps[row]["args"] = args
+        self._steps[row]["kwargs"] = {}
+        self._args.setPlainText(json.dumps(args, indent=2))
+        self._kwargs.setPlainText("{}")
+        self._set_status("Quick parameters applied")
+
+    def _remove_action(self) -> None:
+        row = self._steps_list.currentRow()
+        if row < 0 or row >= len(self._steps):
+            return
+        del self._steps[row]
+        self._rebuild_steps_list()
+
+    def _move_action(self, delta: int) -> None:
+        row = self._steps_list.currentRow()
+        if row < 0 or row >= len(self._steps):
+            return
+        new_row = row + int(delta)
+        if new_row < 0 or new_row >= len(self._steps):
+            return
+        self._steps[row], self._steps[new_row] = self._steps[new_row], self._steps[row]
+        self._rebuild_steps_list()
+        self._steps_list.setCurrentRow(new_row)
+
+    def _apply_step_params(self) -> None:
+        row = self._steps_list.currentRow()
+        if row < 0 or row >= len(self._steps):
+            return
+        try:
+            args = json.loads(self._args.toPlainText().strip() or "[]")
+            kwargs = json.loads(self._kwargs.toPlainText().strip() or "{}")
+        except Exception as exc:
+            self._set_status(f"Invalid JSON parameters: {exc}")
+            return
+        if not isinstance(args, list) or not isinstance(kwargs, dict):
+            self._set_status("Parameters must be args=list and kwargs=object")
+            return
+        self._steps[row]["args"] = args
+        self._steps[row]["kwargs"] = kwargs
+        self._set_status("Step parameters updated")
+
+    def _update_preview_label(self) -> None:
+        if self._preview_step < 0:
+            self._preview_label.setText("Preview step: final")
+        else:
+            self._preview_label.setText(f"Preview step: {self._preview_step + 1}")
+
+    def _step_preview(self, direction: int) -> None:
+        if not self._steps:
+            return
+        if self._preview_step < 0 and direction > 0:
+            self._preview_step = 0
+        else:
+            self._preview_step = max(-1, min(len(self._steps) - 1, self._preview_step + int(direction)))
+        self._update_preview_label()
+        self._run_pipeline()
+
+    def _run_pipeline(self) -> None:
+        payload = {
+            "camera": self._camera_name,
+            "steps": self._steps,
+            "preview_step": (None if self._preview_step < 0 else self._preview_step),
+            "save_diagnostics": True,
+            "prefix": f"vispip_{self.pipeline_name()}",
+            "pipeline_name": self.pipeline_name(),
+            "input_params": self.input_params(),
+        }
+        self._api.post_json("/api/vision/pipeline/run", payload, self._on_run_done)
+
+    def _on_run_done(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._set_status(f"Run failed ({status}): {data.get('error', 'request_failed')}")
+            return
+        result = data.get("result") if isinstance(data.get("result"), dict) else {}
+        self._set_status(
+            f"Run OK: steps={result.get('step_count', 0)} diagnostics={len(data.get('saved_files', []) if isinstance(data.get('saved_files'), list) else [])}"
+        )
+        self._refresh_thumb()
+
+    def _abort_pipeline(self) -> None:
+        self._api.post_json("/api/vision/pipeline/abort", None, self._on_abort_done)
+
+    def _on_abort_done(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._set_status(f"Abort failed ({status}): {data.get('error', 'request_failed')}")
+            return
+        self._set_status("Abort requested")
+
+    def _refresh_thumb(self) -> None:
+        req = QNetworkRequest(QUrl(f"{self._base_url}/thumb/{self._camera_name}"))
+        reply = self._net.get(req)
+        reply.finished.connect(lambda r=reply: self._on_thumb_ready(r))
+
+    def _on_thumb_ready(self, reply: QNetworkReply) -> None:
+        try:
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                return
+            raw = bytes(reply.readAll())
+            if not raw:
+                return
+            pm = QPixmap()
+            if not pm.loadFromData(raw):
+                return
+            scaled = pm.scaled(
+                self._img.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._img.setPixmap(scaled)
+        finally:
+            reply.deleteLater()
+
+
 class ControlWindow(QMainWindow):
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
@@ -2069,6 +2595,7 @@ class ControlWindow(QMainWindow):
 
         base_url = f"http://{host}:{port}"
         self._api = ControlApiClient(base_url)
+        self._base_url = base_url
         self._img_net = QNetworkAccessManager(self)
 
         self._camera_tiles: dict[str, CameraTile] = {}
@@ -2116,6 +2643,7 @@ class ControlWindow(QMainWindow):
         self._xy_motion_gate_token: int = 0
         self._xy_motion_in_progress: bool = False
         self._stepper_popup: StepperPopup | None = None
+        self._vision_pipeline_dialog: VisionPipelineDialog | None = None
         self._stepper_steps: list[tuple[str, Callable[[Callable[[bool], None]], None]]] = []
         self._stepper_index: int = 0
         self._stepper_running: bool = False
@@ -2822,6 +3350,7 @@ class ControlWindow(QMainWindow):
                 self._tray_editor.pick_step_requested.connect(self._on_pick_step_requested)
                 self._tray_editor.bottom_camera_step_requested.connect(self._on_bottom_camera_step_requested)
                 self._tray_editor.vision_abort_requested.connect(self._on_vision_abort_requested)
+                self._tray_editor.vision_editor_requested.connect(self._open_vision_pipeline_editor)
                 self._tray_editor.process_start_requested.connect(self._on_process_start_requested)
                 self._tray_editor.process_next_requested.connect(self._on_process_next_requested)
                 self._tray_editor.set_default_vision_pipeline(self._default_bottom_vision_pipeline())
@@ -3055,9 +3584,12 @@ class ControlWindow(QMainWindow):
     def _apply_host(self) -> None:
         host = self._host.text().strip() or "127.0.0.1"
         port = self._port.text().strip() or "8080"
-        self._api.set_base_url(f"http://{host}:{port}")
+        self._base_url = f"http://{host}:{port}"
+        self._api.set_base_url(self._base_url)
+        if self._vision_pipeline_dialog is not None:
+            self._vision_pipeline_dialog.set_base_url(self._base_url)
         self._conn_state.setText("Host updated")
-        self._log_line(f"Base URL set to http://{host}:{port}")
+        self._log_line(f"Base URL set to {self._base_url}")
         self._poll_status()
 
     def _open_stepper_popup(self) -> None:
@@ -4831,6 +5363,29 @@ class ControlWindow(QMainWindow):
         )
         self._tray_editor.show_status("Vision abort requested.", ok=False)
 
+    def _open_vision_pipeline_editor(self) -> None:
+        if self._vision_pipeline_dialog is None:
+            self._vision_pipeline_dialog = VisionPipelineDialog(self._api, self._base_url, self)
+        else:
+            self._vision_pipeline_dialog.set_base_url(self._base_url)
+
+        self._vision_pipeline_dialog.set_pipeline(
+            name=self._tray_editor.vision_pipeline_name(),
+            steps=self._tray_editor.vision_pipeline_steps(),
+            input_params=self._tray_editor.vision_input_params(),
+        )
+
+        if self._vision_pipeline_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._tray_editor.set_vision_pipeline_metadata(
+            self._vision_pipeline_dialog.pipeline_name(),
+            component_width_mm=float(self._vision_pipeline_dialog.input_params().get("component_width_mm", 0.0) or 0.0),
+            component_length_mm=float(self._vision_pipeline_dialog.input_params().get("component_length_mm", 0.0) or 0.0),
+        )
+        self._tray_editor.set_vision_pipeline_steps(self._vision_pipeline_dialog.pipeline_steps())
+        self._log_line("OK: vision pipeline updated from modal editor")
+
     def _run_pick_part_action(
         self,
         feeder_id: str,
@@ -5393,6 +5948,8 @@ class ControlWindow(QMainWindow):
             "preview_step": self._tray_editor.vision_preview_step(),
             "save_diagnostics": True,
             "prefix": f"pick_step2_{str(nozzle_name).strip().upper()}",
+            "pipeline_name": self._tray_editor.vision_pipeline_name(),
+            "input_params": self._tray_editor.vision_input_params(),
         }
         self._api.post_json(
             "/api/vision/pipeline/run",
