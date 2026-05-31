@@ -2147,14 +2147,20 @@ class VisionPipelineDialog(QDialog):
         actions_layout.addWidget(self._steps_list, 1)
 
         params_box = QGroupBox("Parameters For Selected Action")
-        params_layout = QFormLayout(params_box)
+        params_layout = QVBoxLayout(params_box)
         self._selected_op = QLabel("--")
+        selected_row = QHBoxLayout()
+        selected_row.addWidget(QLabel("Operation"))
+        selected_row.addWidget(self._selected_op, 1)
+        params_layout.addLayout(selected_row)
 
         # Quick parameter form for common operations (non-JSON path)
         self._quick_panel = QWidget()
         quick_layout = QFormLayout(self._quick_panel)
         quick_layout.setContentsMargins(0, 0, 0, 0)
         quick_layout.setSpacing(3)
+        self._param_hint = QLabel("No parameter editor available for this action.")
+        self._param_hint.setWordWrap(True)
 
         self._q_kernel_x = QSpinBox()
         self._q_kernel_y = QSpinBox()
@@ -2271,17 +2277,20 @@ class VisionPipelineDialog(QDialog):
         quick_layout.addRow("Aspect ratio max", self._q_rect_aspect_max)
         self._btn_apply_quick = QPushButton("Apply Quick Params")
 
-        self._args = QTextEdit()
-        self._kwargs = QTextEdit()
-        self._args.setFixedHeight(88)
-        self._kwargs.setFixedHeight(88)
-        self._btn_apply_params = QPushButton("Apply Parameters")
-        params_layout.addRow("Operation", self._selected_op)
-        params_layout.addRow(self._quick_panel)
-        params_layout.addRow(self._btn_apply_quick)
-        params_layout.addRow("args (JSON list)", self._args)
-        params_layout.addRow("kwargs (JSON object)", self._kwargs)
-        params_layout.addRow(self._btn_apply_params)
+        params_scroll = QScrollArea()
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        params_inner = QWidget()
+        params_inner_layout = QVBoxLayout(params_inner)
+        params_inner_layout.setContentsMargins(0, 0, 0, 0)
+        params_inner_layout.setSpacing(6)
+        params_inner_layout.addWidget(self._param_hint)
+        params_inner_layout.addWidget(self._quick_panel)
+        params_inner_layout.addWidget(self._btn_apply_quick)
+        params_inner_layout.addStretch(1)
+        params_scroll.setWidget(params_inner)
+        params_layout.addWidget(params_scroll, 1)
 
         left_split = QSplitter(Qt.Orientation.Vertical)
         left_split.addWidget(actions_box)
@@ -2335,7 +2344,6 @@ class VisionPipelineDialog(QDialog):
         self._btn_down.clicked.connect(lambda: self._move_action(1))
         self._steps_list.currentRowChanged.connect(self._on_step_selected)
         self._btn_apply_quick.clicked.connect(self._apply_quick_params)
-        self._btn_apply_params.clicked.connect(self._apply_step_params)
         self._btn_prev.clicked.connect(lambda: self._step_preview(-1))
         self._btn_next.clicked.connect(lambda: self._step_preview(1))
         self._btn_run.clicked.connect(self._run_pipeline)
@@ -2412,8 +2420,6 @@ class VisionPipelineDialog(QDialog):
             self._steps_list.setCurrentRow(cur)
         else:
             self._selected_op.setText("--")
-            self._args.setPlainText("[]")
-            self._kwargs.setPlainText("{}")
             self._set_quick_visibility("")
         self._preview_step = min(self._preview_step, len(self._steps) - 1)
         self._update_preview_label()
@@ -2421,15 +2427,11 @@ class VisionPipelineDialog(QDialog):
     def _on_step_selected(self, row: int) -> None:
         if row < 0 or row >= len(self._steps):
             self._selected_op.setText("--")
-            self._args.setPlainText("[]")
-            self._kwargs.setPlainText("{}")
             self._set_quick_visibility("")
             return
         step = self._steps[row]
         op = str(step.get("op", ""))
         self._selected_op.setText(op)
-        self._args.setPlainText(json.dumps(step.get("args", []), indent=2))
-        self._kwargs.setPlainText(json.dumps(step.get("kwargs", {}), indent=2))
         self._set_quick_visibility(op)
         self._sync_quick_from_step(op, step)
 
@@ -2481,11 +2483,15 @@ class VisionPipelineDialog(QDialog):
 
     def _set_quick_visibility(self, op: str) -> None:
         op = str(op)
+        has_quick_form = op in self._quick_rows
         for op_name, widgets in self._quick_rows.items():
             visible = (op_name == op)
             for w in widgets:
                 w.setVisible(visible)
-        self._btn_apply_quick.setEnabled(op in self._quick_rows)
+        self._quick_panel.setVisible(has_quick_form)
+        self._btn_apply_quick.setVisible(has_quick_form)
+        self._btn_apply_quick.setEnabled(has_quick_form)
+        self._param_hint.setVisible(bool(op) and not has_quick_form)
 
     @staticmethod
     def _odd_at_least_one(value: int) -> int:
@@ -2604,8 +2610,6 @@ class VisionPipelineDialog(QDialog):
             }
         else:
             self._steps[row]["kwargs"] = {}
-        self._args.setPlainText(json.dumps(args, indent=2))
-        self._kwargs.setPlainText(json.dumps(self._steps[row].get("kwargs", {}), indent=2))
         self._set_status("Quick parameters applied")
 
     def _remove_action(self) -> None:
@@ -2625,23 +2629,6 @@ class VisionPipelineDialog(QDialog):
         self._steps[row], self._steps[new_row] = self._steps[new_row], self._steps[row]
         self._rebuild_steps_list()
         self._steps_list.setCurrentRow(new_row)
-
-    def _apply_step_params(self) -> None:
-        row = self._steps_list.currentRow()
-        if row < 0 or row >= len(self._steps):
-            return
-        try:
-            args = json.loads(self._args.toPlainText().strip() or "[]")
-            kwargs = json.loads(self._kwargs.toPlainText().strip() or "{}")
-        except Exception as exc:
-            self._set_status(f"Invalid JSON parameters: {exc}")
-            return
-        if not isinstance(args, list) or not isinstance(kwargs, dict):
-            self._set_status("Parameters must be args=list and kwargs=object")
-            return
-        self._steps[row]["args"] = args
-        self._steps[row]["kwargs"] = kwargs
-        self._set_status("Step parameters updated")
 
     def _update_preview_label(self) -> None:
         if self._preview_step < 0:
