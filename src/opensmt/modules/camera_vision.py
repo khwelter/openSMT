@@ -46,11 +46,13 @@ _UI_LIGHT_MAX = 2
 def _cv2_resolve_value(value: Any) -> Any:
     if isinstance(value, list):
         resolved_list = [_cv2_resolve_value(v) for v in value]
-        if resolved_list and all(isinstance(row, list) for row in resolved_list):
+        if resolved_list and all(isinstance(row, (list, tuple)) for row in resolved_list):
             try:
                 return np.array(resolved_list, dtype=np.uint8)
             except Exception:
                 return resolved_list
+        if resolved_list and all(isinstance(v, (int, float, bool, np.integer, np.floating)) for v in resolved_list):
+            return tuple(resolved_list)
         return resolved_list
     if isinstance(value, dict):
         return {str(k): _cv2_resolve_value(v) for k, v in value.items()}
