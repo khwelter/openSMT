@@ -259,41 +259,10 @@ class SerialBoard:
                 await self._write_line(f"M210 {' '.join(m210_parts)}")
 
             await self._write_line(f"G28 {' '.join(gcode_letters)}")
-
-            # Firmware behavior differs for G28:
-            # - some send explicit OK
-            # - some primarily send coordinates
-            # Accept either as initial completion signal.
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + 180.0
-            saw_completion_signal = False
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                try:
-                    line = await asyncio.wait_for(self._line_queue.get(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
-
-                if _BUSY_RE.search(line):
-                    continue
-
-                if _OK_RE.match(line.strip()):
-                    saw_completion_signal = True
-                    break
-
-                if _parse_coords(line):
-                    saw_completion_signal = True
-                    break
-
-            if not saw_completion_signal:
-                raise RuntimeError(
-                    f"Board {self._config.board_id}: no completion signal after homing command 'G28 {' '.join(gcode_letters)}'"
-                )
-
+            # Treat M400 as authoritative completion barrier for homing.
+            # This avoids depending on firmware-specific G28 reply formats.
             await self._write_line("M400")
-            ok = await self._wait_for_ok(timeout=180.0)
+            ok = await self._wait_for_ok(timeout=240.0)
             if not ok:
                 raise RuntimeError(
                     f"Board {self._config.board_id}: homing timeout (M400) for axes "

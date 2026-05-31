@@ -453,3 +453,6 @@ class HardwareDriver:
 
     def is_axis_homed(self, axis: str) -> bool:
         return str(axis).upper() in self._homed_axes
+
+    def homed_axes(self) -> list[str]:
+        return sorted(self._homed_axes)

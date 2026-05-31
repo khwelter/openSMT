@@ -459,7 +459,15 @@ class CameraVisionModule:
             try:
                 response = await handler(request)
                 if request.path.startswith("/api/"):
-                    print(f"[API TX] {request.method} {request.path} -> {response.status}")
+                    line = f"[API TX] {request.method} {request.path} -> {response.status}"
+                    if response.status >= 400 and isinstance(response, web.Response):
+                        try:
+                            body_txt = response.text if response.text is not None else ""
+                        except Exception:
+                            body_txt = ""
+                        if body_txt:
+                            line += f" body={body_txt}"
+                    print(line)
                 return response
             except web.HTTPException as exc:
                 if request.path.startswith("/api/"):
@@ -1970,6 +1978,7 @@ class CameraVisionModule:
 
         return web.json_response({
             "positions": positions,
+            "homed_axes": self._driver.homed_axes(),
             "nozzles": nozzle_data,
             "cameras": camera_data,
             "feeders": feeder_data,
