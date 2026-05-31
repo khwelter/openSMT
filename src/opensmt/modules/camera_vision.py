@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import math
@@ -40,6 +41,94 @@ _COORD_AXES = ["X", "Y", "Z1", "R1", "Z2", "R2", "Z3", "R3", "Z4", "R4"]
 _LIGHT_MIN = 0
 _LIGHT_MAX = 3
 _UI_LIGHT_MAX = 2
+
+
+def _cv2_resolve_value(value: Any) -> Any:
+    if isinstance(value, list):
+        resolved_list = [_cv2_resolve_value(v) for v in value]
+        if resolved_list and all(isinstance(row, list) for row in resolved_list):
+            try:
+                return np.array(resolved_list, dtype=np.uint8)
+            except Exception:
+                return resolved_list
+        return resolved_list
+    if isinstance(value, dict):
+        return {str(k): _cv2_resolve_value(v) for k, v in value.items()}
+    if isinstance(value, str):
+        name = value.strip()
+        if name.startswith("CV_") or name.startswith("COLOR_") or name.startswith("THRESH_") or name.startswith("MORPH_"):
+            return getattr(cv2, name, value)
+    return value
+
+
+def _cv2_extract_image(result: Any) -> np.ndarray:
+    if isinstance(result, np.ndarray):
+        return result
+    if isinstance(result, tuple):
+        for item in reversed(result):
+            if isinstance(item, np.ndarray):
+                return item
+    raise ValueError("opencv_operation_did_not_return_image")
+
+
+def _cv2_to_bgr_for_preview(img: np.ndarray) -> np.ndarray:
+    if len(img.shape) == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
+
+
+def _run_opencv_action_steps(
+    frame: np.ndarray,
+    steps: list[dict[str, Any]],
+    *,
+    preview_step: int | None = None,
+    abort_checker: callable | None = None,
+) -> tuple[np.ndarray, dict[str, Any], list[np.ndarray]]:
+    cur = frame.copy()
+    history: list[np.ndarray] = []
+    per_step: list[dict[str, Any]] = []
+
+    for idx, step in enumerate(steps):
+        if abort_checker is not None and abort_checker():
+            raise RuntimeError("vision_aborted")
+        if not isinstance(step, dict):
+            raise ValueError(f"invalid_step_{idx}: expected object")
+        op_name = str(step.get("op", "")).strip()
+        if not op_name:
+            raise ValueError(f"invalid_step_{idx}: missing op")
+
+        func = getattr(cv2, op_name, None)
+        if not callable(func):
+            raise ValueError(f"invalid_step_{idx}: unknown_op:{op_name}")
+
+        raw_args = step.get("args", [])
+        raw_kwargs = step.get("kwargs", {})
+        if not isinstance(raw_args, list):
+            raise ValueError(f"invalid_step_{idx}: args must be list")
+        if not isinstance(raw_kwargs, dict):
+            raise ValueError(f"invalid_step_{idx}: kwargs must be object")
+
+        args = [_cv2_resolve_value(v) for v in raw_args]
+        kwargs = {str(k): _cv2_resolve_value(v) for k, v in raw_kwargs.items()}
+
+        try:
+            out = func(cur, *args, **kwargs)
+        except Exception as exc:
+            raise ValueError(f"opencv_step_failed_{idx}:{op_name}:{exc}") from exc
+
+        cur = _cv2_extract_image(out)
+        history.append(cur.copy())
+        per_step.append({
+            "index": idx,
+            "op": op_name,
+            "shape": list(cur.shape),
+        })
+
+    preview = cur
+    if preview_step is not None and 0 <= int(preview_step) < len(history):
+        preview = history[int(preview_step)]
+
+    return _cv2_to_bgr_for_preview(preview), {"steps": per_step, "step_count": len(per_step)}, history
 
 
 def register_pipeline(type_name: str):
@@ -105,6 +194,29 @@ class RuntimeNozzleConfig:
     max_z: float     # Maximum Z position (default 0.0)
 
 
+class OpenCVActionsPipeline(VisionPipelineBase):
+    """Runtime-editable pipeline that executes OpenCV actions from params."""
+
+    def process(
+        self,
+        frame: np.ndarray,
+        params: dict[str, Any],
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        steps_raw = params.get("steps", [])
+        preview_step_raw = params.get("preview_step")
+
+        if not isinstance(steps_raw, list):
+            return frame, {"error": "invalid_steps"}
+
+        steps = [s for s in steps_raw if isinstance(s, dict)]
+        preview_step = int(preview_step_raw) if preview_step_raw is not None else None
+        try:
+            preview, result, _history = _run_opencv_action_steps(frame, steps, preview_step=preview_step)
+            return preview, result
+        except Exception as exc:
+            return frame, {"error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Module
 # ---------------------------------------------------------------------------
@@ -137,6 +249,7 @@ class CameraVisionModule:
         self._cameras: dict[str, CameraState] = {}
         self._pipelines: dict[str, VisionPipelineBase] = {
             "PASSTHROUGH": PassthroughPipeline("PASSTHROUGH", {}),
+            "OPENCV_ACTIONS": OpenCVActionsPipeline("OPENCV_ACTIONS", {}),
         }
         self._web_host = str(config.get("web_host", "0.0.0.0"))
         self._web_port = int(config.get("web_port", 8080))
@@ -170,6 +283,13 @@ class CameraVisionModule:
         self._commands = CommandRunner(max_history=500)
         catalog_db_path_raw = config.get("_catalog_db_path")
         self._catalog_db = CatalogSQLite(catalog_db_path_raw) if catalog_db_path_raw else None
+        self._vision_abort_requested = False
+        diagnostics_raw = config.get("diagnostics_dir")
+        if diagnostics_raw:
+            self._diagnostics_dir = Path(str(diagnostics_raw)).expanduser()
+        else:
+            self._diagnostics_dir = Path(__file__).resolve().parents[3] / "diagnostics"
+        self._diagnostic_counter_path = self._diagnostics_dir / "counter.txt"
 
         # Build named pipeline pool
         for pipe_cfg in config.get("pipelines", []):
@@ -553,6 +673,147 @@ class CameraVisionModule:
         cv2.putText(out, "0/0", (cx + 6, cy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 0), 1, cv2.LINE_AA)
         return out
 
+    async def _camera_frame_copy(self, camera_name: str) -> np.ndarray | None:
+        state = self._cameras.get(str(camera_name).upper())
+        if state is None:
+            return None
+        async with state.frame_lock:
+            if state.frame is None:
+                return None
+            return state.frame.copy()
+
+    def _next_diagnostic_path(self, *, prefix: str, camera_name: str, stage: str) -> Path:
+        self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        current = 0
+        if self._diagnostic_counter_path.exists():
+            try:
+                current = int(self._diagnostic_counter_path.read_text(encoding="utf-8").strip() or "0")
+            except Exception:
+                current = 0
+        next_idx = current + 1
+        self._diagnostic_counter_path.write_text(str(next_idx), encoding="utf-8")
+        safe_prefix = re.sub(r"[^A-Za-z0-9_-]+", "_", prefix).strip("_") or "diag"
+        safe_stage = re.sub(r"[^A-Za-z0-9_-]+", "_", stage).strip("_") or "step"
+        safe_cam = re.sub(r"[^A-Za-z0-9_-]+", "_", str(camera_name).upper()).strip("_") or "CAM"
+        return self._diagnostics_dir / f"{next_idx:06d}_{safe_prefix}_{safe_cam}_{safe_stage}.jpg"
+
+    async def _save_diagnostic_image(
+        self,
+        frame: np.ndarray,
+        *,
+        prefix: str,
+        camera_name: str,
+        stage: str,
+    ) -> str:
+        output_path = self._next_diagnostic_path(prefix=prefix, camera_name=camera_name, stage=stage)
+        loop = asyncio.get_running_loop()
+
+        def _encode_and_write() -> None:
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            if not ok:
+                raise RuntimeError("jpg_encode_failed")
+            output_path.write_bytes(jpg.tobytes())
+
+        await loop.run_in_executor(None, _encode_and_write)
+        return str(output_path)
+
+    def _available_cv2_actions(self) -> list[str]:
+        ops: list[str] = []
+        for name in dir(cv2):
+            if name.startswith("_"):
+                continue
+            obj = getattr(cv2, name, None)
+            if not callable(obj):
+                continue
+            # Prefer image-processing style functions with first parameter like src/img/image.
+            try:
+                sig = inspect.signature(obj)
+            except Exception:
+                continue
+            params = list(sig.parameters.values())
+            if not params:
+                continue
+            first = str(params[0].name).lower()
+            if first not in {"src", "image", "img", "m", "mat", "src1"}:
+                continue
+            ops.append(name)
+        return sorted(set(ops))
+
+    def _default_green_nozzle_pipeline_steps(self) -> list[dict[str, Any]]:
+        return [
+            {"op": "GaussianBlur", "args": [[5, 5], 0]},
+            {"op": "cvtColor", "args": ["COLOR_BGR2HSV"]},
+            {"op": "inRange", "args": [[35, 35, 35], [95, 255, 255]]},
+            {"op": "morphologyEx", "args": ["MORPH_OPEN", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
+            {"op": "morphologyEx", "args": ["MORPH_CLOSE", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
+            {"op": "Canny", "args": [60, 160]},
+        ]
+
+    async def _run_bottom_vision_once(
+        self,
+        *,
+        camera_name: str,
+        steps: list[dict[str, Any]],
+        preview_step: int | None,
+        save_diagnostics: bool,
+        prefix: str,
+    ) -> dict[str, Any]:
+        frame = await self._camera_frame_copy(camera_name)
+        if frame is None:
+            raise RuntimeError("camera_frame_unavailable")
+
+        self._vision_abort_requested = False
+        preview_frame, result, history = _run_opencv_action_steps(
+            frame,
+            steps,
+            preview_step=preview_step,
+            abort_checker=lambda: bool(self._vision_abort_requested),
+        )
+
+        state = self._cameras.get(str(camera_name).upper())
+        if state is not None:
+            state.active_pipeline = "OPENCV_ACTIONS"
+            state.pipeline_params = {
+                "steps": copy.deepcopy(steps),
+                "preview_step": preview_step,
+            }
+            state.last_pipeline_result = dict(result)
+
+        saved_files: list[str] = []
+        if save_diagnostics:
+            saved_files.append(
+                await self._save_diagnostic_image(
+                    frame,
+                    prefix=prefix,
+                    camera_name=camera_name,
+                    stage="input",
+                )
+            )
+            for idx, img in enumerate(history):
+                saved_files.append(
+                    await self._save_diagnostic_image(
+                        _cv2_to_bgr_for_preview(img),
+                        prefix=prefix,
+                        camera_name=camera_name,
+                        stage=f"step_{idx:02d}",
+                    )
+                )
+            saved_files.append(
+                await self._save_diagnostic_image(
+                    preview_frame,
+                    prefix=prefix,
+                    camera_name=camera_name,
+                    stage="preview",
+                )
+            )
+
+        return {
+            "camera": str(camera_name).upper(),
+            "result": result,
+            "saved_files": saved_files,
+            "aborted": bool(self._vision_abort_requested),
+        }
+
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # Web server
@@ -622,6 +883,11 @@ class CameraVisionModule:
         app.router.add_post("/api/camera/{name}/light", self._api_camera_light)
         app.router.add_post("/api/camera/{name}/settings", self._api_camera_settings)
         app.router.add_post("/api/camera/{name}/calibrate-resolution", self._api_camera_calibrate_resolution)
+        app.router.add_post("/api/camera/{name}/capture-diagnostic", self._api_camera_capture_diagnostic)
+        app.router.add_get("/api/vision/actions", self._api_vision_actions)
+        app.router.add_post("/api/vision/pipeline/set", self._api_vision_pipeline_set)
+        app.router.add_post("/api/vision/pipeline/run", self._api_vision_pipeline_run)
+        app.router.add_post("/api/vision/pipeline/abort", self._api_vision_pipeline_abort)
         app.router.add_get("/api/status", self._api_status)
         app.router.add_get("/api/jobs/{job_id}", self._api_job_get)
 
@@ -1496,6 +1762,125 @@ class CameraVisionModule:
             }
         )
 
+    async def _api_camera_capture_diagnostic(self, request: web.Request) -> web.Response:
+        raw_name = request.match_info["name"]
+        if not _NAME_RE.match(raw_name):
+            return web.json_response({"error": "invalid_name"}, status=400)
+
+        cam_name = raw_name.upper()
+        if cam_name not in self._cameras:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        prefix = str(body.get("prefix", "diagnostic") or "diagnostic")
+        stage = str(body.get("stage", "capture") or "capture")
+
+        frame = await self._camera_frame_copy(cam_name)
+        if frame is None:
+            return web.json_response({"error": "camera_frame_unavailable"}, status=503)
+
+        saved = await self._save_diagnostic_image(
+            frame,
+            prefix=prefix,
+            camera_name=cam_name,
+            stage=stage,
+        )
+        return web.json_response({"status": "ok", "camera": cam_name, "saved_file": saved})
+
+    async def _api_vision_actions(self, request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok", "actions": self._available_cv2_actions()})
+
+    async def _api_vision_pipeline_set(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            camera = str(body.get("camera", "BOTTOM")).upper()
+            steps = body.get("steps")
+            preview_step_raw = body.get("preview_step")
+        except Exception:
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        state = self._cameras.get(camera)
+        if state is None:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        if steps is None:
+            steps = self._default_green_nozzle_pipeline_steps()
+        if not isinstance(steps, list):
+            return web.json_response({"error": "invalid_steps"}, status=400)
+
+        preview_step: int | None = None
+        if preview_step_raw is not None:
+            try:
+                preview_step = int(preview_step_raw)
+            except Exception:
+                return web.json_response({"error": "invalid_preview_step"}, status=400)
+
+        state.active_pipeline = "OPENCV_ACTIONS"
+        state.pipeline_params = {
+            "steps": copy.deepcopy([s for s in steps if isinstance(s, dict)]),
+            "preview_step": preview_step,
+        }
+        return web.json_response(
+            {
+                "status": "ok",
+                "camera": camera,
+                "active_pipeline": state.active_pipeline,
+                "step_count": len(state.pipeline_params.get("steps", [])),
+                "preview_step": preview_step,
+            }
+        )
+
+    async def _api_vision_pipeline_run(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            camera = str(body.get("camera", "BOTTOM")).upper()
+            steps_raw = body.get("steps")
+            preview_step_raw = body.get("preview_step")
+            save_diagnostics = bool(body.get("save_diagnostics", True))
+            prefix = str(body.get("prefix", "vision") or "vision")
+        except Exception:
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if steps_raw is None:
+            steps = self._default_green_nozzle_pipeline_steps()
+        elif isinstance(steps_raw, list):
+            steps = [s for s in steps_raw if isinstance(s, dict)]
+        else:
+            return web.json_response({"error": "invalid_steps"}, status=400)
+
+        preview_step: int | None = None
+        if preview_step_raw is not None:
+            try:
+                preview_step = int(preview_step_raw)
+            except Exception:
+                return web.json_response({"error": "invalid_preview_step"}, status=400)
+
+        try:
+            result = await self._run_bottom_vision_once(
+                camera_name=camera,
+                steps=steps,
+                preview_step=preview_step,
+                save_diagnostics=save_diagnostics,
+                prefix=prefix,
+            )
+        except RuntimeError as exc:
+            err = str(exc)
+            status = 409 if err == "vision_aborted" else 503
+            return web.json_response({"error": err}, status=status)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            return web.json_response({"error": f"vision_pipeline_failed:{exc}"}, status=500)
+
+        return web.json_response({"status": "ok", **result})
+
+    async def _api_vision_pipeline_abort(self, request: web.Request) -> web.Response:
+        self._vision_abort_requested = True
+        return web.json_response({"status": "ok", "aborting": True})
+
     async def _api_config_location_set(self, request: web.Request) -> web.Response:
         raw_name = request.match_info["name"]
         if not _NAME_RE.match(raw_name):
@@ -2039,6 +2424,9 @@ class CameraVisionModule:
                 "resolution_dpcm_y": float(cam_state.config.resolution_dpcm_y),
                 "flip_horizontal": bool(cam_state.config.flip_horizontal),
                 "flip_vertical": bool(cam_state.config.flip_vertical),
+                "active_pipeline": cam_state.active_pipeline,
+                "pipeline_params": dict(cam_state.pipeline_params),
+                "pipeline_result": dict(cam_state.last_pipeline_result),
                 "lights": {
                     key: int(cam_state.light_values.get(key, 0))
                     for key in sorted(cam_state.config.lights.keys())

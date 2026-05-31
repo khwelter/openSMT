@@ -1347,6 +1347,7 @@ class TrayFeederEditor(QWidget):
     advance_requested = Signal(str)
     pick_step_requested = Signal(str, str, int)
     bottom_camera_step_requested = Signal(str, str)
+    vision_abort_requested = Signal()
     process_start_requested = Signal(str, str, int, bool)
     process_next_requested = Signal()
 
@@ -1477,6 +1478,16 @@ class TrayFeederEditor(QWidget):
         self._btn_bottom_step = QPushButton("Step 2: Bottom Camera")
         self._btn_start_process = QPushButton("Start Sequence")
         self._btn_next_process = QPushButton("Run Next Step")
+        self._btn_abort_vision = QPushButton("Abort Vision")
+        self._vision_pipeline = QTextEdit()
+        self._vision_preview_step = QSpinBox()
+        self._vision_preview_step.setRange(-1, 999)
+        self._vision_preview_step.setValue(-1)
+        self._vision_preview_step.setToolTip("-1 = final output, 0..N = show intermediate step")
+        self._vision_pipeline.setPlaceholderText(
+            '[{"op":"GaussianBlur","args":[[5,5],0]},{"op":"cvtColor","args":["COLOR_BGR2HSV"]}]'
+        )
+        self._vision_pipeline.setMinimumHeight(110)
 
         process_layout.addWidget(QLabel("Nozzle"), 0, 0)
         process_layout.addWidget(self._pick_nozzle, 0, 1)
@@ -1488,6 +1499,11 @@ class TrayFeederEditor(QWidget):
         process_layout.addWidget(self._btn_bottom_step, 1, 1)
         process_layout.addWidget(self._btn_start_process, 1, 2)
         process_layout.addWidget(self._btn_next_process, 1, 3)
+        process_layout.addWidget(self._btn_abort_vision, 1, 4)
+        process_layout.addWidget(QLabel("Preview step"), 2, 0)
+        process_layout.addWidget(self._vision_preview_step, 2, 1)
+        process_layout.addWidget(QLabel("Step 2 Vision Pipeline (JSON steps)"), 2, 2, 1, 3)
+        process_layout.addWidget(self._vision_pipeline, 3, 0, 1, 5)
         process_layout.setColumnStretch(5, 1)
 
         root.addWidget(process_box)
@@ -1604,6 +1620,7 @@ class TrayFeederEditor(QWidget):
         self._btn_bottom_step.clicked.connect(self._emit_bottom_step)
         self._btn_start_process.clicked.connect(self._emit_start_process)
         self._btn_next_process.clicked.connect(self._emit_next_process)
+        self._btn_abort_vision.clicked.connect(self.vision_abort_requested.emit)
         self._part_number.currentTextChanged.connect(self._on_fields_changed)
         if self._part_number.lineEdit() is not None:
             self._part_number.lineEdit().textChanged.connect(self._on_fields_changed)
@@ -1934,6 +1951,30 @@ class TrayFeederEditor(QWidget):
     def vacuum_dwell_ms(self) -> int:
         return int(self._pick_dwell_ms.value())
 
+    def vision_pipeline_steps(self) -> list[dict[str, Any]]:
+        raw = self._vision_pipeline.toPlainText().strip()
+        if not raw:
+            return []
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return []
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
+
+    def vision_preview_step(self) -> int | None:
+        value = int(self._vision_preview_step.value())
+        return None if value < 0 else value
+
+    def set_default_vision_pipeline(self, steps: list[dict[str, Any]]) -> None:
+        if self._vision_pipeline.toPlainText().strip():
+            return
+        try:
+            self._vision_pipeline.setPlainText(json.dumps(steps, indent=2))
+        except Exception:
+            pass
+
     def show_status(self, text: str, ok: bool = True) -> None:
         color = "#1f8a1f" if ok else "#bb2b2b"
         self._status.setStyleSheet(f"color:{color};")
@@ -2051,6 +2092,7 @@ class ControlWindow(QMainWindow):
         self._process_dwell_ms: int = 150
         self._process_single_step: bool = False
         self._process_busy: bool = False
+        self._vision_abort_requested: bool = False
         self._xy_motion_gate_token: int = 0
         self._xy_motion_in_progress: bool = False
         self._stepper_popup: StepperPopup | None = None
@@ -2759,8 +2801,10 @@ class ControlWindow(QMainWindow):
                 self._tray_editor.reset_requested.connect(self._reset_feeder)
                 self._tray_editor.pick_step_requested.connect(self._on_pick_step_requested)
                 self._tray_editor.bottom_camera_step_requested.connect(self._on_bottom_camera_step_requested)
+                self._tray_editor.vision_abort_requested.connect(self._on_vision_abort_requested)
                 self._tray_editor.process_start_requested.connect(self._on_process_start_requested)
                 self._tray_editor.process_next_requested.connect(self._on_process_next_requested)
+                self._tray_editor.set_default_vision_pipeline(self._default_bottom_vision_pipeline())
                 type_layout.addWidget(self._tray_editor)
             else:
                 note = QLabel("Type-specific editor will be added in a later step.")
@@ -4753,7 +4797,19 @@ class ControlWindow(QMainWindow):
         self._run_pick_part_action(feeder_id, nozzle_name, dwell_ms, lambda _ok: None)
 
     def _on_bottom_camera_step_requested(self, _feeder_id: str, nozzle_name: str) -> None:
-        self._run_bottom_camera_step(nozzle_name, lambda _ok: None)
+        self._run_bottom_camera_step(
+            nozzle_name,
+            lambda ok, noz=nozzle_name: self._run_bottom_vision_pipeline(noz, lambda _ok: None) if ok else None,
+        )
+
+    def _on_vision_abort_requested(self) -> None:
+        self._vision_abort_requested = True
+        self._api.post_json(
+            "/api/vision/pipeline/abort",
+            None,
+            lambda _ok, _status, _data: None,
+        )
+        self._tray_editor.show_status("Vision abort requested.", ok=False)
 
     def _run_pick_part_action(
         self,
@@ -4770,7 +4826,7 @@ class ControlWindow(QMainWindow):
             feeder_id,
             nozzle_name,
             dwell_ms,
-            lambda ok, noz=nozzle_name: self._run_bottom_camera_step(noz, on_done) if ok else on_done(False),
+            on_done,
         )
 
     def _run_pick_part_action_stepper(
@@ -4905,6 +4961,20 @@ class ControlWindow(QMainWindow):
                 ty = self._current_y if self._current_y is not None else 0.0
             self._wait_for_xy_target(tx, ty, on_reached=lambda: done(True), on_timeout=lambda: done(False))
 
+        def _camera_level_down(done: Callable[[bool], None]) -> None:
+            self._api.post_json(
+                f"/api/head/nozzle/{nozzle_name}/move-standard-down",
+                None,
+                lambda ok, _status, _data: done(bool(ok)),
+            )
+
+        def _capture_diag(done: Callable[[bool], None]) -> None:
+            self._api.post_json(
+                "/api/camera/BOTTOM/capture-diagnostic",
+                {"prefix": f"pick_step1_{nozzle_name}", "stage": "after_pick_camera_level"},
+                lambda ok, _status, _data: done(bool(ok)),
+            )
+
         self._start_stepper_action(
             f"Pickup Part ({nozzle_name})",
             [
@@ -4914,6 +4984,8 @@ class ControlWindow(QMainWindow):
                 ("Wait", _wait_step),
                 ("Move Z up", _z_up),
                 ("Move XY to camera", _move_xy_camera),
+                ("Lower to camera level", _camera_level_down),
+                ("Capture diagnostic image", _capture_diag),
             ],
             on_done,
         )
@@ -4930,10 +5002,10 @@ class ControlWindow(QMainWindow):
         self._process_single_step = bool(single_step)
         self._process_queue = [
             "pick_component",
-            "move_to_bottom_camera",
             "run_bottom_vision_pipeline",
             "move_to_final_destination",
         ]
+        self._vision_abort_requested = False
         self._log_line(
             f"REQ: start pick/place process feeder={self._process_feeder_id} nozzle={self._process_nozzle_name} single_step={self._process_single_step}"
         )
@@ -4968,15 +5040,8 @@ class ControlWindow(QMainWindow):
             )
             return
 
-        if step == "move_to_bottom_camera":
-            self._run_bottom_camera_step(
-                self._process_nozzle_name,
-                lambda ok: self._on_process_step_finished("move_to_bottom_camera", ok),
-            )
-            return
-
         if step == "run_bottom_vision_pipeline":
-            self._run_bottom_vision_pipeline_placeholder(
+            self._run_bottom_vision_pipeline(
                 self._process_nozzle_name,
                 lambda ok: self._on_process_step_finished("run_bottom_vision_pipeline", ok),
             )
@@ -5247,10 +5312,31 @@ class ControlWindow(QMainWindow):
             fail_cb(status, str(data.get("error", "request_failed")), "raise nozzle to Z=0.0 failed")
             return
 
-        self._log_line(f"OK: pick step complete for nozzle {nozzle_name}")
-        self._tray_editor.show_status(f"Pick complete with nozzle {nozzle_name}.", ok=True)
-        self._poll_status()
-        on_done(True)
+        def _after_bottom_move(bottom_ok: bool) -> None:
+            if not bottom_ok:
+                fail_cb(409, "bottom_camera_move_failed", "move nozzle to bottom camera failed after pick")
+                return
+            self._api.post_json(
+                "/api/camera/BOTTOM/capture-diagnostic",
+                {
+                    "prefix": f"pick_step1_{nozzle_name}",
+                    "stage": "after_pick_camera_level",
+                },
+                lambda cap_ok, cap_status, cap_data: _after_capture(cap_ok, cap_status, cap_data),
+            )
+
+        def _after_capture(cap_ok: bool, cap_status: int, cap_data: dict[str, Any]) -> None:
+            if not cap_ok:
+                fail_cb(cap_status, str(cap_data.get("error", "request_failed")), "pick diagnostic capture failed")
+                return
+            saved_file = str(cap_data.get("saved_file", ""))
+            self._log_line(f"OK: pick diagnostic saved: {saved_file}")
+            self._log_line(f"OK: pick step complete for nozzle {nozzle_name}")
+            self._tray_editor.show_status(f"Pick complete with nozzle {nozzle_name}.", ok=True)
+            self._poll_status()
+            on_done(True)
+
+        self._run_bottom_camera_step(nozzle_name, _after_bottom_move)
 
     def _run_bottom_camera_step(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
         nozzle_name = str(nozzle_name).strip().upper()
@@ -5265,15 +5351,61 @@ class ControlWindow(QMainWindow):
             lambda ok, status, data: self._on_bottom_camera_moved(nozzle_name, on_done, ok, status, data),
         )
 
-    def _run_bottom_vision_pipeline_placeholder(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
-        # Placeholder for future AOI/orientation pipeline at bottom camera.
+    def _default_bottom_vision_pipeline(self) -> list[dict[str, Any]]:
+        return [
+            {"op": "GaussianBlur", "args": [[5, 5], 0]},
+            {"op": "cvtColor", "args": ["COLOR_BGR2HSV"]},
+            {"op": "inRange", "args": [[35, 35, 35], [95, 255, 255]]},
+            {"op": "morphologyEx", "args": ["MORPH_OPEN", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
+            {"op": "morphologyEx", "args": ["MORPH_CLOSE", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
+            {"op": "Canny", "args": [60, 160]},
+        ]
+
+    def _run_bottom_vision_pipeline(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
+        steps = self._tray_editor.vision_pipeline_steps()
+        if not steps:
+            steps = self._default_bottom_vision_pipeline()
+
+        self._vision_abort_requested = False
+        payload = {
+            "camera": "BOTTOM",
+            "steps": steps,
+            "preview_step": self._tray_editor.vision_preview_step(),
+            "save_diagnostics": True,
+            "prefix": f"pick_step2_{str(nozzle_name).strip().upper()}",
+        }
+        self._api.post_json(
+            "/api/vision/pipeline/run",
+            payload,
+            lambda ok, status, data: self._on_bottom_vision_pipeline_done(nozzle_name, on_done, ok, status, data),
+        )
+
+    def _on_bottom_vision_pipeline_done(
+        self,
+        nozzle_name: str,
+        on_done: Callable[[bool], None],
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+    ) -> None:
+        if not ok:
+            err = str(data.get("error", "request_failed"))
+            self._log_line(f"ERR {status}: bottom vision pipeline failed for {nozzle_name}: {err}")
+            self._tray_editor.show_status(f"Bottom vision failed: {err}", ok=False)
+            on_done(False)
+            return
+
+        result = data.get("result") if isinstance(data.get("result"), dict) else {}
+        step_count = int(result.get("step_count", 0) or 0)
+        saved_files = data.get("saved_files") if isinstance(data.get("saved_files"), list) else []
         self._log_line(
-            f"TODO: step 3 not implemented yet: run bottom vision pipeline for nozzle {nozzle_name}"
+            f"OK: bottom vision pipeline complete for {nozzle_name}: steps={step_count}, diagnostics={len(saved_files)}"
         )
         self._tray_editor.show_status(
-            "Step 3 placeholder: bottom vision pipeline TODO.",
+            f"Bottom vision complete ({step_count} steps, {len(saved_files)} diagnostics).",
             ok=True,
         )
+        self._poll_status()
         on_done(True)
 
     def _run_move_to_final_destination_placeholder(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
