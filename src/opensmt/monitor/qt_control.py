@@ -2411,6 +2411,7 @@ class VisionPipelineDialog(QDialog):
         self._set_status(f"Loaded {len(self._actions)} vision actions")
 
     def _rebuild_steps_list(self) -> None:
+        self._steps_list.blockSignals(True)
         self._steps_list.clear()
         for idx, step in enumerate(self._steps):
             op = str(step.get("op", ""))
@@ -2423,6 +2424,7 @@ class VisionPipelineDialog(QDialog):
             self._set_quick_visibility("")
         self._preview_step = min(self._preview_step, len(self._steps) - 1)
         self._update_preview_label()
+        self._steps_list.blockSignals(False)
 
     def _on_step_selected(self, row: int) -> None:
         if row < 0 or row >= len(self._steps):
@@ -2627,7 +2629,9 @@ class VisionPipelineDialog(QDialog):
         if new_row < 0 or new_row >= len(self._steps):
             return
         self._steps[row], self._steps[new_row] = self._steps[new_row], self._steps[row]
+        self._steps_list.blockSignals(True)
         self._rebuild_steps_list()
+        self._steps_list.blockSignals(False)
         self._steps_list.setCurrentRow(new_row)
 
     def _update_preview_label(self) -> None:
