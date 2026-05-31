@@ -217,14 +217,26 @@ class HardwareDriver:
                 raise ValueError(f"Board not found: {board_id}")
             gcode_letters = [letter for _, letter in axis_pairs]
             coords = await board.home(gcode_letters, homing_vels_by_board[board_id])
+            if not coords:
+                # Some firmwares respond to G28 without an inline coordinate report.
+                # Query the live machine position explicitly as a fallback.
+                queried = await board.query_position(timeout=3.0)
+                coords = queried if isinstance(queried, dict) else {}
             for axis, gcode_letter in axis_pairs:
                 if gcode_letter in coords:
                     await self._position_store.update(axis, coords[gcode_letter])
                     self._homed_axes.add(axis)
                 else:
+                    # Keep system operable even if firmware does not report coordinates.
+                    # Default to 0.0 for newly homed axes when no explicit value is available.
+                    current = self._position_store.get(axis)
+                    await self._position_store.update(axis, 0.0 if current is None else current)
+                    self._homed_axes.add(axis)
                     log.warning(
-                        "home_axes: board %s did not report position for %s (%s)",
-                        board_id, axis, gcode_letter,
+                        "home_axes: board %s did not report position for %s (%s), marked homed with fallback",
+                        board_id,
+                        axis,
+                        gcode_letter,
                     )
 
     async def home_all(self) -> None:
