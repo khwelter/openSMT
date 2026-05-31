@@ -3216,7 +3216,8 @@ class ControlWindow(QMainWindow):
         self._camera_order = ordered
         self._camera_status_by_name = status_by_name
         if self._active_camera_name not in self._camera_tiles:
-            self._active_camera_name = ordered[0]
+            # Startup/default behavior: prefer TOP camera when available.
+            self._active_camera_name = "TOP" if "TOP" in self._camera_tiles else ordered[0]
 
         for tile in self._camera_tiles.values():
             tile.sync_camera_choices(ordered, status_by_name, self._active_camera_name)
