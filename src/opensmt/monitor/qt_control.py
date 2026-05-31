@@ -1478,6 +1478,7 @@ class TrayFeederEditor(QWidget):
         self._btn_bottom_step = QPushButton("Step 2: Bottom Camera")
         self._btn_start_process = QPushButton("Start Sequence")
         self._btn_next_process = QPushButton("Run Next Step")
+        self._btn_vision_adv = QPushButton("Vision...")
         self._btn_abort_vision = QPushButton("Abort Vision")
         self._vision_pipeline = QTextEdit()
         self._vision_preview_step = QSpinBox()
@@ -1487,7 +1488,19 @@ class TrayFeederEditor(QWidget):
         self._vision_pipeline.setPlaceholderText(
             '[{"op":"GaussianBlur","args":[[5,5],0]},{"op":"cvtColor","args":["COLOR_BGR2HSV"]}]'
         )
-        self._vision_pipeline.setMinimumHeight(110)
+        self._vision_pipeline.setFixedHeight(88)
+
+        self._vision_advanced = QWidget()
+        vision_adv_layout = QGridLayout(self._vision_advanced)
+        vision_adv_layout.setContentsMargins(0, 0, 0, 0)
+        vision_adv_layout.setHorizontalSpacing(6)
+        vision_adv_layout.setVerticalSpacing(4)
+        vision_adv_layout.addWidget(QLabel("Preview step"), 0, 0)
+        vision_adv_layout.addWidget(self._vision_preview_step, 0, 1)
+        vision_adv_layout.addWidget(self._btn_abort_vision, 0, 2)
+        vision_adv_layout.addWidget(QLabel("Step 2 Vision Pipeline (JSON steps)"), 1, 0, 1, 3)
+        vision_adv_layout.addWidget(self._vision_pipeline, 2, 0, 1, 3)
+        self._vision_advanced.setVisible(False)
 
         process_layout.addWidget(QLabel("Nozzle"), 0, 0)
         process_layout.addWidget(self._pick_nozzle, 0, 1)
@@ -1499,11 +1512,8 @@ class TrayFeederEditor(QWidget):
         process_layout.addWidget(self._btn_bottom_step, 1, 1)
         process_layout.addWidget(self._btn_start_process, 1, 2)
         process_layout.addWidget(self._btn_next_process, 1, 3)
-        process_layout.addWidget(self._btn_abort_vision, 1, 4)
-        process_layout.addWidget(QLabel("Preview step"), 2, 0)
-        process_layout.addWidget(self._vision_preview_step, 2, 1)
-        process_layout.addWidget(QLabel("Step 2 Vision Pipeline (JSON steps)"), 2, 2, 1, 3)
-        process_layout.addWidget(self._vision_pipeline, 3, 0, 1, 5)
+        process_layout.addWidget(self._btn_vision_adv, 1, 4)
+        process_layout.addWidget(self._vision_advanced, 2, 0, 1, 5)
         process_layout.setColumnStretch(5, 1)
 
         root.addWidget(process_box)
@@ -1620,6 +1630,7 @@ class TrayFeederEditor(QWidget):
         self._btn_bottom_step.clicked.connect(self._emit_bottom_step)
         self._btn_start_process.clicked.connect(self._emit_start_process)
         self._btn_next_process.clicked.connect(self._emit_next_process)
+        self._btn_vision_adv.clicked.connect(self._toggle_vision_advanced)
         self._btn_abort_vision.clicked.connect(self.vision_abort_requested.emit)
         self._part_number.currentTextChanged.connect(self._on_fields_changed)
         if self._part_number.lineEdit() is not None:
@@ -1714,6 +1725,8 @@ class TrayFeederEditor(QWidget):
             self._btn_bottom_step,
             self._btn_start_process,
             self._btn_next_process,
+            self._btn_vision_adv,
+            self._btn_abort_vision,
             self._btn_move_base,
             self._btn_move_current,
             self._btn_pick_from_camera,
@@ -1725,7 +1738,14 @@ class TrayFeederEditor(QWidget):
             self._btn_cancel,
         ):
             w.setEnabled(enabled)
+        self._vision_pipeline.setEnabled(enabled)
+        self._vision_preview_step.setEnabled(enabled)
         self._parts_picked.setEnabled(False)
+
+    def _toggle_vision_advanced(self) -> None:
+        show = not self._vision_advanced.isVisible()
+        self._vision_advanced.setVisible(show)
+        self._btn_vision_adv.setText("Vision Hide" if show else "Vision...")
 
     def _on_fields_changed(self, *_args: Any) -> None:
         if self._loading_values:
