@@ -506,6 +506,18 @@ class CameraVisionModule:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _cleanup_diagnostic_images(self) -> None:
+        """Remove stale diagnostic JPEGs at backend startup."""
+        self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        for pattern in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG"):
+            for path in self._diagnostics_dir.glob(pattern):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                except Exception as exc:
+                    log.warning("Failed to remove diagnostic image %s: %s", path, exc)
+
     def _cancel_latest_active_domain_job(self, domain: str) -> str | None:
         prefix = f"{domain}_"
         for job in self._commands.recent(limit=200):
@@ -647,6 +659,7 @@ class CameraVisionModule:
         await self._driver.jog_camera_to_nozzle_position(nozzle_cfg, (float(target_x), float(target_y)))
 
     async def start(self) -> None:
+        self._cleanup_diagnostic_images()
         for state in self._cameras.values():
             await self._open_camera(state)
         await self._start_web()

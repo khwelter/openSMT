@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from opensmt.messaging import BusNode, SCPIMessage
+from opensmt.store.position_store import PositionStore
 
 from .base import ModuleBase
 
@@ -23,7 +24,6 @@ class NozzleState:
     xr: float
     yr: float
     z_axis: str
-    current_z: float
 
 
 class HeadModule(ModuleBase):
@@ -38,10 +38,17 @@ class HeadModule(ModuleBase):
     - QRY  :HEAD:NOZZLES?
     """
 
-    def __init__(self, name: str, config: dict[str, Any], node: BusNode) -> None:
+    def __init__(
+        self,
+        name: str,
+        config: dict[str, Any],
+        node: BusNode,
+        position_store: PositionStore,
+    ) -> None:
         super().__init__(name, config, node)
 
         self._target = str(config.get("target", "GCODE")).upper()
+        self._position_store = position_store
         self._home_position = float(config.get("home_position", 0.0))
         self._primary_camera = str(config.get("primary_camera", "TOP")).upper()
         self._camera_refs = [str(cam).upper() for cam in config.get("camera_refs", [self._primary_camera])]
@@ -67,7 +74,6 @@ class HeadModule(ModuleBase):
                 xr=xr,
                 yr=yr,
                 z_axis=z_axis,
-                current_z=self._home_position,
             )
             self._nozzles[n_name] = state
             self._axis_to_nozzle[z_axis] = n_name
@@ -86,7 +92,6 @@ class HeadModule(ModuleBase):
                     xr=0.0,
                     yr=0.0,
                     z_axis=z_axis,
-                    current_z=self._home_position,
                 )
                 self._nozzles[n_name] = state
                 self._axis_to_nozzle[z_axis] = n_name
@@ -96,6 +101,9 @@ class HeadModule(ModuleBase):
         self.node.on_set("*", self._handle_set)
         self.node.on_action("*", self._handle_action)
         self.node.on_response("*", self._handle_response)
+        for nozzle in self._nozzles.values():
+            if self._position_store.get(nozzle.z_axis) is None:
+                await self._position_store.update(nozzle.z_axis, self._home_position)
 
     async def stop(self) -> None:
         return None
@@ -121,7 +129,7 @@ class HeadModule(ModuleBase):
                         "xr": n.xr,
                         "yr": n.yr,
                         "z_axis": n.z_axis,
-                        "z": n.current_z,
+                        "z": self._position_store.get(n.z_axis),
                     }
                     for n in self._nozzles.values()
                 ],
@@ -134,7 +142,11 @@ class HeadModule(ModuleBase):
             if not nozzle:
                 await self.node.send_response(msg.command, "UNKNOWN_NOZZLE", target=target)
                 return
-            await self.node.send_response(msg.command, nozzle.current_z, target=target)
+            value = self._position_store.get(nozzle.z_axis)
+            if value is None:
+                await self.node.send_response(msg.command, "UNKNOWN", target=target)
+                return
+            await self.node.send_response(msg.command, value, target=target)
 
     async def _handle_set(self, packet: dict[str, Any], msg: SCPIMessage) -> None:
         if packet.get("source") == self.node.name:
@@ -165,7 +177,11 @@ class HeadModule(ModuleBase):
             if delta is None:
                 await self.node.send_response(msg.command, "INVALID_POSITION", target=target)
                 return
-            z_target = nozzle.current_z + delta
+            current = self._position_store.get(nozzle.z_axis)
+            if current is None:
+                await self.node.send_response(msg.command, "UNKNOWN", target=target)
+                return
+            z_target = current + delta
             await self._move_to(msg.command, nozzle, z_target, target)
 
     async def _handle_action(self, packet: dict[str, Any], msg: SCPIMessage) -> None:
@@ -209,7 +225,7 @@ class HeadModule(ModuleBase):
         if value is None:
             return
 
-        self._nozzles[nozzle_name].current_z = value
+        await self._position_store.update(axis, value)
 
     async def _park_all(self, command: str, target: str | None) -> None:
         await self.node.send_working(command, target=target)
@@ -219,7 +235,7 @@ class HeadModule(ModuleBase):
                 self._home_position,
                 target=self._target,
             )
-            nozzle.current_z = self._home_position
+            await self._position_store.update(nozzle.z_axis, self._home_position)
         await self.node.send_response(command, "DONE", target=target)
 
     async def _move_to(
@@ -239,5 +255,5 @@ class HeadModule(ModuleBase):
                 z_target,
                 target=self._target,
             )
-            nozzle.current_z = z_target
+            await self._position_store.update(nozzle.z_axis, z_target)
             await self.node.send_response(command, z_target, target=target)

@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 from opensmt.messaging import BusNode, SCPIMessage
+from opensmt.store.position_store import PositionStore
 
 from .base import ModuleBase
 
@@ -17,10 +18,16 @@ HOME_GROUP_AXES = {
 
 
 class CoordinateSystemModule(ModuleBase):
-    def __init__(self, name: str, config: dict[str, Any], node: BusNode) -> None:
+    def __init__(
+        self,
+        name: str,
+        config: dict[str, Any],
+        node: BusNode,
+        position_store: PositionStore,
+    ) -> None:
         super().__init__(name, config, node)
         self._axes = [str(axis).upper() for axis in config.get("axes", DEFAULT_AXES)]
-        self._positions: dict[str, float | None] = {axis: None for axis in self._axes}
+        self._position_store = position_store
         self._position_update_count: dict[str, int] = {axis: 0 for axis in self._axes}
         self._default_target = str(config.get("default_target", "GCODE")).upper()
         self._home_target = str(config.get("home_target", self._default_target)).upper()
@@ -100,10 +107,10 @@ class CoordinateSystemModule(ModuleBase):
 
         scope = parts[1]
         axis = parts[2].upper()
-        if scope not in {"ABS", "POS"} or axis not in self._positions:
+        if scope not in {"ABS", "POS"} or axis not in self._axes:
             return
 
-        value = self._positions[axis]
+        value = self._position_store.get(axis)
         if value is None:
             await self.node.send_response(msg.command, "UNKNOWN", target=packet.get("source"))
             return
@@ -137,7 +144,7 @@ class CoordinateSystemModule(ModuleBase):
 
         scope = parts[1]
         axis = parts[2].upper()
-        if axis not in self._positions:
+        if axis not in self._axes:
             return
 
         if scope == "ABS":
@@ -155,7 +162,7 @@ class CoordinateSystemModule(ModuleBase):
                 await self.node.send_response(msg.command, "INVALID_POSITION", target=target)
                 return
 
-            current = self._positions[axis]
+            current = self._position_store.get(axis)
             if current is None:
                 await self.node.send_response(msg.command, "UNKNOWN", target=target)
                 return
@@ -170,14 +177,14 @@ class CoordinateSystemModule(ModuleBase):
             return
 
         axis = parts[2].upper()
-        if axis not in self._positions:
+        if axis not in self._axes:
             return
 
         value = self._parse_numeric(msg.value)
         if value is None:
             return
 
-        self._positions[axis] = value
+        await self._position_store.update(axis, value)
         self._position_update_count[axis] += 1
 
     async def _handle_action(self, packet: dict[str, Any], msg: SCPIMessage) -> None:
@@ -226,7 +233,7 @@ class CoordinateSystemModule(ModuleBase):
                 axis
                 for group in self._home_groups
                 for axis in HOME_GROUP_AXES.get(group, [])
-                if axis in self._positions
+                if axis in self._axes
             ]
             snapshot = {axis: self._position_update_count[axis] for axis in requested_axes}
 
@@ -253,7 +260,7 @@ class CoordinateSystemModule(ModuleBase):
     async def _execute_home_group(self, command: str, target: str | None, group: str) -> None:
         async with self._home_lock:
             axes = HOME_GROUP_AXES.get(group, [])
-            requested_axes = [axis for axis in axes if axis in self._positions]
+            requested_axes = [axis for axis in axes if axis in self._axes]
             
             if not requested_axes:
                 await self.node.send_response(command, f"UNKNOWN_GROUP:{group}", target=target)
