@@ -1067,6 +1067,7 @@ class CameraVisionModule:
         app.router.add_post("/api/vision/pipeline/set", self._api_vision_pipeline_set)
         app.router.add_post("/api/vision/pipeline/run", self._api_vision_pipeline_run)
         app.router.add_post("/api/vision/pipeline/abort", self._api_vision_pipeline_abort)
+        app.router.add_post("/api/vision/pipeline/clear", self._api_vision_pipeline_clear)
         app.router.add_get("/api/status", self._api_status)
         app.router.add_get("/api/jobs/{job_id}", self._api_job_get)
 
@@ -2065,6 +2066,22 @@ class CameraVisionModule:
     async def _api_vision_pipeline_abort(self, request: web.Request) -> web.Response:
         self._vision_abort_requested = True
         return web.json_response({"status": "ok", "aborting": True})
+
+    async def _api_vision_pipeline_clear(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            camera = str(body.get("camera", "BOTTOM")).upper()
+        except Exception:
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        state = self._cameras.get(camera)
+        if state is None:
+            return web.json_response({"error": "unknown_camera"}, status=404)
+
+        state.active_pipeline = None
+        state.pipeline_params = {}
+        state.last_pipeline_result = {}
+        return web.json_response({"status": "ok", "camera": camera, "active_pipeline": None})
 
     async def _api_config_location_set(self, request: web.Request) -> web.Response:
         raw_name = request.match_info["name"]

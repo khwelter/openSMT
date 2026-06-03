@@ -570,6 +570,11 @@ class CameraTile(QFrame):
             "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
         self._camera_menu = QMenu(self._camera_menu_btn)
+        self._camera_menu.setStyleSheet(
+            "QMenu { background:#0b111b; color:#d9e8ff; border:1px solid #2a3d66; }"
+            "QMenu::item:selected { background:#1d3b6b; color:#ffffff; }"
+            "QMenu::item:disabled { color:#7085a8; }"
+        )
         self._camera_actions: dict[str, QAction] = {}
         self._camera_menu_btn.setMenu(self._camera_menu)
         self._camera_menu_btn.raise_()
@@ -724,6 +729,9 @@ class CameraTile(QFrame):
     def set_flip(self, flip_h: bool, flip_v: bool) -> None:
         self._flip_h = bool(flip_h)
         self._flip_v = bool(flip_v)
+
+    def set_compact_preview(self, compact: bool) -> None:
+        self._preview.setMinimumHeight(160 if compact else 300)
 
     def _on_zoom_changed(self, _idx: int) -> None:
         value = self._zoom.currentData()
@@ -2395,6 +2403,12 @@ class VisionPipelineDialog(QDialog):
 
     def hideEvent(self, event: Any) -> None:
         self._thumb_timer.stop()
+        # Return to raw camera view in the main UI once the modal editor closes.
+        self._api.post_json(
+            "/api/vision/pipeline/clear",
+            {"camera": self._camera_name},
+            lambda _ok, _status, _data: None,
+        )
         super().hideEvent(event)
 
     def _set_status(self, text: str) -> None:
@@ -2744,6 +2758,7 @@ class ControlWindow(QMainWindow):
         self._camera_status_by_name: dict[str, bool] = {}
         self._active_camera_name: str = ""
         self._shown_camera_name: str = ""
+        self._camera_view_mode: str = "selected"
         self._camera_placeholder: QLabel | None = None
         self._camera_thumb_pending: set[str] = set()
 
@@ -2842,6 +2857,20 @@ class ControlWindow(QMainWindow):
         self._camera_host_layout = QVBoxLayout(self._camera_host)
         self._camera_host_layout.setContentsMargins(0, 0, 0, 0)
         self._camera_host_layout.setSpacing(0)
+        cam_controls = QHBoxLayout()
+        cam_controls.setContentsMargins(2, 0, 2, 2)
+        cam_controls.setSpacing(4)
+        cam_controls.addWidget(QLabel("View"))
+        self._camera_view_combo = QComboBox()
+        self._camera_view_combo.addItem("Selected Only", "selected")
+        self._camera_view_combo.addItem("Top Only", "top")
+        self._camera_view_combo.addItem("Bottom Only", "bottom")
+        self._camera_view_combo.addItem("Both Side By Side", "both_h")
+        self._camera_view_combo.addItem("Both Top And Bottom", "both_v")
+        self._camera_view_combo.currentIndexChanged.connect(self._on_camera_view_mode_changed)
+        cam_controls.addWidget(self._camera_view_combo)
+        cam_controls.addStretch(1)
+        cam_group_layout.addLayout(cam_controls)
         cam_group_layout.addWidget(self._camera_host, 1)
 
         gp_group = QGroupBox("General Purpose")
@@ -3961,52 +3990,93 @@ class ControlWindow(QMainWindow):
         self._show_selected_camera()
 
     def _refresh_camera_thumbs(self) -> None:
-        name = self._active_camera_name
-        if not name:
-            return
-        tile = self._camera_tiles.get(name)
-        if tile is None or name in self._camera_thumb_pending:
-            return
+        for name in self._display_camera_names():
+            tile = self._camera_tiles.get(name)
+            if tile is None or name in self._camera_thumb_pending:
+                continue
 
-        self._camera_thumb_pending.add(name)
-        request = QNetworkRequest(QUrl(f"{self._api._base_url}/thumb/{name}"))
-        reply = self._img_net.get(request)
+            self._camera_thumb_pending.add(name)
+            request = QNetworkRequest(QUrl(f"{self._api._base_url}/thumb/{name}"))
+            reply = self._img_net.get(request)
 
-        def _finish(cam_name: str = name, cam_tile: CameraTile = tile, rep: QNetworkReply = reply) -> None:
-            try:
-                raw = bytes(rep.readAll())
-                status_obj = rep.attribute(QNetworkRequest.HttpStatusCodeAttribute)
-                status = int(status_obj) if status_obj is not None else 0
-                ok = rep.error() == QNetworkReply.NetworkError.NoError and status == 200 and bool(raw)
-                if ok:
-                    cam_tile.apply_frame(raw)
-            finally:
-                self._camera_thumb_pending.discard(cam_name)
-                rep.deleteLater()
+            def _finish(cam_name: str = name, cam_tile: CameraTile = tile, rep: QNetworkReply = reply) -> None:
+                try:
+                    raw = bytes(rep.readAll())
+                    status_obj = rep.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+                    status = int(status_obj) if status_obj is not None else 0
+                    ok = rep.error() == QNetworkReply.NetworkError.NoError and status == 200 and bool(raw)
+                    if ok:
+                        cam_tile.apply_frame(raw)
+                finally:
+                    self._camera_thumb_pending.discard(cam_name)
+                    rep.deleteLater()
 
-        reply.finished.connect(_finish)
+            reply.finished.connect(_finish)
+
+    def _display_camera_names(self) -> list[str]:
+        if not self._camera_tiles:
+            return []
+
+        ordered = list(self._camera_order) if self._camera_order else sorted(self._camera_tiles.keys())
+        mode = str(self._camera_view_mode).strip().lower()
+
+        if mode == "top":
+            return ["TOP"] if "TOP" in self._camera_tiles else [ordered[0]]
+        if mode == "bottom":
+            return ["BOTTOM"] if "BOTTOM" in self._camera_tiles else [ordered[0]]
+        if mode in {"both_h", "both_v"}:
+            names: list[str] = []
+            if "TOP" in self._camera_tiles:
+                names.append("TOP")
+            if "BOTTOM" in self._camera_tiles:
+                names.append("BOTTOM")
+            if len(names) < 2:
+                for name in ordered:
+                    if name not in names:
+                        names.append(name)
+                    if len(names) >= 2:
+                        break
+            return names
+
+        selected = self._active_camera_name if self._active_camera_name in self._camera_tiles else ordered[0]
+        return [selected]
 
     def _show_selected_camera(self) -> None:
-        selected = self._active_camera_name
-        if selected == self._shown_camera_name:
-            return
-
         while self._camera_host_layout.count():
             item = self._camera_host_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
 
-        tile = self._camera_tiles.get(selected)
-        if tile is None:
+        display_names = self._display_camera_names()
+        display_tiles = [self._camera_tiles[name] for name in display_names if name in self._camera_tiles]
+        if not display_tiles:
             self._camera_placeholder = QLabel("No cameras found in /api/status")
             self._camera_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._camera_host_layout.addWidget(self._camera_placeholder)
             self._shown_camera_name = ""
             return
 
-        self._camera_host_layout.addWidget(tile)
-        self._shown_camera_name = selected
+        compact = len(display_tiles) > 1
+        for tile in display_tiles:
+            tile.set_compact_preview(compact)
+
+        if len(display_tiles) == 1:
+            self._camera_host_layout.addWidget(display_tiles[0])
+        else:
+            mode = str(self._camera_view_mode).strip().lower()
+            host = QWidget()
+            if mode == "both_v":
+                layout = QVBoxLayout(host)
+            else:
+                layout = QHBoxLayout(host)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(4)
+            for tile in display_tiles:
+                layout.addWidget(tile, 1)
+            self._camera_host_layout.addWidget(host, 1)
+
+        self._shown_camera_name = ",".join(display_names)
         self._refresh_camera_thumbs()
 
     def _on_camera_selected(self, name: str) -> None:
@@ -4016,6 +4086,14 @@ class ControlWindow(QMainWindow):
         self._active_camera_name = name
         for tile in self._camera_tiles.values():
             tile.sync_camera_choices(self._camera_order, self._camera_status_by_name, self._active_camera_name)
+        self._show_selected_camera()
+
+    def _on_camera_view_mode_changed(self, _idx: int) -> None:
+        value = self._camera_view_combo.currentData()
+        mode = str(value).strip().lower() if value is not None else "selected"
+        if mode not in {"selected", "top", "bottom", "both_h", "both_v"}:
+            mode = "selected"
+        self._camera_view_mode = mode
         self._show_selected_camera()
 
     def _sync_nozzle_cards(self, nozzles: list[dict[str, Any]]) -> None:
