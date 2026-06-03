@@ -1091,6 +1091,19 @@ class CameraVisionModule:
         app.router.add_get("/api/config/packages", self._api_config_packages_get)
         app.router.add_post("/api/config/package/upsert", self._api_config_package_upsert)
         app.router.add_post("/api/config/package/delete", self._api_config_package_delete)
+        app.router.add_get("/api/config/parts", self._api_config_parts_get)
+        app.router.add_post("/api/config/part/upsert", self._api_config_part_upsert)
+        app.router.add_post("/api/config/part/delete", self._api_config_part_delete)
+        app.router.add_get("/api/config/pcbs", self._api_config_pcbs_get)
+        app.router.add_post("/api/config/pcb/upsert", self._api_config_pcb_upsert)
+        app.router.add_post("/api/config/pcb/delete", self._api_config_pcb_delete)
+        app.router.add_get("/api/config/panels", self._api_config_panels_get)
+        app.router.add_post("/api/config/panel/upsert", self._api_config_panel_upsert)
+        app.router.add_post("/api/config/panel/delete", self._api_config_panel_delete)
+        app.router.add_get("/api/config/jobs", self._api_config_jobs_get)
+        app.router.add_post("/api/config/job/upsert", self._api_config_job_upsert)
+        app.router.add_post("/api/config/job/delete", self._api_config_job_delete)
+        app.router.add_get("/api/config/catalog/status", self._api_config_catalog_status)
         app.router.add_post("/api/config/nozzle/{name}", self._api_config_nozzle_set)
         app.router.add_get("/api/feeders", self._api_feeders)
         app.router.add_post("/api/feeders", self._api_feeder_create)
@@ -2413,6 +2426,208 @@ class CameraVisionModule:
             {
                 "status": "ok",
                 "deleted": name,
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_parts_get(self, _request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        return web.json_response(
+            {
+                "status": "ok",
+                "parts": self._catalog_db.load_parts(),
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_part_upsert(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            part_raw = body.get("part")
+            old_part_id_raw = body.get("old_part_id")
+            if not isinstance(part_raw, dict):
+                return web.json_response({"error": "invalid_part"}, status=400)
+            part_id = str(part_raw.get("part_id", "")).strip().upper()
+            description = str(part_raw.get("description", "")).strip()
+            package = str(part_raw.get("package", "")).strip().upper()
+            quantity = int(part_raw.get("quantity", 0) or 0)
+            old_part_id = str(old_part_id_raw).strip().upper() if old_part_id_raw is not None else None
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not part_id:
+            return web.json_response({"error": "invalid_part_id"}, status=400)
+        if quantity < 0:
+            return web.json_response({"error": "invalid_quantity"}, status=400)
+
+        part_out = {
+            "part_id": part_id,
+            "description": description,
+            "package": package,
+            "quantity": quantity,
+        }
+        self._catalog_db.upsert_part(part_out)
+        if old_part_id and old_part_id != part_id:
+            self._catalog_db.delete_part(old_part_id)
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "part": part_out,
+                "old_part_id": old_part_id,
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_part_delete(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            part_id = str(body.get("part_id", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+        if not part_id:
+            return web.json_response({"error": "invalid_part_id"}, status=400)
+        self._catalog_db.delete_part(part_id)
+        return web.json_response({"status": "ok", "deleted": part_id, "catalog_db_path": str(self._catalog_db.path)})
+
+    async def _api_config_pcbs_get(self, _request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        return web.json_response(
+            {
+                "status": "ok",
+                "pcbs": self._catalog_db.load_pcbs(),
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_pcb_upsert(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            pcb_raw = body.get("pcb")
+            if not isinstance(pcb_raw, dict):
+                return web.json_response({"error": "invalid_pcb"}, status=400)
+            board_number = str(pcb_raw.get("board_number", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+        if not board_number:
+            return web.json_response({"error": "invalid_board_number"}, status=400)
+        pcb_out = dict(pcb_raw)
+        pcb_out["board_number"] = board_number
+        self._catalog_db.upsert_pcb(pcb_out)
+        return web.json_response({"status": "ok", "pcb": pcb_out, "catalog_db_path": str(self._catalog_db.path)})
+
+    async def _api_config_pcb_delete(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            board_number = str(body.get("board_number", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+        if not board_number:
+            return web.json_response({"error": "invalid_board_number"}, status=400)
+        self._catalog_db.delete_pcb(board_number)
+        return web.json_response({"status": "ok", "deleted": board_number, "catalog_db_path": str(self._catalog_db.path)})
+
+    async def _api_config_panels_get(self, _request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        return web.json_response(
+            {
+                "status": "ok",
+                "panels": self._catalog_db.load_panels(),
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_panel_upsert(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            panel_raw = body.get("panel")
+            if not isinstance(panel_raw, dict):
+                return web.json_response({"error": "invalid_panel"}, status=400)
+            panel_name = str(panel_raw.get("panel_name", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+        if not panel_name:
+            return web.json_response({"error": "invalid_panel_name"}, status=400)
+        panel_out = dict(panel_raw)
+        panel_out["panel_name"] = panel_name
+        self._catalog_db.upsert_panel(panel_out)
+        return web.json_response({"status": "ok", "panel": panel_out, "catalog_db_path": str(self._catalog_db.path)})
+
+    async def _api_config_panel_delete(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            panel_name = str(body.get("panel_name", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+        if not panel_name:
+            return web.json_response({"error": "invalid_panel_name"}, status=400)
+        self._catalog_db.delete_panel(panel_name)
+        return web.json_response({"status": "ok", "deleted": panel_name, "catalog_db_path": str(self._catalog_db.path)})
+
+    async def _api_config_jobs_get(self, _request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        return web.json_response(
+            {
+                "status": "ok",
+                "jobs": self._catalog_db.load_jobs(),
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_job_upsert(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            job_raw = body.get("job")
+            if not isinstance(job_raw, dict):
+                return web.json_response({"error": "invalid_job"}, status=400)
+            job_name = str(job_raw.get("job_name", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+        if not job_name:
+            return web.json_response({"error": "invalid_job_name"}, status=400)
+        job_out = dict(job_raw)
+        job_out["job_name"] = job_name
+        self._catalog_db.upsert_job(job_out)
+        return web.json_response({"status": "ok", "job": job_out, "catalog_db_path": str(self._catalog_db.path)})
+
+    async def _api_config_job_delete(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        try:
+            body = await request.json()
+            job_name = str(body.get("job_name", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+        if not job_name:
+            return web.json_response({"error": "invalid_job_name"}, status=400)
+        self._catalog_db.delete_job(job_name)
+        return web.json_response({"status": "ok", "deleted": job_name, "catalog_db_path": str(self._catalog_db.path)})
+
+    async def _api_config_catalog_status(self, _request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        return web.json_response(
+            {
+                "status": "ok",
+                "counts": self._catalog_db.counts(),
                 "catalog_db_path": str(self._catalog_db.path),
             }
         )

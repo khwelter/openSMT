@@ -84,7 +84,7 @@
         "standard_down_z": -39.0,
         "safe_zone_z": -10.0,
         "offset_x": -48.0,
-        "offset_y": -98.0,
+        "offset_y": -99.19999999999993,
         "vacuum_valve": {
           "board": "AB",
           "io_type": "gpio",

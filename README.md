@@ -65,34 +65,126 @@ python3 -m opensmt control-gui --host 127.0.0.1 --port 8080
 
 ## Configuration Layout
 
-The example config is split into modular chunks and merged via `$include`.
-Important files:
+The runtime loads one entry file and resolves `$include` recursively.
 
-- `config/examples/system.json` (entrypoint)
+Primary entrypoint:
+
+- `config/examples/system.json`
+  - Contains the include list that assembles the full machine config:
+    - `feeders.json`
+    - `system.boards.json`
+    - `system.driver.json`
+    - `system.locations.json`
+    - `parts.json`
+    - `nozzles.json`
+    - `camera/camera.core.json`
+    - `camera/camera.cameras.json`
+    - `camera/camera.pipelines.json`
+
+### Core Machine Config Files
+
 - `config/examples/system.boards.json`
+  - Top-level key: `boards`
+  - One object per board (`XY`, `AB`, `CD` in the example)
+  - Per-board serial settings:
+    - `device`, `baudrate`, `bytesize`, `parity`, `stopbits`
+    - `xonxoff`, `rtscts`, `dsrdtr`
+
 - `config/examples/system.driver.json`
+  - Top-level key: `driver`
+  - Global motion settings:
+    - `speed_factor`, `xy_slack_compensation_mm`
+    - `default_velocity`, `default_homing_velocity`
+  - Axis mapping:
+    - `axes[]` entries with `axis`, `board`, `gcode_letter`
+  - Per-axis limits/speeds:
+    - `axis_velocity`, `homing_velocity`
+  - Group homing:
+    - `home_groups` (for example `XY`, `Z1Z2`, `Z3Z4`)
+
 - `config/examples/system.locations.json`
+  - Top-level key: `locations`
+  - Named XY presets (`park`, `dispose`, `nozzle_change`, `fiducial_main`, `fiducial_second`, `calibration_spot`)
+  - Each location contains `X` and `Y`
+
 - `config/examples/nozzles.json`
-- `config/examples/camera/camera.core.json`
-- `config/examples/camera/camera.cameras.json`
-- `config/examples/camera/camera.pipelines.json`
+  - Top-level key: `camera.nozzle_tips` and `camera.nozzles`
+  - `camera.nozzle_tips[]` entries:
+    - `id`, `suction_hole_diameter_mm`, `component_min_mm`, `component_max_mm`
+  - `camera.nozzles[]` entries:
+    - identity/mechanics: `name`, `z_axis`, `min_z`, `max_z`, `safe_zone_z`
+    - setup values: `tip_id`, `standard_down_z`, `offset_x`, `offset_y`
+    - valve wiring: `vacuum_valve` and optional `air_valve` (`board`, `io_type`, `pin`)
+
 - `config/examples/feeders.json`
+  - Top-level key: `feeders`
+  - Each feeder entry includes:
+    - identity/type: `feeder_id`, `feeder_type`, `manufacturer_part_number`
+    - pick data: `pick_location` (`x`, `y`), `pick_height`
+    - optional tray geometry (`type_data`) and runtime tray state (`actual_data`)
+
 - `config/examples/parts.json`
+  - Top-level key: `parts`
+  - Seed list for parts catalog (can be empty)
 
-## SQLite Catalog (Packages / Parts / Feeders)
+### Camera Config Files
 
-Current primary persistence for catalog data is SQLite:
+- `config/examples/camera/camera.core.json`
+  - Top-level key: `camera`
+  - API server binding for runtime camera module:
+    - `web_host`, `web_port`
 
-- default DB: `config/examples/catalog.sqlite`
-- tables: `packages`, `parts`, `feeders`
+- `config/examples/camera/camera.cameras.json`
+  - Top-level key: `camera.cameras`
+  - Per-camera entries include:
+    - identity and source: `name`, `device`, `fps`
+    - calibration: `resolution_dpcm_x`, `resolution_dpcm_y`
+    - orientation: `flip_horizontal`, `flip_vertical`, `rotation_deg`
+    - optional camera XY mount location: `x`, `y`
+    - light mapping: `lights.<key>.board`, `index`, `on_value`
+    - allowed pipelines: `pipelines[]`
 
-Runtime behavior:
+- `config/examples/camera/camera.pipelines.json`
+  - Top-level key: `camera.pipelines`
+  - Named pipeline definitions:
+    - each entry has `name`, `type`
 
-- packages bootstrap from `config/examples/packages/*.json` when DB is empty
-- parts bootstrap from `config/examples/parts.json` when DB is empty
-- feeders bootstrap from merged config/feeders JSON when DB is empty
+### Catalog and Runtime Persistence Files
 
-The Qt control footer shows the active DB and row counts.
+- `config/examples/catalog.sqlite`
+  - Backend catalog database (authoritative for runtime catalog entities)
+  - Tables include:
+    - `packages`, `parts`, `feeders`, `pcbs`, `panels`, `jobs`
+
+- `config/examples/packages/*.json`
+  - Package seed files used to bootstrap backend catalog when empty
+  - Per file fields (example):
+    - `name`, `footprint`, `length_mm`, `width_mm`, `height_mm`, `pin_count`
+
+- `config/examples/feeders/*.json`
+  - Per-feeder persistence files (one file per feeder id)
+  - Same feeder schema as in `feeders.json`
+  - Loaded on backend startup and used for feeder state persistence
+
+### Legacy / Support Config Files
+
+- `config/examples/broker.json`
+  - Legacy SCPI broker host/port (`broker.host`, `broker.port`)
+
+- `config/examples/serial_ports_main.json`
+  - Legacy serial-port mapping format
+  - Contains `serial_ports[]` with serial settings, axis lists, and `axis_map`
+
+- `config/examples/playback.txt`
+  - Legacy monitor playback script with command lines and `SLEEP` statements
+
+## Persistence Behavior Summary
+
+- Location edits persist on backend to locations store path (defaults to `config/examples/system.locations.json`)
+- Camera settings and calibration persist on backend to camera settings path (defaults to `config/examples/camera/camera.cameras.json`)
+- Nozzle and nozzle-tip edits persist on backend to nozzle config path (defaults to `config/examples/nozzles.json`)
+- Feeders persist on backend to feeder files directory (defaults to `config/examples/feeders/`)
+- Catalog entities (packages, parts, pcbs, panels, jobs, feeders) persist on backend in `config/examples/catalog.sqlite`
 
 ## Qt Control GUI Overview
 

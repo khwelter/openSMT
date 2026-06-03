@@ -43,7 +43,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 
-from opensmt.store.catalog_sqlite import CatalogSQLite
 
 _ICON_SZ = 22
 _ARROW_W = 10
@@ -2779,14 +2778,6 @@ class ControlWindow(QMainWindow):
         self._setup_camera_current_row = -1
         self._setup_positions: list[dict[str, Any]] = []
         self._setup_position_current_row = -1
-        self._setup_config_dir = Path(__file__).resolve().parents[3] / "config" / "examples"
-        self._catalog_db_path = self._setup_config_dir / "catalog.sqlite"
-        self._catalog_db = CatalogSQLite(self._catalog_db_path)
-        self._packages_config_dir = self._setup_config_dir / "packages"
-        self._parts_config_path = self._setup_config_dir / "parts.json"
-        self._nozzles_config_path = self._setup_config_dir / "nozzles.json"
-        self._setup_camera_config_path = self._setup_config_dir / "camera" / "camera.cameras.json"
-        self._setup_locations_config_path = self._setup_config_dir / "system.locations.json"
         self._current_x: float | None = None
         self._current_y: float | None = None
         self._process_queue: list[str] = []
@@ -4794,58 +4785,114 @@ class ControlWindow(QMainWindow):
 
         old_id = str(part.get("part_id", "")).strip().upper()
         updated = dialog.part_data()
-        new_id = str(updated.get("part_id", "")).strip().upper()
-        if old_id and old_id != new_id:
-            self._parts_by_id.pop(old_id, None)
-            self._catalog_db.delete_part(old_id)
-        self._parts_by_id[updated["part_id"]] = updated
-        self._save_parts_config()
-        self._refresh_parts_table()
-        self._tray_editor.set_part_suggestions(sorted(self._parts_by_id.keys()))
+        self._save_part_config(updated, old_id)
 
     def _load_parts_from_config(self) -> None:
         self._parts_by_id = {}
-        self._catalog_db.bootstrap_parts_from_file(self._parts_config_path)
-        for item in self._catalog_db.load_parts():
-            part_id = str(item.get("part_id", "")).strip().upper()
-            if not part_id:
-                continue
-            self._parts_by_id[part_id] = {
-                "part_id": part_id,
-                "description": str(item.get("description", "")).strip(),
-                "package": str(item.get("package", "")).strip().upper(),
-                "quantity": int(item.get("quantity", 0) or 0),
-            }
+        self._api.get_json("/api/config/parts", self._on_parts_loaded)
+
+    def _on_parts_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load parts from backend: {data.get('error', 'request_failed')}")
+            self._refresh_parts_table()
+            return
+
+        self._parts_by_id = {}
+        parts = data.get("parts")
+        if isinstance(parts, list):
+            for item in parts:
+                if not isinstance(item, dict):
+                    continue
+                part_id = str(item.get("part_id", "")).strip().upper()
+                if not part_id:
+                    continue
+                self._parts_by_id[part_id] = {
+                    "part_id": part_id,
+                    "description": str(item.get("description", "")).strip(),
+                    "package": str(item.get("package", "")).strip().upper(),
+                    "quantity": int(item.get("quantity", 0) or 0),
+                }
         self._refresh_parts_table()
         self._tray_editor.set_part_suggestions(sorted(self._parts_by_id.keys()))
-        self._refresh_catalog_status()
 
-    def _save_parts_config(self) -> None:
-        for part in self._parts_by_id.values():
-            self._catalog_db.upsert_part(part)
+    def _save_part_config(self, part: dict[str, Any], old_part_id: str | None = None) -> None:
+        payload: dict[str, Any] = {"part": part}
+        if old_part_id and old_part_id != str(part.get("part_id", "")).strip().upper():
+            payload["old_part_id"] = old_part_id
+        self._api.post_json(
+            "/api/config/part/upsert",
+            payload,
+            self._on_part_saved,
+        )
+
+    def _on_part_saved(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: part save failed: {data.get('error', 'request_failed')}")
+            self._load_parts_from_config()
+            return
+
+        part = data.get("part") if isinstance(data.get("part"), dict) else None
+        if part is None:
+            self._log_line("WARN: part save returned invalid payload")
+            self._load_parts_from_config()
+            return
+
+        part_id = str(part.get("part_id", "")).strip().upper()
+        self._log_line(f"OK: part {part_id} saved on backend")
+        self._load_parts_from_config()
         self._refresh_catalog_status()
 
     def _load_production_from_db(self) -> None:
+        self._api.get_json("/api/config/pcbs", self._on_pcbs_loaded)
+        self._api.get_json("/api/config/panels", self._on_panels_loaded)
+        self._api.get_json("/api/config/jobs", self._on_jobs_loaded)
+
+    def _on_pcbs_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load PCBs from backend: {data.get('error', 'request_failed')}")
+            self._refresh_single_pcb_selector()
+            return
         self._pcbs_by_board_number = {}
-        for item in self._catalog_db.load_pcbs():
-            board_number = str(item.get("board_number", "")).strip().upper()
-            if board_number:
-                self._pcbs_by_board_number[board_number] = item
-
-        self._panels_by_name = {}
-        for item in self._catalog_db.load_panels():
-            panel_name = str(item.get("panel_name", "")).strip().upper()
-            if panel_name:
-                self._panels_by_name[panel_name] = item
-
-        self._jobs_by_name = {}
-        for item in self._catalog_db.load_jobs():
-            job_name = str(item.get("job_name", "")).strip().upper()
-            if job_name:
-                self._jobs_by_name[job_name] = item
-
+        pcbs = data.get("pcbs")
+        if isinstance(pcbs, list):
+            for item in pcbs:
+                if not isinstance(item, dict):
+                    continue
+                board_number = str(item.get("board_number", "")).strip().upper()
+                if board_number:
+                    self._pcbs_by_board_number[board_number] = item
         self._refresh_single_pcb_selector()
+
+    def _on_panels_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load panels from backend: {data.get('error', 'request_failed')}")
+            self._refresh_panel_selector()
+            return
+        self._panels_by_name = {}
+        panels = data.get("panels")
+        if isinstance(panels, list):
+            for item in panels:
+                if not isinstance(item, dict):
+                    continue
+                panel_name = str(item.get("panel_name", "")).strip().upper()
+                if panel_name:
+                    self._panels_by_name[panel_name] = item
         self._refresh_panel_selector()
+
+    def _on_jobs_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load jobs from backend: {data.get('error', 'request_failed')}")
+            self._refresh_job_selector()
+            return
+        self._jobs_by_name = {}
+        jobs = data.get("jobs")
+        if isinstance(jobs, list):
+            for item in jobs:
+                if not isinstance(item, dict):
+                    continue
+                job_name = str(item.get("job_name", "")).strip().upper()
+                if job_name:
+                    self._jobs_by_name[job_name] = item
         self._refresh_job_selector()
 
     def _refresh_single_pcb_selector(self) -> None:
@@ -4957,24 +5004,37 @@ class ControlWindow(QMainWindow):
         if not board_number:
             self._log_line("ERR: cannot save PCB without board number")
             return
-        self._catalog_db.upsert_pcb(pcb)
-        self._pcbs_by_board_number[board_number] = pcb
-        self._refresh_single_pcb_selector()
-        idx = self._single_pcb_select.findData(board_number)
-        if idx >= 0:
-            self._single_pcb_select.setCurrentIndex(idx)
-        self._refresh_catalog_status()
+        self._api.post_json(
+            "/api/config/pcb/upsert",
+            {"pcb": pcb},
+            lambda ok, status, data, bn=board_number: self._on_single_pcb_saved(bn, ok, status, data),
+        )
+
+    def _on_single_pcb_saved(self, board_number: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: PCB save failed: {data.get('error', 'request_failed')}")
+            return
         self._log_line(f"OK: saved PCB {board_number}")
+        self._load_production_from_db()
+        self._refresh_catalog_status()
 
     def _on_single_pcb_delete(self) -> None:
         board_number = self._single_pcb_board_number.text().strip().upper()
         if not board_number:
             return
-        self._catalog_db.delete_pcb(board_number)
-        self._pcbs_by_board_number.pop(board_number, None)
-        self._refresh_single_pcb_selector()
-        self._refresh_catalog_status()
+        self._api.post_json(
+            "/api/config/pcb/delete",
+            {"board_number": board_number},
+            lambda ok, status, data, bn=board_number: self._on_single_pcb_deleted(bn, ok, status, data),
+        )
+
+    def _on_single_pcb_deleted(self, board_number: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: PCB delete failed: {data.get('error', 'request_failed')}")
+            return
         self._log_line(f"OK: deleted PCB {board_number}")
+        self._load_production_from_db()
+        self._refresh_catalog_status()
 
     def _on_single_pcb_add_item(self) -> None:
         row = self._single_pcb_items_table.rowCount()
@@ -5110,24 +5170,37 @@ class ControlWindow(QMainWindow):
         if not panel_name:
             self._log_line("ERR: cannot save panel without name")
             return
-        self._catalog_db.upsert_panel(panel)
-        self._panels_by_name[panel_name] = panel
-        self._refresh_panel_selector()
-        idx = self._panel_select.findData(panel_name)
-        if idx >= 0:
-            self._panel_select.setCurrentIndex(idx)
-        self._refresh_catalog_status()
+        self._api.post_json(
+            "/api/config/panel/upsert",
+            {"panel": panel},
+            lambda ok, status, data, pn=panel_name: self._on_panel_saved(pn, ok, status, data),
+        )
+
+    def _on_panel_saved(self, panel_name: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: panel save failed: {data.get('error', 'request_failed')}")
+            return
         self._log_line(f"OK: saved panel {panel_name}")
+        self._load_production_from_db()
+        self._refresh_catalog_status()
 
     def _on_panel_delete(self) -> None:
         panel_name = self._panel_name.text().strip().upper()
         if not panel_name:
             return
-        self._catalog_db.delete_panel(panel_name)
-        self._panels_by_name.pop(panel_name, None)
-        self._refresh_panel_selector()
-        self._refresh_catalog_status()
+        self._api.post_json(
+            "/api/config/panel/delete",
+            {"panel_name": panel_name},
+            lambda ok, status, data, pn=panel_name: self._on_panel_deleted(pn, ok, status, data),
+        )
+
+    def _on_panel_deleted(self, panel_name: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: panel delete failed: {data.get('error', 'request_failed')}")
+            return
         self._log_line(f"OK: deleted panel {panel_name}")
+        self._load_production_from_db()
+        self._refresh_catalog_status()
 
     def _on_panel_import(self) -> None:
         dialog = _PanelImportDialog(self)
@@ -5188,43 +5261,62 @@ class ControlWindow(QMainWindow):
         if not job_name:
             self._log_line("ERR: cannot save job without name")
             return
-        self._catalog_db.upsert_job(job)
-        self._jobs_by_name[job_name] = job
-        self._refresh_job_selector()
-        idx = self._job_select.findData(job_name)
-        if idx >= 0:
-            self._job_select.setCurrentIndex(idx)
-        self._refresh_catalog_status()
+        self._api.post_json(
+            "/api/config/job/upsert",
+            {"job": job},
+            lambda ok, status, data, jn=job_name: self._on_job_saved(jn, ok, status, data),
+        )
+
+    def _on_job_saved(self, job_name: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: job save failed: {data.get('error', 'request_failed')}")
+            return
         self._log_line(f"OK: saved job {job_name}")
+        self._load_production_from_db()
+        self._refresh_catalog_status()
 
     def _on_job_delete(self) -> None:
         job_name = self._job_name.text().strip().upper()
         if not job_name:
             return
-        self._catalog_db.delete_job(job_name)
-        self._jobs_by_name.pop(job_name, None)
-        self._refresh_job_selector()
-        self._refresh_catalog_status()
+        self._api.post_json(
+            "/api/config/job/delete",
+            {"job_name": job_name},
+            lambda ok, status, data, jn=job_name: self._on_job_deleted(jn, ok, status, data),
+        )
+
+    def _on_job_deleted(self, job_name: str, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: job delete failed: {data.get('error', 'request_failed')}")
+            return
         self._log_line(f"OK: deleted job {job_name}")
+        self._load_production_from_db()
+        self._refresh_catalog_status()
 
     def _refresh_catalog_status(self) -> None:
-        try:
-            counts = self._catalog_db.counts()
-            self._catalog_status.setText(
-                "Catalog DB: "
-                f"{self._catalog_db.path.name} "
-                "("
-                f"packages={counts.get('packages', 0)}, "
-                f"parts={counts.get('parts', 0)}, "
-                f"feeders={counts.get('feeders', 0)}, "
-                f"pcbs={counts.get('pcbs', 0)}, "
-                f"panels={counts.get('panels', 0)}, "
-                f"jobs={counts.get('jobs', 0)}"
-                ")"
-            )
-            self._catalog_status.setToolTip(str(self._catalog_db.path))
-        except Exception:
+        self._api.get_json("/api/config/catalog/status", self._on_catalog_status_loaded)
+
+    def _on_catalog_status_loaded(self, ok: bool, _status: int, data: dict[str, Any]) -> None:
+        if not ok:
             self._catalog_status.setText("Catalog DB: unavailable")
+            return
+
+        counts = data.get("counts") if isinstance(data.get("counts"), dict) else {}
+        db_path = str(data.get("catalog_db_path", "")).strip()
+        db_name = Path(db_path).name if db_path else "catalog.sqlite"
+        self._catalog_status.setText(
+            "Catalog DB: "
+            f"{db_name} "
+            "("
+            f"packages={counts.get('packages', 0)}, "
+            f"parts={counts.get('parts', 0)}, "
+            f"feeders={counts.get('feeders', 0)}, "
+            f"pcbs={counts.get('pcbs', 0)}, "
+            f"panels={counts.get('panels', 0)}, "
+            f"jobs={counts.get('jobs', 0)}"
+            ")"
+        )
+        self._catalog_status.setToolTip(db_path)
 
     def _on_add_nozzle_tip(self) -> None:
         idx = len(self._nozzle_tips_by_id) + 1

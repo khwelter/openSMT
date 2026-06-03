@@ -81,6 +81,8 @@ async def run_from_config(config_path: str) -> None:
         catalog_db_path = (cfg_path.parent / "catalog.sqlite").resolve()
     camera_cfg_runtime["_catalog_db_path"] = str(catalog_db_path)
     catalog_db = CatalogSQLite(catalog_db_path)
+    catalog_db.bootstrap_packages_from_dir(cfg_path.parent / "packages")
+    catalog_db.bootstrap_parts_from_file(cfg_path.parent / "parts.json")
 
     # Persist nozzle offset/tip runtime corrections directly into base nozzle config chunk.
     offsets_persist_path_raw = camera_cfg_runtime.get("nozzle_offsets_persist_path")
