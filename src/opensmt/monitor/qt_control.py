@@ -6560,6 +6560,21 @@ class ControlWindow(QMainWindow):
         if tile is not None:
             tile.set_resolution_dpcm(dpcm_x, dpcm_y)
 
+        # Keep the setup-panel camera list in sync so a subsequent "Save" does
+        # not overwrite the freshly calibrated values with stale ones.
+        for idx, cam in enumerate(self._setup_cameras):
+            if str(cam.get("name", "")).strip().upper() == camera_name.upper():
+                cam["resolution_dpcm_x"] = dpcm_x
+                cam["resolution_dpcm_y"] = dpcm_y
+                # If this camera row is currently open in the editor, update the
+                # spinboxes directly (avoid calling _on_setup_camera_row_selected
+                # which would first flush the old spinbox values back into the list).
+                if self._setup_camera_current_row == idx:
+                    self._setup_cam_res_x.setValue(dpcm_x)
+                    self._setup_cam_res_y.setValue(dpcm_y)
+                self._refresh_setup_camera_table()
+                break
+
         if data.get("persisted", True):
             self._log_line(f"OK: {camera_name} calibrated to {dpcm_x:.2f}/{dpcm_y:.2f} dpcm")
         else:

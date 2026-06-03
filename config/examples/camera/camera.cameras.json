@@ -7,17 +7,32 @@
         "y": 65.0,
         "device": "/dev/video0",
         "fps": 10,
-        "resolution_dpcm_x": 95.0,
-        "resolution_dpcm_y": 95.0,
+        "resolution_dpcm_x": 397.58498583569417,
+        "resolution_dpcm_y": 397.58498583569406,
         "flip_horizontal": false,
         "flip_vertical": true,
         "rotation_deg": 0,
         "lights": {
-          "standard": { "board": "XY", "index": 0, "on_value": 1 },
-          "spec1": { "board": "XY", "index": 7, "on_value": 1 },
-          "spec2": { "board": "XY", "index": 8, "on_value": 1 }
+          "standard": {
+            "board": "XY",
+            "index": 0,
+            "on_value": 1
+          },
+          "spec1": {
+            "board": "XY",
+            "index": 7,
+            "on_value": 1
+          },
+          "spec2": {
+            "board": "XY",
+            "index": 8,
+            "on_value": 1
+          }
         },
-        "pipelines": ["DETECT_FIDUCIAL", "MEASURE_COMPONENT"]
+        "pipelines": [
+          "DETECT_FIDUCIAL",
+          "MEASURE_COMPONENT"
+        ]
       },
       {
         "name": "TOP",
@@ -29,11 +44,25 @@
         "flip_vertical": false,
         "rotation_deg": 90,
         "lights": {
-          "standard": { "board": "AB", "index": 0, "on_value": 1 },
-          "spec1": { "board": "AB", "index": 1, "on_value": 1 },
-          "spec2": { "board": "CD", "index": 0, "on_value": 1 }
+          "standard": {
+            "board": "AB",
+            "index": 0,
+            "on_value": 1
+          },
+          "spec1": {
+            "board": "AB",
+            "index": 1,
+            "on_value": 1
+          },
+          "spec2": {
+            "board": "CD",
+            "index": 0,
+            "on_value": 1
+          }
         },
-        "pipelines": ["PASSTHROUGH"]
+        "pipelines": [
+          "PASSTHROUGH"
+        ]
       }
     ]
   }
