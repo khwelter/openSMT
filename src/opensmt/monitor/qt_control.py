@@ -3928,6 +3928,7 @@ class ControlWindow(QMainWindow):
         self._sync_feeders(feeders)
 
     def _sync_camera_tiles(self, cameras: list[dict[str, Any]]) -> None:
+        previous_shown = self._shown_camera_name
         known = set(self._camera_tiles.keys())
         incoming: set[str] = set()
         status_by_name: dict[str, bool] = {}
@@ -3978,7 +3979,13 @@ class ControlWindow(QMainWindow):
 
         for tile in self._camera_tiles.values():
             tile.sync_camera_choices(ordered, status_by_name, self._active_camera_name)
-        self._show_selected_camera()
+
+        # Rebuild camera host layout only when the displayed camera set changes.
+        # Frequent polling updates status/frames; rebuilding every cycle reparents
+        # widgets and closes open combo popups (e.g. zoom selector).
+        shown_now = ",".join(self._display_camera_names())
+        if shown_now != previous_shown:
+            self._show_selected_camera()
 
     def _refresh_camera_thumbs(self) -> None:
         for name in self._display_camera_names():
