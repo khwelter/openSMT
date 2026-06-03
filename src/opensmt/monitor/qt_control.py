@@ -4175,52 +4175,20 @@ class ControlWindow(QMainWindow):
             self._open_feeder_editor(self._selected_feeder_id, activate_tab=False)
         self._refresh_catalog_status()
 
-    def _load_packages_from_config(self) -> None:
-        self._packages_by_name = {}
-        cfg_root = Path(__file__).resolve().parents[3] / "config" / "examples" / "packages"
-        if not cfg_root.exists() or not cfg_root.is_dir():
-            self._log_line(f"WARN: package config directory not found: {cfg_root}")
-            self._refresh_package_table()
+    def _load_setup_cameras_from_config(self) -> None:
+        self._api.get_json("/api/config/cameras", self._on_setup_cameras_loaded)
+
+    def _on_setup_cameras_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load setup cameras from backend: {data.get('error', 'request_failed')}")
             return
 
-        for path in sorted(cfg_root.glob("*.json")):
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(raw, dict):
-                    raise ValueError("expected JSON object")
-                name = str(raw.get("name", "")).strip().upper()
-                if not name:
-                    raise ValueError("missing package name")
-                self._packages_by_name[name] = {
-                    "name": name,
-                    "footprint": str(raw.get("footprint", "")).strip(),
-                    "length_mm": float(raw.get("length_mm", 0.0) or 0.0),
-                    "width_mm": float(raw.get("width_mm", 0.0) or 0.0),
-                    "height_mm": float(raw.get("height_mm", 0.0) or 0.0),
-                    "pin_count": int(raw.get("pin_count", 0) or 0),
-                }
-            except Exception as exc:
-                self._log_line(f"WARN: failed to load package config {path.name}: {exc}")
-
-        self._refresh_package_table()
-
-    def _load_setup_cameras_from_config(self) -> None:
         self._setup_cameras = []
-        try:
-            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
-            cameras: Any = []
-            if isinstance(raw, dict):
-                camera_block = raw.get("camera")
-                if isinstance(camera_block, dict):
-                    cameras = camera_block.get("cameras", [])
-                else:
-                    cameras = raw.get("cameras", [])
-            if isinstance(cameras, list):
-                for item in cameras:
-                    if isinstance(item, dict):
-                        self._setup_cameras.append(dict(item))
-        except Exception as exc:
-            self._log_line(f"WARN: failed to load setup cameras: {exc}")
+        cameras = data.get("cameras")
+        if isinstance(cameras, list):
+            for item in cameras:
+                if isinstance(item, dict):
+                    self._setup_cameras.append(dict(item))
 
         self._refresh_setup_camera_table()
         if self._setup_cameras:
@@ -4229,49 +4197,44 @@ class ControlWindow(QMainWindow):
         else:
             self._setup_camera_current_row = -1
 
-    def _load_setup_positions_from_config(self) -> None:
-        self._setup_positions = []
-        try:
-            loc_raw = json.loads(self._setup_locations_config_path.read_text(encoding="utf-8"))
-            if isinstance(loc_raw, dict):
-                locations = loc_raw.get("locations", {})
-                if isinstance(locations, dict):
-                    for name, coords in locations.items():
-                        if not isinstance(coords, dict):
-                            continue
-                        self._setup_positions.append(
-                            {
-                                "name": str(name).strip().lower(),
-                                "kind": "location",
-                                "x": float(coords.get("X", 0.0) or 0.0),
-                                "y": float(coords.get("Y", 0.0) or 0.0),
-                            }
-                        )
+        # Camera XY (BOTTOM) is shown in setup positions; refresh positions once
+        # the backend camera list is available.
+        self._load_setup_positions_from_config()
 
-            cam_raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
-            if isinstance(cam_raw, dict):
-                camera_block = cam_raw.get("camera")
-                cameras = camera_block.get("cameras", []) if isinstance(camera_block, dict) else []
-                if isinstance(cameras, list):
-                    for item in cameras:
-                        if not isinstance(item, dict):
-                            continue
-                        if str(item.get("name", "")).strip().upper() != "BOTTOM":
-                            continue
-                        if item.get("x") is None or item.get("y") is None:
-                            continue
-                        self._setup_positions.append(
-                            {
-                                "name": "bottom_camera",
-                                "kind": "camera",
-                                "camera_name": "BOTTOM",
-                                "x": float(item.get("x", 0.0) or 0.0),
-                                "y": float(item.get("y", 0.0) or 0.0),
-                            }
-                        )
-                        break
-        except Exception as exc:
-            self._log_line(f"WARN: failed to load setup positions: {exc}")
+    def _load_setup_positions_from_config(self) -> None:
+        self._api.get_json("/api/config/locations", self._on_setup_locations_loaded)
+
+    def _on_setup_locations_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load setup locations from backend: {data.get('error', 'request_failed')}")
+            return
+
+        self._setup_positions = []
+        locations = data.get("locations")
+        if isinstance(locations, dict):
+            for name, coords in locations.items():
+                if not isinstance(coords, dict):
+                    continue
+                self._setup_positions.append(
+                    {
+                        "name": str(name).strip().lower(),
+                        "kind": "location",
+                        "x": float(coords.get("X", 0.0) or 0.0),
+                        "y": float(coords.get("Y", 0.0) or 0.0),
+                    }
+                )
+
+        bottom = next((cam for cam in self._setup_cameras if str(cam.get("name", "")).strip().upper() == "BOTTOM"), None)
+        if isinstance(bottom, dict) and bottom.get("x") is not None and bottom.get("y") is not None:
+            self._setup_positions.append(
+                {
+                    "name": "bottom_camera",
+                    "kind": "camera",
+                    "camera_name": "BOTTOM",
+                    "x": float(bottom.get("x", 0.0) or 0.0),
+                    "y": float(bottom.get("y", 0.0) or 0.0),
+                }
+            )
 
         self._refresh_setup_position_table()
         if self._setup_positions:
@@ -4373,34 +4336,67 @@ class ControlWindow(QMainWindow):
             self._log_line("ERR: position save failed: duplicate position names")
             return
 
-        try:
-            locations_out: dict[str, dict[str, float]] = {}
-            bottom_xy: tuple[float, float] | None = None
-            for item in self._setup_positions:
-                kind = str(item.get("kind", "")).strip().lower()
-                name = str(item.get("name", "")).strip().lower()
-                x = float(item.get("x", 0.0) or 0.0)
-                y = float(item.get("y", 0.0) or 0.0)
-                if kind == "camera" and name == "bottom_camera":
-                    bottom_xy = (x, y)
-                    continue
-                locations_out[name] = {"X": x, "Y": y}
+        locations_out: dict[str, dict[str, float]] = {}
+        bottom_xy: tuple[float, float] | None = None
+        for item in self._setup_positions:
+            kind = str(item.get("kind", "")).strip().lower()
+            name = str(item.get("name", "")).strip().lower()
+            x = float(item.get("x", 0.0) or 0.0)
+            y = float(item.get("y", 0.0) or 0.0)
+            if kind == "camera" and name == "bottom_camera":
+                bottom_xy = (x, y)
+                continue
+            locations_out[name] = {"X": x, "Y": y}
 
-            loc_raw = json.loads(self._setup_locations_config_path.read_text(encoding="utf-8"))
-            if not isinstance(loc_raw, dict):
-                raise ValueError("locations config root must be an object")
-            loc_raw["locations"] = locations_out
-            self._setup_locations_config_path.write_text(json.dumps(loc_raw, indent=2) + "\n", encoding="utf-8")
+        self._api.post_json(
+            "/api/config/locations/replace",
+            {"locations": locations_out},
+            lambda ok, status, data, bxy=bottom_xy: self._on_setup_positions_saved(ok, status, data, bxy),
+        )
 
-            self._refresh_setup_position_table()
-            self._log_line(
-                f"OK: saved positions to {self._setup_locations_config_path}"
-                + (" and queued BOTTOM camera XY update on backend" if bottom_xy is not None else "")
-            )
-            for item in self._setup_positions:
-                self._apply_setup_position_runtime(item)
-        except Exception as exc:
-            self._log_line(f"ERR: position save failed: {exc}")
+    def _on_setup_positions_saved(
+        self,
+        ok: bool,
+        status: int,
+        data: dict[str, Any],
+        bottom_xy: tuple[float, float] | None,
+    ) -> None:
+        if not ok:
+            self._log_line(f"ERR {status}: position save failed on backend: {data.get('error', 'request_failed')}")
+            return
+
+        self._refresh_setup_position_table()
+        self._log_line(
+            "OK: positions saved on backend"
+            + (" and queued BOTTOM camera XY update on backend" if bottom_xy is not None else "")
+        )
+
+        if bottom_xy is None:
+            self._poll_status()
+            return
+
+        camera = next((cam for cam in self._setup_cameras if str(cam.get("name", "")).strip().upper() == "BOTTOM"), None)
+        if camera is None:
+            self._log_line("WARN: bottom camera position not applied: BOTTOM camera not configured")
+            self._poll_status()
+            return
+
+        payload = {
+            "device": str(camera.get("device", "")).strip(),
+            "fps": float(camera.get("fps", 0.0) or 0.0),
+            "resolution_dpcm_x": float(camera.get("resolution_dpcm_x", 0.0) or 0.0),
+            "resolution_dpcm_y": float(camera.get("resolution_dpcm_y", 0.0) or 0.0),
+            "flip_horizontal": bool(camera.get("flip_horizontal", False)),
+            "flip_vertical": bool(camera.get("flip_vertical", False)),
+            "rotation_deg": float(camera.get("rotation_deg", 0.0) or 0.0),
+            "x": float(bottom_xy[0]),
+            "y": float(bottom_xy[1]),
+        }
+        self._api.post_json(
+            "/api/camera/BOTTOM/settings",
+            payload,
+            lambda ok2, status2, data2: self._on_setup_bottom_camera_position_applied(ok2, status2, data2),
+        )
 
     def _apply_setup_position_runtime(self, item: dict[str, Any]) -> None:
         kind = str(item.get("kind", "")).strip().lower()
@@ -4622,7 +4618,6 @@ class ControlWindow(QMainWindow):
             "height_mm": 0.5,
             "pin_count": 2,
             "compatible_nozzle_tips": [],
-            "_path": str(self._packages_config_dir / f"{name.lower()}.json"),
         }
         self._refresh_package_table()
         self._open_package_details(name)
@@ -4647,17 +4642,27 @@ class ControlWindow(QMainWindow):
         updated = dict(pkg)
         updated.update(dialog.package_data())
         old_name = str(pkg.get("name", "")).strip().upper()
-        self._save_package_config(updated)
-        if updated["name"] != old_name:
-            self._catalog_db.delete_package(old_name)
-            self._packages_by_name.pop(old_name, None)
-        self._packages_by_name[str(updated["name"]).strip().upper()] = updated
-        self._refresh_package_table()
+        self._save_package_config(updated, old_name)
 
     def _load_packages_from_config(self) -> None:
         self._packages_by_name = {}
-        self._catalog_db.bootstrap_packages_from_dir(self._packages_config_dir)
-        for raw in self._catalog_db.load_packages():
+        self._api.get_json("/api/config/packages", self._on_packages_loaded)
+
+    def _on_packages_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load packages from backend: {data.get('error', 'request_failed')}")
+            self._refresh_package_table()
+            return
+
+        self._packages_by_name = {}
+        packages = data.get("packages")
+        if not isinstance(packages, list):
+            self._refresh_package_table()
+            return
+
+        for raw in packages:
+            if not isinstance(raw, dict):
+                continue
             name = str(raw.get("name", "")).strip().upper()
             if not name:
                 continue
@@ -4676,11 +4681,37 @@ class ControlWindow(QMainWindow):
             }
 
         self._refresh_package_table()
-        self._refresh_catalog_status()
 
-    def _save_package_config(self, package: dict[str, Any]) -> None:
-        self._catalog_db.upsert_package(package)
-        self._refresh_catalog_status()
+    def _save_package_config(self, package: dict[str, Any], old_name: str | None = None) -> None:
+        payload: dict[str, Any] = {"package": package}
+        if old_name and str(old_name).strip().upper() != str(package.get("name", "")).strip().upper():
+            payload["old_name"] = str(old_name).strip().upper()
+        self._api.post_json(
+            "/api/config/package/upsert",
+            payload,
+            self._on_package_saved,
+        )
+
+    def _on_package_saved(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: package save failed: {data.get('error', 'request_failed')}")
+            self._load_packages_from_config()
+            return
+
+        package = data.get("package") if isinstance(data.get("package"), dict) else None
+        if package is None:
+            self._log_line("WARN: package save returned invalid payload")
+            self._load_packages_from_config()
+            return
+
+        name = str(package.get("name", "")).strip().upper()
+        if not name:
+            self._log_line("WARN: package save returned empty package name")
+            self._load_packages_from_config()
+            return
+
+        self._log_line(f"OK: package {name} saved on backend")
+        self._load_packages_from_config()
 
     def _refresh_parts_table(self) -> None:
         rows = sorted(self._parts_by_id.values(), key=lambda item: str(item.get("part_id", "")))
@@ -5295,70 +5326,79 @@ class ControlWindow(QMainWindow):
     def _load_nozzle_editor_config(self) -> None:
         self._nozzle_tips_by_id = {}
         self._nozzles_by_name = {}
-        if not self._nozzles_config_path.exists():
+        self._api.get_json("/api/config/nozzle-tips", self._on_nozzle_tips_loaded)
+        self._api.get_json("/api/config/nozzles", self._on_nozzles_loaded)
+
+    def _on_nozzle_tips_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load nozzle tips from backend: {data.get('error', 'request_failed')}")
             self._refresh_nozzle_tip_table()
+            return
+
+        self._nozzle_tips_by_id = {}
+        nozzle_tips = data.get("nozzle_tips")
+        if isinstance(nozzle_tips, list):
+            for item in nozzle_tips:
+                if not isinstance(item, dict):
+                    continue
+                tip_id = str(item.get("id", "")).strip()
+                if not tip_id:
+                    continue
+                self._nozzle_tips_by_id[tip_id] = {
+                    "id": tip_id,
+                    "suction_hole_diameter_mm": item.get("suction_hole_diameter_mm"),
+                    "component_min_mm": item.get("component_min_mm"),
+                    "component_max_mm": item.get("component_max_mm"),
+                }
+        self._refresh_nozzle_tip_table()
+
+    def _on_nozzles_loaded(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: failed to load nozzles from backend: {data.get('error', 'request_failed')}")
             self._refresh_nozzle_table()
             return
 
-        try:
-            raw = json.loads(self._nozzles_config_path.read_text(encoding="utf-8"))
-            camera = raw.get("camera", {}) if isinstance(raw, dict) else {}
-            nozzle_tips = camera.get("nozzle_tips", []) if isinstance(camera, dict) else []
-            nozzles = camera.get("nozzles", []) if isinstance(camera, dict) else []
-
-            if isinstance(nozzle_tips, list):
-                for item in nozzle_tips:
-                    if not isinstance(item, dict):
-                        continue
-                    tip_id = str(item.get("id", "")).strip()
-                    if not tip_id:
-                        continue
-                    self._nozzle_tips_by_id[tip_id] = {
-                        "id": tip_id,
-                        "suction_hole_diameter_mm": item.get("suction_hole_diameter_mm"),
-                        "component_min_mm": item.get("component_min_mm"),
-                        "component_max_mm": item.get("component_max_mm"),
-                    }
-
-            if isinstance(nozzles, list):
-                for item in nozzles:
-                    if not isinstance(item, dict):
-                        continue
-                    name = str(item.get("name", "")).strip().upper()
-                    if not name:
-                        continue
-                    self._nozzles_by_name[name] = {
-                        "name": name,
-                        "z_axis": str(item.get("z_axis", "")).strip().upper(),
-                        "min_z": float(item.get("min_z", 0.0) or 0.0),
-                        "max_z": float(item.get("max_z", 0.0) or 0.0),
-                        "offset_x": float(item.get("offset_x", 0.0) or 0.0),
-                        "offset_y": float(item.get("offset_y", 0.0) or 0.0),
-                        "tip_id": str(item.get("tip_id", "")).strip() or None,
-                        "standard_down_z": float(item.get("standard_down_z", 0.0) or 0.0),
-                        "vacuum_valve": dict(item.get("vacuum_valve", {})) if isinstance(item.get("vacuum_valve"), dict) else {},
-                        "air_valve": dict(item.get("air_valve", {})) if isinstance(item.get("air_valve"), dict) else None,
-                    }
-        except Exception as exc:
-            self._log_line(f"WARN: failed to load nozzle config: {exc}")
-        self._refresh_nozzle_tip_table()
+        self._nozzles_by_name = {}
+        nozzles = data.get("nozzles")
+        if isinstance(nozzles, list):
+            for item in nozzles:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip().upper()
+                if not name:
+                    continue
+                self._nozzles_by_name[name] = {
+                    "name": name,
+                    "z_axis": str(item.get("z_axis", "")).strip().upper(),
+                    "min_z": float(item.get("min_z", 0.0) or 0.0),
+                    "max_z": float(item.get("max_z", 0.0) or 0.0),
+                    "offset_x": float(item.get("offset_x", 0.0) or 0.0),
+                    "offset_y": float(item.get("offset_y", 0.0) or 0.0),
+                    "tip_id": str(item.get("tip_id", "")).strip() or None,
+                    "standard_down_z": float(item.get("standard_down_z", 0.0) or 0.0),
+                    "vacuum_valve": dict(item.get("vacuum_valve", {})) if isinstance(item.get("vacuum_valve"), dict) else {},
+                    "air_valve": dict(item.get("air_valve", {})) if isinstance(item.get("air_valve"), dict) else None,
+                }
         self._refresh_nozzle_table()
 
     def _save_nozzle_editor_config(self) -> None:
-        self._nozzles_config_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            raw = json.loads(self._nozzles_config_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raw = {}
-        except Exception:
-            raw = {}
-        camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
-        if not isinstance(camera, dict):
-            camera = {}
-        camera["nozzle_tips"] = [dict(self._nozzle_tips_by_id[key]) for key in sorted(self._nozzle_tips_by_id.keys())]
-        camera["nozzles"] = [dict(self._nozzles_by_name[key]) for key in sorted(self._nozzles_by_name.keys())]
-        raw["camera"] = camera
-        self._nozzles_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+        payload = {
+            "nozzle_tips": [dict(self._nozzle_tips_by_id[key]) for key in sorted(self._nozzle_tips_by_id.keys())],
+        }
+        self._api.post_json(
+            "/api/config/nozzle-tips",
+            payload,
+            self._on_nozzle_tips_saved,
+        )
+
+    def _on_nozzle_tips_saved(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"WARN {status}: nozzle tips save failed: {data.get('error', 'request_failed')}")
+            return
+        if data.get("persisted", True):
+            self._log_line("OK: nozzle tips saved on backend")
+        else:
+            self._log_line(f"WARN: nozzle tips updated in runtime only: {data.get('persist_error', 'persistence_not_configured')}")
 
     def _apply_nozzle_runtime(self, nozzle: dict[str, Any]) -> None:
         name = str(nozzle.get("name", "")).strip().upper()

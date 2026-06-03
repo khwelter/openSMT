@@ -417,6 +417,19 @@ class CameraVisionModule:
         self._nozzle_offsets_persist_path = Path(str(offsets_persist_path_raw)).expanduser() if offsets_persist_path_raw else None
         camera_res_persist_path_raw = config.get("_camera_resolutions_persist_path")
         self._camera_resolutions_persist_path = Path(str(camera_res_persist_path_raw)).expanduser() if camera_res_persist_path_raw else None
+        self._nozzle_tips: dict[str, dict[str, Any]] = {}
+        for item in config.get("nozzle_tips", []):
+            if not isinstance(item, dict):
+                continue
+            tip_id = str(item.get("id", "")).strip()
+            if not tip_id:
+                continue
+            self._nozzle_tips[tip_id] = {
+                "id": tip_id,
+                "suction_hole_diameter_mm": item.get("suction_hole_diameter_mm"),
+                "component_min_mm": item.get("component_min_mm"),
+                "component_max_mm": item.get("component_max_mm"),
+            }
 
         # Build nozzle runtime config table (limits only; current position lives in PositionStore)
         self._nozzles: dict[str, RuntimeNozzleConfig] = {}
@@ -1069,6 +1082,15 @@ class CameraVisionModule:
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
         app.router.add_get("/api/coord/m114", self._api_coord_m114)
         app.router.add_post("/api/config/location/{name}", self._api_config_location_set)
+        app.router.add_get("/api/config/locations", self._api_config_locations_get)
+        app.router.add_post("/api/config/locations/replace", self._api_config_locations_replace)
+        app.router.add_get("/api/config/cameras", self._api_config_cameras_get)
+        app.router.add_get("/api/config/nozzles", self._api_config_nozzles_get)
+        app.router.add_get("/api/config/nozzle-tips", self._api_config_nozzle_tips_get)
+        app.router.add_post("/api/config/nozzle-tips", self._api_config_nozzle_tips_set)
+        app.router.add_get("/api/config/packages", self._api_config_packages_get)
+        app.router.add_post("/api/config/package/upsert", self._api_config_package_upsert)
+        app.router.add_post("/api/config/package/delete", self._api_config_package_delete)
         app.router.add_post("/api/config/nozzle/{name}", self._api_config_nozzle_set)
         app.router.add_get("/api/feeders", self._api_feeders)
         app.router.add_post("/api/feeders", self._api_feeder_create)
@@ -1755,6 +1777,11 @@ class CameraVisionModule:
             if not isinstance(nozzles_list, list):
                 return "invalid_persist_file:no_camera.nozzles_list"
 
+            camera_obj["nozzle_tips"] = [
+                dict(self._nozzle_tips[key])
+                for key in sorted(self._nozzle_tips.keys())
+            ]
+
             cfg_by_name: dict[str, Any] = {}
             for nozzle_name in self._nozzle_config_store.names():
                 cfg = self._nozzle_config_store.get(nozzle_name)
@@ -2137,6 +2164,258 @@ class CameraVisionModule:
         state.pipeline_params = {}
         state.last_pipeline_result = {}
         return web.json_response({"status": "ok", "camera": camera, "active_pipeline": None})
+
+    async def _api_config_locations_get(self, _request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "status": "ok",
+                "locations": self._location_store.all(),
+                "persist_path": self._location_store.persist_path(),
+            }
+        )
+
+    async def _api_config_locations_replace(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            locations_raw = body.get("locations")
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not isinstance(locations_raw, dict):
+            return web.json_response({"error": "invalid_locations"}, status=400)
+
+        parsed: dict[str, dict[str, float]] = {}
+        for name_raw, coords_raw in locations_raw.items():
+            name = str(name_raw).strip().lower()
+            if not name:
+                return web.json_response({"error": "invalid_location_name"}, status=400)
+            if not isinstance(coords_raw, dict):
+                return web.json_response({"error": "invalid_location_entry", "name": name}, status=400)
+            try:
+                x = float(coords_raw.get("X"))
+                y = float(coords_raw.get("Y"))
+            except (TypeError, ValueError):
+                return web.json_response({"error": "invalid_location_coordinates", "name": name}, status=400)
+            if not (math.isfinite(x) and math.isfinite(y)):
+                return web.json_response({"error": "invalid_location_coordinates", "name": name}, status=400)
+            parsed[name] = {"X": x, "Y": y}
+
+        existing = set(self._location_store.names())
+        incoming = set(parsed.keys())
+        for name in sorted(existing - incoming):
+            self._location_store.delete(name)
+        for name, coords in parsed.items():
+            self._location_store.set(name, coords)
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "locations": self._location_store.all(),
+                "persist_path": self._location_store.persist_path(),
+            }
+        )
+
+    async def _api_config_cameras_get(self, _request: web.Request) -> web.Response:
+        cameras_out: list[dict[str, Any]] = []
+        for cam_cfg in self.config.get("cameras", []):
+            if isinstance(cam_cfg, dict):
+                cameras_out.append(dict(cam_cfg))
+        return web.json_response(
+            {
+                "status": "ok",
+                "cameras": cameras_out,
+                "persist_path": str(self._camera_resolutions_persist_path) if self._camera_resolutions_persist_path else None,
+            }
+        )
+
+    async def _api_config_nozzles_get(self, _request: web.Request) -> web.Response:
+        if self._nozzle_config_store is None:
+            return web.json_response({"error": "persistence_not_configured"}, status=503)
+
+        nozzles_out: list[dict[str, Any]] = []
+        for nozzle_name in self._nozzle_config_store.names():
+            cfg = self._nozzle_config_store.get(nozzle_name)
+            if cfg is None:
+                continue
+            nozzles_out.append(
+                {
+                    "name": cfg.name,
+                    "z_axis": cfg.z_axis,
+                    "min_z": float(cfg.min_z),
+                    "max_z": float(cfg.max_z),
+                    "offset_x": float(cfg.offset_x),
+                    "offset_y": float(cfg.offset_y),
+                    "tip_id": cfg.tip_id,
+                    "standard_down_z": cfg.standard_down_z,
+                    "vacuum_valve": {
+                        "board": cfg.vacuum_valve.board,
+                        "io_type": cfg.vacuum_valve.io_type,
+                        "pin": cfg.vacuum_valve.pin,
+                    },
+                    "air_valve": (
+                        {
+                            "board": cfg.air_valve.board,
+                            "io_type": cfg.air_valve.io_type,
+                            "pin": cfg.air_valve.pin,
+                        }
+                        if cfg.air_valve is not None
+                        else None
+                    ),
+                }
+            )
+
+        nozzles_out.sort(key=lambda item: str(item.get("name", "")))
+        return web.json_response(
+            {
+                "status": "ok",
+                "nozzles": nozzles_out,
+                "persist_path": str(self._nozzle_offsets_persist_path) if self._nozzle_offsets_persist_path else None,
+            }
+        )
+
+    async def _api_config_nozzle_tips_get(self, _request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "status": "ok",
+                "nozzle_tips": [dict(self._nozzle_tips[key]) for key in sorted(self._nozzle_tips.keys())],
+                "persist_path": str(self._nozzle_offsets_persist_path) if self._nozzle_offsets_persist_path else None,
+            }
+        )
+
+    async def _api_config_nozzle_tips_set(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            tips_raw = body.get("nozzle_tips")
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not isinstance(tips_raw, list):
+            return web.json_response({"error": "invalid_nozzle_tips"}, status=400)
+
+        parsed: dict[str, dict[str, Any]] = {}
+        for item in tips_raw:
+            if not isinstance(item, dict):
+                return web.json_response({"error": "invalid_nozzle_tip_entry"}, status=400)
+            tip_id = str(item.get("id", "")).strip()
+            if not tip_id:
+                return web.json_response({"error": "invalid_nozzle_tip_id"}, status=400)
+
+            tip_out: dict[str, Any] = {"id": tip_id}
+            for key in ("suction_hole_diameter_mm", "component_min_mm", "component_max_mm"):
+                raw_val = item.get(key)
+                if raw_val is None:
+                    tip_out[key] = None
+                    continue
+                try:
+                    num_val = float(raw_val)
+                except (TypeError, ValueError):
+                    return web.json_response({"error": "invalid_nozzle_tip_value", "tip_id": tip_id, "field": key}, status=400)
+                if not math.isfinite(num_val):
+                    return web.json_response({"error": "invalid_nozzle_tip_value", "tip_id": tip_id, "field": key}, status=400)
+                tip_out[key] = num_val
+
+            parsed[tip_id] = tip_out
+
+        self._nozzle_tips = parsed
+        persist_error = self._persist_nozzle_offsets()
+        return web.json_response(
+            {
+                "status": "ok",
+                "nozzle_tips": [dict(self._nozzle_tips[key]) for key in sorted(self._nozzle_tips.keys())],
+                "persisted": persist_error is None,
+                "persist_error": persist_error,
+                "persist_path": str(self._nozzle_offsets_persist_path) if self._nozzle_offsets_persist_path else None,
+            }
+        )
+
+    async def _api_config_packages_get(self, _request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+        return web.json_response(
+            {
+                "status": "ok",
+                "packages": self._catalog_db.load_packages(),
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_package_upsert(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+
+        try:
+            body = await request.json()
+            package_raw = body.get("package")
+            old_name_raw = body.get("old_name")
+            if not isinstance(package_raw, dict):
+                return web.json_response({"error": "invalid_package"}, status=400)
+
+            name = str(package_raw.get("name", "")).strip().upper()
+            footprint = str(package_raw.get("footprint", "")).strip()
+            length_mm = float(package_raw.get("length_mm", 0.0) or 0.0)
+            width_mm = float(package_raw.get("width_mm", 0.0) or 0.0)
+            height_mm = float(package_raw.get("height_mm", 0.0) or 0.0)
+            pin_count = int(package_raw.get("pin_count", 0) or 0)
+            compatible_nozzle_tips = [
+                str(item).strip()
+                for item in package_raw.get("compatible_nozzle_tips", [])
+                if str(item).strip()
+            ]
+            old_name = str(old_name_raw).strip().upper() if old_name_raw is not None else None
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not name:
+            return web.json_response({"error": "invalid_package_name"}, status=400)
+        if pin_count < 0:
+            return web.json_response({"error": "invalid_pin_count"}, status=400)
+        if not (math.isfinite(length_mm) and math.isfinite(width_mm) and math.isfinite(height_mm)):
+            return web.json_response({"error": "invalid_package_dimensions"}, status=400)
+
+        package_out = {
+            "name": name,
+            "footprint": footprint,
+            "length_mm": length_mm,
+            "width_mm": width_mm,
+            "height_mm": height_mm,
+            "pin_count": pin_count,
+            "compatible_nozzle_tips": compatible_nozzle_tips,
+        }
+
+        self._catalog_db.upsert_package(package_out)
+        if old_name and old_name != name:
+            self._catalog_db.delete_package(old_name)
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "package": package_out,
+                "old_name": old_name,
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
+
+    async def _api_config_package_delete(self, request: web.Request) -> web.Response:
+        if self._catalog_db is None:
+            return web.json_response({"error": "catalog_not_configured"}, status=503)
+
+        try:
+            body = await request.json()
+            name = str(body.get("name", "")).strip().upper()
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return web.json_response({"error": "invalid_body"}, status=400)
+
+        if not name:
+            return web.json_response({"error": "invalid_package_name"}, status=400)
+
+        self._catalog_db.delete_package(name)
+        return web.json_response(
+            {
+                "status": "ok",
+                "deleted": name,
+                "catalog_db_path": str(self._catalog_db.path),
+            }
+        )
 
     async def _api_config_location_set(self, request: web.Request) -> web.Response:
         raw_name = request.match_info["name"]
