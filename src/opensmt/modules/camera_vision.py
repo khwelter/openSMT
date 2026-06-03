@@ -912,13 +912,34 @@ class CameraVisionModule:
         return sorted(set(ops).union(_CUSTOM_VISION_ACTIONS))
 
     def _default_green_nozzle_pipeline_steps(self) -> list[dict[str, Any]]:
+        # "Default Bottom Vision" baseline sequence.
+        # Stage 1 (ImageCapture) is implicit: current camera frame is used as input.
         return [
+            # Stage 2: BlurGaussian
             {"op": "GaussianBlur", "args": [[5, 5], 0]},
+            # Stage 3: MaskCircle
+            {"op": "circularMask", "args": [6.0], "kwargs": {"diameter_mm": 6.0}},
+            # Stage 4: ConvertColor (RGB/BGR -> HSV)
             {"op": "cvtColor", "args": ["COLOR_BGR2HSV"]},
+            # Stage 5: MaskHsv (chroma-key style default green isolation)
             {"op": "inRange", "args": [[35, 35, 35], [95, 255, 255]]},
-            {"op": "morphologyEx", "args": ["MORPH_OPEN", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
-            {"op": "morphologyEx", "args": ["MORPH_CLOSE", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
-            {"op": "Canny", "args": [60, 160]},
+            # Stage 6: ConvertColor back toward grayscale domain
+            {"op": "cvtColor", "args": ["COLOR_GRAY2BGR"]},
+            {"op": "cvtColor", "args": ["COLOR_BGR2GRAY"]},
+            # Stage 7: Threshold
+            {"op": "threshold", "args": [127, 255, "THRESH_BINARY"]},
+            # Stage 8/9: FindContours/FilterContours + MinAreaRect-like box estimate
+            {
+                "op": "findRectangles",
+                "args": [],
+                "kwargs": {
+                    "draw_all_rectangles": True,
+                    "draw_closest_rectangle": True,
+                    "draw_center_line": True,
+                    "min_aspect_ratio": 1.0,
+                    "max_aspect_ratio": 3.0,
+                },
+            },
         ]
 
     async def _run_bottom_vision_once(

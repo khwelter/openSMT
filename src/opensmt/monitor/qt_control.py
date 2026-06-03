@@ -1491,7 +1491,7 @@ class TrayFeederEditor(QWidget):
         self._btn_vision_editor = QPushButton("Vision Pipeline...")
 
         # Backing stores for modal pipeline editor.
-        self._vision_pipeline_name = QLineEdit("GREEN_NOZZLE_2PAD")
+        self._vision_pipeline_name = QLineEdit("Default Bottom Vision")
         self._vision_pipeline = QTextEdit()
         self._vision_preview_step = QSpinBox()
         self._vision_preview_step.setRange(-1, 999)
@@ -1741,7 +1741,7 @@ class TrayFeederEditor(QWidget):
 
     def vision_pipeline_name(self) -> str:
         name = self._vision_pipeline_name.text().strip()
-        return name if name else "GREEN_NOZZLE_2PAD"
+        return name if name else "Default Bottom Vision"
 
     def vision_input_params(self) -> dict[str, float]:
         return {
@@ -1750,7 +1750,7 @@ class TrayFeederEditor(QWidget):
         }
 
     def set_vision_pipeline_metadata(self, name: str, *, component_width_mm: float, component_length_mm: float) -> None:
-        self._vision_pipeline_name.setText(str(name).strip() or "GREEN_NOZZLE_2PAD")
+        self._vision_pipeline_name.setText(str(name).strip() or "Default Bottom Vision")
         self._vision_input_width_mm.setValue(float(component_width_mm))
         self._vision_input_length_mm.setValue(float(component_length_mm))
 
@@ -2125,7 +2125,7 @@ class VisionPipelineDialog(QDialog):
         meta_row = QHBoxLayout(meta_box)
         meta_row.setContentsMargins(8, 6, 8, 6)
         meta_row.setSpacing(8)
-        self._name = QLineEdit("GREEN_NOZZLE_2PAD")
+        self._name = QLineEdit("Default Bottom Vision")
         self._width_mm = QDoubleSpinBox()
         self._length_mm = QDoubleSpinBox()
         for w in (self._width_mm, self._length_mm):
@@ -2376,7 +2376,7 @@ class VisionPipelineDialog(QDialog):
         steps: list[dict[str, Any]],
         input_params: dict[str, Any],
     ) -> None:
-        self._name.setText(str(name).strip() or "GREEN_NOZZLE_2PAD")
+        self._name.setText(str(name).strip() or "Default Bottom Vision")
         self._steps = [copy.deepcopy(s) for s in steps if isinstance(s, dict)]
         self._width_mm.setValue(float(input_params.get("component_width_mm", 0.0) or 0.0))
         self._length_mm.setValue(float(input_params.get("component_length_mm", 0.0) or 0.0))
@@ -2384,7 +2384,7 @@ class VisionPipelineDialog(QDialog):
         self._rebuild_steps_list()
 
     def pipeline_name(self) -> str:
-        return self._name.text().strip() or "GREEN_NOZZLE_2PAD"
+        return self._name.text().strip() or "Default Bottom Vision"
 
     def pipeline_steps(self) -> list[dict[str, Any]]:
         return [copy.deepcopy(s) for s in self._steps]
@@ -6148,11 +6148,23 @@ class ControlWindow(QMainWindow):
     def _default_bottom_vision_pipeline(self) -> list[dict[str, Any]]:
         return [
             {"op": "GaussianBlur", "args": [[5, 5], 0]},
+            {"op": "circularMask", "args": [6.0], "kwargs": {"diameter_mm": 6.0}},
             {"op": "cvtColor", "args": ["COLOR_BGR2HSV"]},
             {"op": "inRange", "args": [[35, 35, 35], [95, 255, 255]]},
-            {"op": "morphologyEx", "args": ["MORPH_OPEN", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
-            {"op": "morphologyEx", "args": ["MORPH_CLOSE", [[1, 1, 1], [1, 1, 1], [1, 1, 1]]]},
-            {"op": "Canny", "args": [60, 160]},
+            {"op": "cvtColor", "args": ["COLOR_GRAY2BGR"]},
+            {"op": "cvtColor", "args": ["COLOR_BGR2GRAY"]},
+            {"op": "threshold", "args": [127, 255, "THRESH_BINARY"]},
+            {
+                "op": "findRectangles",
+                "args": [],
+                "kwargs": {
+                    "draw_all_rectangles": True,
+                    "draw_closest_rectangle": True,
+                    "draw_center_line": True,
+                    "min_aspect_ratio": 1.0,
+                    "max_aspect_ratio": 3.0,
+                },
+            },
         ]
 
     def _run_bottom_vision_pipeline(self, nozzle_name: str, on_done: Callable[[bool], None]) -> None:
