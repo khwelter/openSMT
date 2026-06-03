@@ -1829,8 +1829,25 @@ class CameraVisionModule:
                 state = states_by_name.get(name)
                 if state is None:
                     continue
+                # Persist all camera runtime settings into the backend config chunk.
+                # This keeps setup edits and calibration values on the backend host.
+                item["device"] = str(state.config.device)
+                item["fps"] = float(state.config.fps)
                 item["resolution_dpcm_x"] = float(state.config.resolution_dpcm_x)
                 item["resolution_dpcm_y"] = float(state.config.resolution_dpcm_y)
+                item["flip_horizontal"] = bool(state.config.flip_horizontal)
+                item["flip_vertical"] = bool(state.config.flip_vertical)
+                item["rotation_deg"] = float(state.config.rotation_deg)
+
+                runtime_cfg = next(
+                    (cfg for cfg in self.config.get("cameras", []) if str(cfg.get("name", "")).upper().strip() == name),
+                    None,
+                )
+                if isinstance(runtime_cfg, dict):
+                    if "x" in runtime_cfg and runtime_cfg.get("x") is not None:
+                        item["x"] = float(runtime_cfg["x"])
+                    if "y" in runtime_cfg and runtime_cfg.get("y") is not None:
+                        item["y"] = float(runtime_cfg["y"])
 
             self._camera_resolutions_persist_path.parent.mkdir(parents=True, exist_ok=True)
             self._camera_resolutions_persist_path.write_text(
@@ -1939,8 +1956,22 @@ class CameraVisionModule:
         state.config.rotation_deg = rotation_deg
         state.current_rotation_deg = rotation_deg
 
+        for cam_cfg in self.config.get("cameras", []):
+            if str(cam_cfg.get("name", "")).upper().strip() != cam_name:
+                continue
+            cam_cfg["device"] = device
+            cam_cfg["fps"] = fps
+            cam_cfg["resolution_dpcm_x"] = resolution_dpcm_x
+            cam_cfg["resolution_dpcm_y"] = resolution_dpcm_y
+            cam_cfg["flip_horizontal"] = flip_horizontal
+            cam_cfg["flip_vertical"] = flip_vertical
+            cam_cfg["rotation_deg"] = rotation_deg
+            break
+
         if pos_x is not None and pos_y is not None:
             self._set_camera_xy(cam_name, pos_x, pos_y)
+
+        persist_error = self._persist_camera_resolutions()
 
         if reopen_required:
             await self._close_camera(state)
@@ -1960,6 +1991,9 @@ class CameraVisionModule:
                 "x": pos_x,
                 "y": pos_y,
                 "reopened": reopen_required,
+                "persisted": persist_error is None,
+                "persist_error": persist_error,
+                "persist_path": str(self._camera_resolutions_persist_path) if self._camera_resolutions_persist_path else None,
             }
         )
 

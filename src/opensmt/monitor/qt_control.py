@@ -4392,28 +4392,10 @@ class ControlWindow(QMainWindow):
             loc_raw["locations"] = locations_out
             self._setup_locations_config_path.write_text(json.dumps(loc_raw, indent=2) + "\n", encoding="utf-8")
 
-            if bottom_xy is not None:
-                cam_raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
-                if not isinstance(cam_raw, dict):
-                    raise ValueError("camera config root must be an object")
-                camera_block = cam_raw.get("camera")
-                if isinstance(camera_block, dict):
-                    cameras = camera_block.get("cameras", [])
-                    if isinstance(cameras, list):
-                        for cam in cameras:
-                            if not isinstance(cam, dict):
-                                continue
-                            if str(cam.get("name", "")).strip().upper() != "BOTTOM":
-                                continue
-                            cam["x"] = bottom_xy[0]
-                            cam["y"] = bottom_xy[1]
-                            break
-                        self._setup_camera_config_path.write_text(json.dumps(cam_raw, indent=2) + "\n", encoding="utf-8")
-
             self._refresh_setup_position_table()
             self._log_line(
                 f"OK: saved positions to {self._setup_locations_config_path}"
-                + (f" and BOTTOM camera XY to {self._setup_camera_config_path}" if bottom_xy is not None else "")
+                + (" and queued BOTTOM camera XY update on backend" if bottom_xy is not None else "")
             )
             for item in self._setup_positions:
                 self._apply_setup_position_runtime(item)
@@ -4549,24 +4531,10 @@ class ControlWindow(QMainWindow):
             self._log_line("ERR: camera save failed: duplicate camera names")
             return
 
-        try:
-            raw = json.loads(self._setup_camera_config_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise ValueError("camera config root must be an object")
-
-            camera_block = raw.get("camera")
-            if isinstance(camera_block, dict):
-                camera_block["cameras"] = self._setup_cameras
-            else:
-                raise ValueError("camera section missing in camera config file")
-
-            self._setup_camera_config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
-            self._refresh_setup_camera_table()
-            self._log_line(f"OK: saved camera config to {self._setup_camera_config_path}")
-            for camera in self._setup_cameras:
-                self._apply_setup_camera_runtime(camera)
-        except Exception as exc:
-            self._log_line(f"ERR: camera save failed: {exc}")
+        self._refresh_setup_camera_table()
+        self._log_line("OK: camera setup save requested on backend")
+        for camera in self._setup_cameras:
+            self._apply_setup_camera_runtime(camera)
 
     def _apply_setup_camera_runtime(self, camera: dict[str, Any]) -> None:
         name = str(camera.get("name", "")).strip().upper()
@@ -4609,10 +4577,15 @@ class ControlWindow(QMainWindow):
                 float(payload.get("resolution_dpcm_y", 0.0) or 0.0),
             )
         reopened = bool(data.get("reopened", False))
+        persisted = bool(data.get("persisted", True))
         if reopened:
             self._log_line(f"OK: {camera_name} runtime camera settings applied and device reopened")
         else:
             self._log_line(f"OK: {camera_name} runtime camera settings applied")
+        if not persisted:
+            self._log_line(
+                f"WARN: {camera_name} camera settings applied in runtime only: {data.get('persist_error', 'persistence_not_configured')}"
+            )
         self._poll_status()
 
     def _refresh_package_table(self) -> None:
