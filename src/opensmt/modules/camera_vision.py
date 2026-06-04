@@ -41,7 +41,7 @@ _COORD_AXES = ["X", "Y", "Z1", "R1", "Z2", "R2", "Z3", "R3", "Z4", "R4"]
 _LIGHT_MIN = 0
 _LIGHT_MAX = 3
 _UI_LIGHT_MAX = 2
-_CUSTOM_VISION_ACTIONS = {"circularMask", "findRectangles", "saveDiagnostic"}
+_CUSTOM_VISION_ACTIONS = {"circularMask", "findRectangles", "saveDiagnostic", "findSmdComponent"}
 
 
 def _cv2_resolve_value(value: Any) -> Any:
@@ -222,6 +222,106 @@ def _vision_action_save_diagnostic(
     return img, {"save_diagnostic": True, "save_stage": stage, "save_prefix": prefix}
 
 
+def _vision_action_find_smd_component(
+    img: np.ndarray,
+    args: list[Any],
+    kwargs: dict[str, Any],
+    runtime_params: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    del args, runtime_params
+
+    # Match the user-provided reference algorithm defaults.
+    lower_purple = np.array(kwargs.get("lower_purple", [130, 40, 50]), dtype=np.uint8)
+    upper_purple = np.array(kwargs.get("upper_purple", [170, 255, 255]), dtype=np.uint8)
+    lower_caps = np.array(kwargs.get("lower_caps", [0, 0, 180]), dtype=np.uint8)
+    upper_caps = np.array(kwargs.get("upper_caps", [180, 60, 255]), dtype=np.uint8)
+    min_area = float(kwargs.get("min_area", 500.0))
+    max_center_distance_px = float(kwargs.get("max_center_distance_px", 150.0))
+    kernel_size = int(kwargs.get("kernel_size", 5))
+    draw_box = bool(kwargs.get("draw_box", True))
+    draw_center = bool(kwargs.get("draw_center", True))
+
+    kernel_size = max(1, kernel_size)
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+
+    src = _cv2_to_bgr_for_preview(img)
+    result_img = src.copy()
+    hsv = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)
+
+    mask_purple = cv2.inRange(hsv, lower_purple, upper_purple)
+    mask_caps = cv2.inRange(hsv, lower_caps, upper_caps)
+    combined_mask = cv2.bitwise_or(mask_purple, mask_caps)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    cleaned_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+    cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel)
+
+    contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_center = (src.shape[1] // 2, src.shape[0] // 2)
+
+    best_cnt: np.ndarray | None = None
+    best_area = 0.0
+
+    for cnt in contours:
+        area = float(cv2.contourArea(cnt))
+        if area < min_area:
+            continue
+
+        moments = cv2.moments(cnt)
+        if abs(float(moments.get("m00", 0.0))) < 1e-9:
+            continue
+
+        c_x = float(moments["m10"] / moments["m00"])
+        c_y = float(moments["m01"] / moments["m00"])
+        center_dist = math.hypot(c_x - float(img_center[0]), c_y - float(img_center[1]))
+        if center_dist > max_center_distance_px:
+            continue
+
+        if area > best_area:
+            best_area = area
+            best_cnt = cnt
+
+    if best_cnt is None:
+        # Keep a visible grayscale diagnostic when nothing was detected.
+        preview = cv2.cvtColor(cleaned_mask, cv2.COLOR_GRAY2BGR)
+        return preview, {
+            "smd_found": False,
+            "center": [float(img_center[0]), float(img_center[1])],
+            "min_area": min_area,
+            "max_center_distance_px": max_center_distance_px,
+            "kernel_size": kernel_size,
+        }
+
+    rect = cv2.minAreaRect(best_cnt)
+    box = cv2.boxPoints(rect)
+    box_i = np.int32(box)
+
+    center_x, center_y = rect[0]
+    width_px, height_px = rect[1]
+    angle_deg = float(rect[2])
+    if width_px < height_px:
+        angle_deg += 90.0
+
+    if draw_box:
+        cv2.drawContours(result_img, [box_i], 0, (0, 255, 0), 2)
+    if draw_center:
+        cv2.circle(result_img, (int(round(center_x)), int(round(center_y))), 5, (0, 0, 255), -1)
+
+    return result_img, {
+        "smd_found": True,
+        "center": [float(center_x), float(center_y)],
+        "width_px": float(width_px),
+        "height_px": float(height_px),
+        "angle_deg": float(angle_deg),
+        "area": float(best_area),
+        "box": [[float(pt[0]), float(pt[1])] for pt in box_i],
+        "min_area": min_area,
+        "max_center_distance_px": max_center_distance_px,
+        "kernel_size": kernel_size,
+    }
+
+
 def _run_opencv_action_steps(
     frame: np.ndarray,
     steps: list[dict[str, Any]],
@@ -261,6 +361,8 @@ def _run_opencv_action_steps(
             cur, step_meta = _vision_action_find_rectangles(cur, args, kwargs, runtime)
         elif op_name == "saveDiagnostic":
             cur, step_meta = _vision_action_save_diagnostic(cur, args, kwargs, runtime)
+        elif op_name == "findSmdComponent":
+            cur, step_meta = _vision_action_find_smd_component(cur, args, kwargs, runtime)
         else:
             func = getattr(cv2, op_name, None)
             if not callable(func):
@@ -925,32 +1027,22 @@ class CameraVisionModule:
         return sorted(set(ops).union(_CUSTOM_VISION_ACTIONS))
 
     def _default_green_nozzle_pipeline_steps(self) -> list[dict[str, Any]]:
-        # "Default Bottom Vision" baseline sequence.
+        # "Default Bottom Vision" reconstructed from the provided OpenCV script.
         # Stage 1 (ImageCapture) is implicit: current camera frame is used as input.
         return [
-            # Stage 2: BlurGaussian
-            {"op": "GaussianBlur", "args": [[5, 5], 0]},
-            # Stage 3: MaskCircle
-            {"op": "circularMask", "args": [6.0], "kwargs": {"diameter_mm": 6.0}},
-            # Stage 4: ConvertColor (RGB/BGR -> HSV)
-            {"op": "cvtColor", "args": ["COLOR_BGR2HSV"]},
-            # Stage 5: MaskHsv (chroma-key style default green isolation)
-            {"op": "inRange", "args": [[35, 35, 35], [95, 255, 255]]},
-            # Stage 6: ConvertColor back toward grayscale domain
-            {"op": "cvtColor", "args": ["COLOR_GRAY2BGR"]},
-            {"op": "cvtColor", "args": ["COLOR_BGR2GRAY"]},
-            # Stage 7: Threshold
-            {"op": "threshold", "args": [127, 255, "THRESH_BINARY"]},
-            # Stage 8/9: FindContours/FilterContours + MinAreaRect-like box estimate
             {
-                "op": "findRectangles",
+                "op": "findSmdComponent",
                 "args": [],
                 "kwargs": {
-                    "draw_all_rectangles": True,
-                    "draw_closest_rectangle": True,
-                    "draw_center_line": True,
-                    "min_aspect_ratio": 1.0,
-                    "max_aspect_ratio": 3.0,
+                    "lower_purple": [130, 40, 50],
+                    "upper_purple": [170, 255, 255],
+                    "lower_caps": [0, 0, 180],
+                    "upper_caps": [180, 60, 255],
+                    "min_area": 500,
+                    "max_center_distance_px": 150,
+                    "kernel_size": 5,
+                    "draw_box": True,
+                    "draw_center": True,
                 },
             },
         ]

@@ -6259,22 +6259,19 @@ class ControlWindow(QMainWindow):
 
     def _default_bottom_vision_pipeline(self) -> list[dict[str, Any]]:
         return [
-            {"op": "GaussianBlur", "args": [[5, 5], 0]},
-            {"op": "circularMask", "args": [6.0], "kwargs": {"diameter_mm": 6.0}},
-            {"op": "cvtColor", "args": ["COLOR_BGR2HSV"]},
-            {"op": "inRange", "args": [[35, 35, 35], [95, 255, 255]]},
-            {"op": "cvtColor", "args": ["COLOR_GRAY2BGR"]},
-            {"op": "cvtColor", "args": ["COLOR_BGR2GRAY"]},
-            {"op": "threshold", "args": [127, 255, "THRESH_BINARY"]},
             {
-                "op": "findRectangles",
+                "op": "findSmdComponent",
                 "args": [],
                 "kwargs": {
-                    "draw_all_rectangles": True,
-                    "draw_closest_rectangle": True,
-                    "draw_center_line": True,
-                    "min_aspect_ratio": 1.0,
-                    "max_aspect_ratio": 3.0,
+                    "lower_purple": [130, 40, 50],
+                    "upper_purple": [170, 255, 255],
+                    "lower_caps": [0, 0, 180],
+                    "upper_caps": [180, 60, 255],
+                    "min_area": 500,
+                    "max_center_distance_px": 150,
+                    "kernel_size": 5,
+                    "draw_box": True,
+                    "draw_center": True,
                 },
             },
         ]
