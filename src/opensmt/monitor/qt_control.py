@@ -2868,7 +2868,7 @@ class ControlWindow(QMainWindow):
         self._camera_status_by_name: dict[str, bool] = {}
         self._active_camera_name: str = ""
         self._shown_camera_name: str = ""
-        self._camera_view_mode: str = "selected"
+        self._camera_view_mode: str = "both_h"
         self._camera_placeholder: QLabel | None = None
         self._camera_thumb_pending: set[str] = set()
 
@@ -2975,6 +2975,7 @@ class ControlWindow(QMainWindow):
         self._camera_view_combo.addItem("Bottom Only", "bottom")
         self._camera_view_combo.addItem("Both Side By Side", "both_h")
         self._camera_view_combo.addItem("Both Top And Bottom", "both_v")
+        self._camera_view_combo.setCurrentIndex(3)
         self._camera_view_combo.currentIndexChanged.connect(self._on_camera_view_mode_changed)
         cam_controls.addWidget(self._camera_view_combo)
         cam_controls.addStretch(1)
@@ -3852,13 +3853,13 @@ class ControlWindow(QMainWindow):
             "nozzle": windows[3].sizeHint(),
         }
 
-        camera_w = min(max(sizes["camera"].width(), 640), half_w)
-        camera_h = min(max(sizes["camera"].height(), 420), half_h)
+        camera_w = min(max(sizes["camera"].width(), 900), area.width() - margin * 2)
+        camera_h = min(max(sizes["camera"].height(), 480), half_h)
         general_w = min(max(sizes["general"].width(), 700), half_w)
         general_h = min(max(sizes["general"].height(), 420), half_h)
-        xy_w = min(max(sizes["xy"].width(), 520), half_w)
+        xy_w = min(max(sizes["xy"].width(), 460), half_w)
         xy_h = min(max(sizes["xy"].height(), 340), half_h)
-        nozzle_w = min(max(sizes["nozzle"].width(), 520), half_w)
+        nozzle_w = min(max(sizes["nozzle"].width(), 980), area.width() - margin * 2)
         nozzle_h = min(max(sizes["nozzle"].height(), 340), half_h)
 
         positions = [
