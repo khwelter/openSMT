@@ -3587,7 +3587,6 @@ class ControlWindow(QMainWindow):
         b_park = _xy_btn("park_zero", "Move to park", tint=_COLOR_RED)
         b_dispose = _xy_btn("dispose", "Move to dispose", tint=_COLOR_BLUE)
         b_nozchg = _xy_btn("nozzle_change", "Move to nozzle change", tint=_COLOR_RED)
-        b_calspot = _xy_btn("calibration_spot", "Move to calibration spot", tint=_COLOR_BLUE)
 
         special_grid.addWidget(b_home_all, 0, 0)
         special_grid.addWidget(b_home_xy, 0, 1)
@@ -3596,7 +3595,6 @@ class ControlWindow(QMainWindow):
         special_grid.addWidget(b_park, 1, 0)
         special_grid.addWidget(b_dispose, 1, 1)
         special_grid.addWidget(b_nozchg, 1, 2)
-        special_grid.addWidget(b_calspot, 1, 3)
         xy_layout.addLayout(special_grid)
 
         noz_group = QGroupBox("Nozzles")
@@ -3652,9 +3650,6 @@ class ControlWindow(QMainWindow):
         b_park.clicked.connect(lambda: self._post_action("/api/coord/park", None, "Move to park"))
         b_dispose.clicked.connect(lambda: self._post_action("/api/coord/dispose", None, "Move to dispose"))
         b_nozchg.clicked.connect(lambda: self._post_action("/api/coord/nozzle-change", None, "Move to nozzle change"))
-        b_calspot.clicked.connect(
-            lambda: self._post_action("/api/coord/calibration-spot", None, "Move to calibration spot")
-        )
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(800)

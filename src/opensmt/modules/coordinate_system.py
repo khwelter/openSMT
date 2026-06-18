@@ -48,15 +48,6 @@ class CoordinateSystemModule(ModuleBase):
         self._nozzle_change_position = self._parse_xy_config(
             config.get("nozzle_change_position", {"x": 250.0, "y": 50.0})
         )
-        self._calibration_spot_position = self._parse_xy_config(
-            config.get(
-                "calibration_spot_position",
-                {
-                    "x": self._homing_fiducial_main_position[0] + 100.0,
-                    "y": self._homing_fiducial_main_position[1],
-                },
-            )
-        )
         self._home_lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -100,7 +91,7 @@ class CoordinateSystemModule(ModuleBase):
                 elif parts[1] in {"CALIBRATIONSPOT", "CALSPOT"}:
                     await self.node.send_response(
                         msg.command,
-                        f"{self._calibration_spot_position[0]:g} {self._calibration_spot_position[1]:g}",
+                        f"{self._homing_fiducial_main_position[0]:g} {self._homing_fiducial_main_position[1]:g}",
                         target=packet.get("source"),
                     )
             return
@@ -219,7 +210,7 @@ class CoordinateSystemModule(ModuleBase):
                 )
             elif parts[1] in {"CALIBRATIONSPOT", "CALSPOT"}:
                 asyncio.create_task(
-                    self._execute_named_position(msg.command, target, self._calibration_spot_position)
+                    self._execute_named_position(msg.command, target, self._homing_fiducial_main_position)
                 )
         elif len(parts) == 3:
             # Handle group-specific actions like :COORD:HOME:XY

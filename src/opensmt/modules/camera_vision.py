@@ -1167,8 +1167,10 @@ class CameraVisionModule:
         app.router.add_post("/api/coord/homing-fiducial-main", self._api_coord_homing_fiducial_main)
         app.router.add_post("/api/coord/secondary-fiducial", self._api_coord_secondary_fiducial)
         app.router.add_post("/api/coord/nozzle-change", self._api_coord_nozzle_change)
+        # Legacy compatibility route: calibration spot now reuses fiducial_main.
         app.router.add_post("/api/coord/calibration-spot", self._api_coord_calibration_spot)
         app.router.add_post("/api/coord/set-home-here", self._api_coord_set_home_here)
+        # Legacy compatibility route: updates fiducial_main instead of calibration_spot.
         app.router.add_post("/api/coord/set-calibration-spot-here", self._api_coord_set_calibration_spot_here)
         app.router.add_post("/api/coord/move-xy", self._api_coord_move_xy)
         app.router.add_get("/api/coord/positions", self._api_coord_positions)
@@ -1447,7 +1449,11 @@ class CameraVisionModule:
     async def _api_coord_calibration_spot(self, request: web.Request) -> web.Response:
         if not (self._driver.is_axis_homed("X") and self._driver.is_axis_homed("Y")):
             return web.json_response({"error": "xy_not_homed"}, status=409)
-        job_id, canceled_prev = self._submit_domain_command("coord", "coord_move:calibration_spot", lambda: self._move_to_location_with_safe_zone("calibration_spot"))
+        job_id, canceled_prev = self._submit_domain_command(
+            "coord",
+            "coord_move:fiducial_main",
+            lambda: self._move_to_location_with_safe_zone("fiducial_main"),
+        )
         return web.json_response({"status": "accepted", "job_id": job_id, "previous_job_canceled": canceled_prev})
 
     async def _api_coord_set_home_here(self, request: web.Request) -> web.Response:
@@ -1472,10 +1478,10 @@ class CameraVisionModule:
         if x is None or y is None:
             return web.json_response({"error": "xy_position_unknown", "message": "Home XY first"}, status=409)
 
-        self._location_store.set("calibration_spot", {"X": x, "Y": y})
+        self._location_store.set("fiducial_main", {"X": x, "Y": y})
         return web.json_response({
             "status": "ok",
-            "location": "calibration_spot",
+            "location": "fiducial_main",
             "x": x,
             "y": y,
             "persist_path": self._location_store.persist_path(),
