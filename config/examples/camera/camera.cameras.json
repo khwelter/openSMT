@@ -5,13 +5,13 @@
         "name": "BOTTOM",
         "x": 296.6,
         "y": 65.0,
-        "device": "/dev/video0",
-        "fps": 10,
-        "resolution_dpcm_x": 397.372521246459,
-        "resolution_dpcm_y": 397.372521246459,
-        "flip_horizontal": false,
-        "flip_vertical": true,
-        "rotation_deg": 0,
+        "device": "/dev/video2",
+        "fps": 10.0,
+        "resolution_dpcm_x": 397.373,
+        "resolution_dpcm_y": 397.373,
+        "flip_horizontal": true,
+        "flip_vertical": false,
+        "rotation_deg": 90.0,
         "lights": {
           "standard": {
             "board": "XY",
@@ -36,13 +36,13 @@
       },
       {
         "name": "TOP",
-        "device": "/dev/video2",
-        "fps": 5,
+        "device": "/dev/video0",
+        "fps": 5.0,
         "resolution_dpcm_x": 238.0,
         "resolution_dpcm_y": 238.0,
         "flip_horizontal": false,
         "flip_vertical": false,
-        "rotation_deg": 90,
+        "rotation_deg": 90.0,
         "lights": {
           "standard": {
             "board": "AB",

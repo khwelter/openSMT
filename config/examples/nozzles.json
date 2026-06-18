@@ -83,8 +83,8 @@
         "tip_id": "501",
         "standard_down_z": -39.0,
         "safe_zone_z": -10.0,
-        "offset_x": -48.500000000000114,
-        "offset_y": -97.80000000000007,
+        "offset_x": -48.40000000000009,
+        "offset_y": -33.00000000000006,
         "vacuum_valve": {
           "board": "AB",
           "io_type": "gpio",
