@@ -28,6 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_control_gui = sub.add_parser("control-gui", help="Start Qt control GUI (HTTP API)")
     p_control_gui.add_argument("--host", default="127.0.0.1")
     p_control_gui.add_argument("--port", default=8080, type=int)
+    p_control_gui.add_argument("--splash-image", default=None, help="Path to the splash image")
+    p_control_gui.add_argument("--splash-text", default=None, help="Override splash text")
+    p_control_gui.add_argument(
+        "--splash-text-position",
+        default="bottom-right",
+        help="Splash text position: top-left, top-right, bottom-left, bottom-right, or center",
+    )
+    p_control_gui.add_argument("--splash-min-seconds", default=5.0, type=float, help="Minimum splash duration")
 
     p_run = sub.add_parser("run", help="Run modules from configuration")
     p_run.add_argument("--config", required=True)
@@ -58,7 +66,14 @@ def main() -> None:
     if args.command == "control-gui":
         from opensmt.monitor import run_qt_control
 
-        run_qt_control(args.host, args.port)
+        run_qt_control(
+            args.host,
+            args.port,
+            splash_image=args.splash_image,
+            splash_text=args.splash_text,
+            splash_text_position=args.splash_text_position,
+            splash_min_seconds=args.splash_min_seconds,
+        )
         return
 
     if args.command == "run":

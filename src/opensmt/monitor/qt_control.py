@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
+from opensmt import __version__
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -39,6 +41,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QToolButton,
     QVBoxLayout,
+    QSplashScreen,
     QWidget,
     QSpinBox,
 )
@@ -61,7 +64,93 @@ _FEEDER_TYPE_TITLES: list[tuple[str, str]] = [
     ("tube_feeder", "Tube Feeders"),
 ]
 
+_DEFAULT_SPLASH_SECONDS = 5.0
+_DEFAULT_SPLASH_IMAGE = (
+    Path(__file__).resolve().parent.parent.parent.parent / "assets" / "icons" / "opensmt-ui" / "128" / "home_all.png"
+)
+_SPLASH_POSITIONS = {"top-left", "top-right", "bottom-left", "bottom-right", "center"}
+
 _pm_cache: dict[str, QPixmap] = {}
+
+
+class ConfigurableSplashScreen(QSplashScreen):
+    def __init__(self, pixmap: QPixmap, text: str, position: str, margin: int = 24) -> None:
+        super().__init__(pixmap)
+        self._text = text
+        self._position = position if position in _SPLASH_POSITIONS else "bottom-right"
+        self._margin = max(0, int(margin))
+
+    def drawContents(self, painter: QPainter) -> None:
+        super().drawContents(painter)
+
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSize(max(11, font.pointSize()))
+        painter.setFont(font)
+
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(self._text)
+        text_height = metrics.height()
+        pad_x = 14
+        pad_y = 8
+        box_width = text_width + pad_x * 2
+        box_height = text_height + pad_y * 2
+        width = self.pixmap().width()
+        height = self.pixmap().height()
+
+        if self._position == "top-left":
+            x = self._margin
+            y = self._margin
+        elif self._position == "top-right":
+            x = max(self._margin, width - self._margin - box_width)
+            y = self._margin
+        elif self._position == "bottom-left":
+            x = self._margin
+            y = max(self._margin, height - self._margin - box_height)
+        elif self._position == "center":
+            x = max(self._margin, (width - box_width) // 2)
+            y = max(self._margin, (height - box_height) // 2)
+        else:
+            x = max(self._margin, width - self._margin - box_width)
+            y = max(self._margin, height - self._margin - box_height)
+
+        box_rect = QRectF(float(x), float(y), float(box_width), float(box_height))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 160))
+        painter.drawRoundedRect(box_rect, 6.0, 6.0)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(
+            box_rect.adjusted(float(pad_x), float(pad_y), float(-pad_x), float(-pad_y)),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            self._text,
+        )
+
+
+def build_splash_pixmap(image_path: str | None) -> QPixmap:
+    path = Path(image_path).expanduser() if image_path else _DEFAULT_SPLASH_IMAGE
+    if path.exists():
+        pixmap = QPixmap(str(path))
+        if not pixmap.isNull():
+            return pixmap
+
+    fallback = QPixmap(960, 540)
+    fallback.fill(QColor(18, 22, 30))
+    painter = QPainter(fallback)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QColor(255, 255, 255))
+    font = painter.font()
+    font.setBold(True)
+    font.setPointSize(34)
+    painter.setFont(font)
+    painter.drawText(fallback.rect(), Qt.AlignmentFlag.AlignCenter, "openSMT")
+    painter.end()
+    return fallback
+
+
+def build_splash_text(text: str | None) -> str:
+    if text and text.strip():
+        return text.strip()
+    return f"openSMT {__version__}"
 
 
 def _assets_dir() -> Path:
@@ -2804,6 +2893,7 @@ class ControlWindow(QMainWindow):
         self._bottom_left_ratio_min = 0.2
         self._bottom_left_ratio_max = 0.5
         self._splitter_clamp_active: set[int] = set()
+        self._panel_windows: list[QMainWindow] = []
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -2811,7 +2901,10 @@ class ControlWindow(QMainWindow):
         outer.setContentsMargins(5, 5, 5, 5)
         outer.setSpacing(4)
 
-        top = QHBoxLayout()
+        self._top_bar = QWidget()
+        top = QHBoxLayout(self._top_bar)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
         self._host = QLineEdit(host)
         self._port = QLineEdit(str(port))
         self._connect_btn = QPushButton("Apply Host")
@@ -2829,7 +2922,7 @@ class ControlWindow(QMainWindow):
         top.addWidget(self._debug_btn)
         top.addStretch(1)
         top.addWidget(self._conn_state)
-        outer.addLayout(top)
+        outer.addWidget(self._top_bar)
 
         split_root = QVBoxLayout()
         split_root.setContentsMargins(0, 0, 0, 0)
@@ -2842,6 +2935,7 @@ class ControlWindow(QMainWindow):
         self._bottom_splitter.setChildrenCollapsible(False)
 
         cam_group = QGroupBox("Cameras")
+        self._camera_group = cam_group
         cam_group_layout = QVBoxLayout(cam_group)
         cam_group_layout.setContentsMargins(2, 2, 2, 2)
         self._camera_host = QWidget()
@@ -2865,6 +2959,7 @@ class ControlWindow(QMainWindow):
         cam_group_layout.addWidget(self._camera_host, 1)
 
         gp_group = QGroupBox("General Purpose")
+        self._general_group = gp_group
         gp_layout = QVBoxLayout(gp_group)
         gp_layout.setContentsMargins(6, 6, 6, 6)
         gp_tabs = QTabWidget()
@@ -3545,6 +3640,7 @@ class ControlWindow(QMainWindow):
         gp_layout.addWidget(gp_tabs)
 
         xy_group = QGroupBox("XY Jogging")
+        self._xy_group = xy_group
         xy_layout = QVBoxLayout(xy_group)
         xy_layout.setContentsMargins(4, 4, 4, 4)
         xy_layout.setSpacing(3)
@@ -3598,6 +3694,7 @@ class ControlWindow(QMainWindow):
         xy_layout.addLayout(special_grid)
 
         noz_group = QGroupBox("Nozzles")
+        self._nozzle_group = noz_group
         noz_layout = QVBoxLayout(noz_group)
         noz_layout.setContentsMargins(4, 4, 4, 4)
         noz_scroll = QScrollArea()
@@ -3626,10 +3723,14 @@ class ControlWindow(QMainWindow):
         split_root.addWidget(self._bottom_splitter, 2)
         outer.addLayout(split_root, 1)
 
-        status = self.statusBar()
-        status.setSizeGripEnabled(False)
-        status.addPermanentWidget(self._catalog_status, 0)
-        status.addPermanentWidget(self._machine_status, 1)
+        self._status_row = QWidget()
+        self._status_row_layout = QHBoxLayout(self._status_row)
+        self._status_row_layout.setContentsMargins(0, 0, 0, 0)
+        self._status_row_layout.setSpacing(8)
+        self._status_row_layout.addWidget(self._conn_state)
+        self._status_row_layout.addWidget(self._catalog_status)
+        self._status_row_layout.addWidget(self._machine_status)
+        self._status_row_layout.addStretch(1)
 
         self._connect_btn.clicked.connect(self._apply_host)
         self._debug_btn.clicked.connect(self._open_stepper_popup)
@@ -3667,6 +3768,40 @@ class ControlWindow(QMainWindow):
         QTimer.singleShot(0, self._init_splitters)
 
         self._poll_status()
+
+    def show_panel_windows(self) -> list[QMainWindow]:
+        if self._panel_windows:
+            for window in self._panel_windows:
+                window.show()
+            return self._panel_windows
+
+        camera_window = self._create_panel_window("openSMT Cameras", self._camera_group)
+        camera_window.setMinimumWidth(max(1, camera_window.sizeHint().width()))
+
+        general_root = QWidget()
+        general_layout = QVBoxLayout(general_root)
+        general_layout.setContentsMargins(6, 6, 6, 6)
+        general_layout.setSpacing(6)
+        general_layout.addWidget(self._top_bar)
+        general_layout.addWidget(self._general_group, 1)
+        general_layout.addWidget(self._status_row)
+        general_window = self._create_panel_window("openSMT General Purpose", general_root)
+
+        xy_window = self._create_panel_window("openSMT XY Jogging", self._xy_group)
+        nozzle_window = self._create_panel_window("openSMT Nozzles", self._nozzle_group)
+
+        self._panel_windows = [camera_window, general_window, xy_window, nozzle_window]
+        for window in self._panel_windows:
+            window.show()
+
+        return self._panel_windows
+
+    @staticmethod
+    def _create_panel_window(title: str, central_widget: QWidget) -> QMainWindow:
+        window = QMainWindow()
+        window.setWindowTitle(title)
+        window.setCentralWidget(central_widget)
+        return window
 
     def _init_splitters(self) -> None:
         self._set_splitter_ratio(self._top_splitter, 0.45)
@@ -6994,8 +7129,36 @@ class ControlWindow(QMainWindow):
         self._machine_status.setText("  |  ".join(parts))
 
 
-def run_qt_control(host: str, port: int) -> None:
+def run_qt_control(
+    host: str,
+    port: int,
+    *,
+    splash_image: str | None = None,
+    splash_text: str | None = None,
+    splash_text_position: str = "bottom-right",
+    splash_min_seconds: float = 5.0,
+) -> None:
     app = QApplication.instance() or QApplication([])
+
+    splash = ConfigurableSplashScreen(
+        build_splash_pixmap(splash_image),
+        build_splash_text(splash_text),
+        splash_text_position,
+    )
+    splash.show()
+    app.processEvents()
+
+    init_started = time.monotonic()
     win = ControlWindow(host=host, port=port)
-    win.show()
+    windows = win.show_panel_windows()
+    elapsed = time.monotonic() - init_started
+    remaining = max(0.0, max(5.0, float(splash_min_seconds)) - elapsed)
+
+    def _close_splash() -> None:
+        if windows:
+            splash.finish(windows[0])
+        else:
+            splash.close()
+
+    QTimer.singleShot(int(remaining * 1000), _close_splash)
     app.exec()
