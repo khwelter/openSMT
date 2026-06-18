@@ -126,12 +126,29 @@ class ConfigurableSplashScreen(QSplashScreen):
         )
 
 
+class ManagedPanelWindow(QMainWindow):
+    def __init__(self, title: str, central_widget: QWidget, on_close: Callable[[], None]) -> None:
+        super().__init__()
+        self.setWindowTitle(title)
+        self.setCentralWidget(central_widget)
+        self._on_close = on_close
+
+    def closeEvent(self, event) -> None:
+        self._on_close()
+        super().closeEvent(event)
+
+
 def build_splash_pixmap(image_path: str | None) -> QPixmap:
     path = Path(image_path).expanduser() if image_path else _DEFAULT_SPLASH_IMAGE
     if path.exists():
         pixmap = QPixmap(str(path))
         if not pixmap.isNull():
-            return pixmap
+            return pixmap.scaled(
+                pixmap.width() * 3,
+                pixmap.height() * 2,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
 
     fallback = QPixmap(960, 540)
     fallback.fill(QColor(18, 22, 30))
@@ -144,7 +161,12 @@ def build_splash_pixmap(image_path: str | None) -> QPixmap:
     painter.setFont(font)
     painter.drawText(fallback.rect(), Qt.AlignmentFlag.AlignCenter, "openSMT")
     painter.end()
-    return fallback
+    return fallback.scaled(
+        fallback.width() * 3,
+        fallback.height() * 2,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
 
 
 def build_splash_text(text: str | None) -> str:
@@ -2894,6 +2916,7 @@ class ControlWindow(QMainWindow):
         self._bottom_left_ratio_max = 0.5
         self._splitter_clamp_active: set[int] = set()
         self._panel_windows: list[QMainWindow] = []
+        self._panel_close_guard = False
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -3771,8 +3794,6 @@ class ControlWindow(QMainWindow):
 
     def show_panel_windows(self) -> list[QMainWindow]:
         if self._panel_windows:
-            for window in self._panel_windows:
-                window.show()
             return self._panel_windows
 
         camera_window = self._create_panel_window("openSMT Cameras", self._camera_group)
@@ -3791,17 +3812,64 @@ class ControlWindow(QMainWindow):
         nozzle_window = self._create_panel_window("openSMT Nozzles", self._nozzle_group)
 
         self._panel_windows = [camera_window, general_window, xy_window, nozzle_window]
-        for window in self._panel_windows:
-            window.show()
 
         return self._panel_windows
 
-    @staticmethod
-    def _create_panel_window(title: str, central_widget: QWidget) -> QMainWindow:
-        window = QMainWindow()
-        window.setWindowTitle(title)
-        window.setCentralWidget(central_widget)
+    def _create_panel_window(self, title: str, central_widget: QWidget) -> QMainWindow:
+        window = ManagedPanelWindow(title, central_widget, self._close_all_panel_windows)
         return window
+
+    def _close_all_panel_windows(self) -> None:
+        if self._panel_close_guard:
+            return
+        self._panel_close_guard = True
+        try:
+            for window in list(self._panel_windows):
+                if window.isVisible():
+                    window.close()
+            QApplication.instance().quit()
+        finally:
+            self._panel_close_guard = False
+
+    def _layout_panel_windows(self, windows: list[QMainWindow]) -> None:
+        app = QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        if screen is None:
+            for window in windows:
+                window.resize(window.sizeHint())
+            return
+
+        area = screen.availableGeometry()
+        margin = 18
+        gap = 12
+        half_w = max(320, (area.width() - margin * 2 - gap) // 2)
+        half_h = max(240, (area.height() - margin * 2 - gap) // 2)
+
+        sizes = {
+            "camera": windows[0].sizeHint(),
+            "general": windows[1].sizeHint(),
+            "xy": windows[2].sizeHint(),
+            "nozzle": windows[3].sizeHint(),
+        }
+
+        camera_w = min(max(sizes["camera"].width(), 640), half_w)
+        camera_h = min(max(sizes["camera"].height(), 420), half_h)
+        general_w = min(max(sizes["general"].width(), 700), half_w)
+        general_h = min(max(sizes["general"].height(), 420), half_h)
+        xy_w = min(max(sizes["xy"].width(), 520), half_w)
+        xy_h = min(max(sizes["xy"].height(), 340), half_h)
+        nozzle_w = min(max(sizes["nozzle"].width(), 520), half_w)
+        nozzle_h = min(max(sizes["nozzle"].height(), 340), half_h)
+
+        positions = [
+            (area.left() + margin, area.top() + margin, camera_w, camera_h),
+            (area.right() - margin - general_w, area.top() + margin, general_w, general_h),
+            (area.left() + margin, area.bottom() - margin - xy_h, xy_w, xy_h),
+            (area.right() - margin - nozzle_w, area.bottom() - margin - nozzle_h, nozzle_w, nozzle_h),
+        ]
+
+        for window, (x, y, w, h) in zip(windows, positions, strict=True):
+            window.setGeometry(int(x), int(y), int(w), int(h))
 
     def _init_splitters(self) -> None:
         self._set_splitter_ratio(self._top_splitter, 0.45)
@@ -7156,6 +7224,9 @@ def run_qt_control(
 
     def _close_splash() -> None:
         if windows:
+            win._layout_panel_windows(windows)
+            for window in windows:
+                window.show()
             splash.finish(windows[0])
         else:
             splash.close()
