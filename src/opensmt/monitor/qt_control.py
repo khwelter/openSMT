@@ -569,7 +569,7 @@ class CameraTile(QFrame):
         )
         self._camera_actions: dict[str, QAction] = {}
         self._camera_menu_btn.setMenu(self._camera_menu)
-        self._camera_menu_btn.raise_()
+        self._camera_menu_btn.setParent(self)
 
         self._light_dot_buttons: list[QToolButton] = []
         for _ in range(3):
@@ -633,6 +633,7 @@ class CameraTile(QFrame):
 
         footer.addWidget(self._name)
         footer.addStretch(1)
+        footer.addWidget(self._camera_menu_btn)
         footer.addWidget(self._state)
         footer.addSpacing(8)
         footer.addLayout(controls)
@@ -695,10 +696,7 @@ class CameraTile(QFrame):
         self._position_overlay_buttons()
 
     def _position_overlay_buttons(self) -> None:
-        self._camera_menu_btn.adjustSize()
         margin = 8
-        x = max(margin, self._preview.width() - self._camera_menu_btn.width() - margin)
-        self._camera_menu_btn.move(x, margin)
 
         dot_x = margin
         dot_y = margin
@@ -2886,9 +2884,12 @@ class ControlWindow(QMainWindow):
         setup_cam_actions.setSpacing(4)
         self._setup_camera_add_btn = QPushButton("Add Camera")
         self._setup_camera_add_btn.clicked.connect(self._on_setup_camera_add)
+        self._setup_camera_swap_btn = QPushButton("Swap TOP/BOTTOM")
+        self._setup_camera_swap_btn.clicked.connect(self._on_setup_camera_swap_top_bottom)
         self._setup_camera_save_btn = QPushButton("Save Cameras")
         self._setup_camera_save_btn.clicked.connect(self._on_setup_camera_save)
         setup_cam_actions.addWidget(self._setup_camera_add_btn)
+        setup_cam_actions.addWidget(self._setup_camera_swap_btn)
         setup_cam_actions.addWidget(self._setup_camera_save_btn)
         setup_cam_actions.addStretch(1)
         setup_cameras_layout.addLayout(setup_cam_actions)
@@ -4621,6 +4622,33 @@ class ControlWindow(QMainWindow):
         new_row = len(self._setup_cameras) - 1
         self._setup_camera_table.selectRow(new_row)
         self._on_setup_camera_row_selected(new_row, 0)
+
+    def _on_setup_camera_swap_top_bottom(self) -> None:
+        self._store_current_setup_camera_editor()
+
+        top_idx = -1
+        bottom_idx = -1
+        for idx, cam in enumerate(self._setup_cameras):
+            name = str(cam.get("name", "")).strip().upper()
+            if name == "TOP":
+                top_idx = idx
+            elif name == "BOTTOM":
+                bottom_idx = idx
+
+        if top_idx < 0 or bottom_idx < 0:
+            self._log_line("ERR: swap failed: both TOP and BOTTOM cameras must exist")
+            return
+
+        self._setup_cameras[top_idx]["name"] = "BOTTOM"
+        self._setup_cameras[bottom_idx]["name"] = "TOP"
+
+        self._refresh_setup_camera_table()
+        self._setup_camera_table.selectRow(top_idx)
+        self._on_setup_camera_row_selected(top_idx, 0)
+        self._log_line("OK: swapped TOP/BOTTOM camera roles in setup")
+
+        # Apply immediately so the operator can recover from USB camera order flips in one click.
+        self._on_setup_camera_save()
 
     def _on_setup_camera_save(self) -> None:
         self._store_current_setup_camera_editor()
