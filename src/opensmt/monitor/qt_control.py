@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from opensmt import __version__
 from PySide6.QtCore import QObject, QPointF, QRectF, QSize, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -208,127 +208,13 @@ def _load_pm(name: str, size: int = _ICON_SZ) -> QPixmap:
     return _pm_cache[key]
 
 
-def _tint_pm(src: QPixmap, color: QColor) -> QPixmap:
-    key = f"__tint@{int(src.cacheKey())}@{color.name()}"
+def _load_pm_raw(name: str) -> QPixmap:
+    key = f"{name}@raw"
     if key in _pm_cache:
         return _pm_cache[key]
 
-    tinted = QPixmap(src.size())
-    tinted.fill(Qt.GlobalColor.transparent)
-    p = QPainter(tinted)
-    p.drawPixmap(0, 0, src)
-    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-    p.fillRect(tinted.rect(), color)
-    p.end()
-    _pm_cache[key] = tinted
-    return tinted
-
-
-def _make_camera_pm(
-    size: int = _ICON_SZ,
-    body_color: QColor | None = None,
-    lens_color: QColor | None = None,
-) -> QPixmap:
-    if body_color is None:
-        body_color = _COLOR_BLUE
-    if lens_color is None:
-        lens_color = _COLOR_RED
-
-    key = f"__cam@{size}@{body_color.name()}@{lens_color.name()}"
-    if key in _pm_cache:
-        return _pm_cache[key]
-
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    body_y = int(size * 0.35)
-    body_h = int(size * 0.5)
-    bump_w = int(size * 0.3)
-    bump_h = int(size * 0.15)
-    bump_x = int(size * 0.36)
-
-    p.setBrush(body_color)
-    p.setPen(body_color.darker(140))
-    p.drawRoundedRect(1, body_y, size - 2, body_h, 3, 3)
-    p.drawRect(bump_x, body_y - bump_h, bump_w, bump_h)
-
-    lens_r = size * 0.16
-    cx, cy = size / 2.0, body_y + body_h / 2.0
-    p.setBrush(lens_color)
-    p.setPen(lens_color.darker(145))
-    p.drawEllipse(int(cx - lens_r), int(cy - lens_r), int(lens_r * 2), int(lens_r * 2))
-    p.end()
-
-    _pm_cache[key] = pm
-    return pm
-
-
-def _make_arrow_pm(w: int = _ARROW_W, h: int = _ICON_SZ) -> QPixmap:
-    key = f"__arrow@{w}x{h}"
-    if key in _pm_cache:
-        return _pm_cache[key]
-
-    pm = QPixmap(w, h)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(_COLOR_RED)
-    p.setPen(Qt.PenStyle.NoPen)
-
-    hh = h * 0.32
-    cy = h / 2.0
-    poly = QPolygonF([
-        QPointF(2, cy - hh),
-        QPointF(w - 2, cy),
-        QPointF(2, cy + hh),
-    ])
-    p.drawPolygon(poly)
-    p.end()
-
-    _pm_cache[key] = pm
-    return pm
-
-
-def _compose_pm(left: QPixmap, right: QPixmap) -> QPixmap:
-    gap = 2
-    total_w = _ICON_SZ + gap + _ARROW_W + gap + _ICON_SZ
-    pm = QPixmap(total_w, _ICON_SZ)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.drawPixmap(0, 0, left)
-    p.drawPixmap(_ICON_SZ + gap, 0, _make_arrow_pm())
-    p.drawPixmap(_ICON_SZ + gap + _ARROW_W + gap, 0, right)
-    p.end()
-    return pm
-
-
-def _make_target_marker_pm(label: str, size: int = _ICON_SZ, color: QColor | None = None) -> QPixmap:
-    if color is None:
-        color = _COLOR_RED
-    key = f"__target@{label}@{size}@{color.name()}"
-    if key in _pm_cache:
-        return _pm_cache[key]
-
-    pm = QPixmap(size, size)
-    pm.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    r = int(size * 0.34)
-    cx = size // 2
-    cy = size // 2
-    p.setPen(color)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
-    p.drawLine(cx - r - 2, cy, cx + r + 2, cy)
-    p.drawLine(cx, cy - r - 2, cx, cy + r + 2)
-
-    p.setPen(color.darker(140))
-    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, label)
-    p.end()
-
+    path = _assets_dir() / f"{name}.png"
+    pm = QPixmap(str(path)) if path.exists() else QPixmap()
     _pm_cache[key] = pm
     return pm
 
@@ -344,13 +230,13 @@ def _sq_btn(pm_or_name: str | QPixmap, tooltip: str = "") -> QPushButton:
     return btn
 
 
-def _dual_btn(left: QPixmap, right: QPixmap, tooltip: str = "") -> QPushButton:
-    pm = _compose_pm(left, right)
-    gap = 2
-    total_w = _ICON_SZ + gap + _ARROW_W + gap + _ICON_SZ
+def _dual_btn(icon_name: str, tooltip: str = "") -> QPushButton:
+    pm = _load_pm_raw(icon_name)
+    total_w = _ICON_SZ * 2 + _ARROW_W + 4
+    total_h = _ICON_SZ
     btn = QPushButton()
     btn.setIcon(QIcon(pm))
-    btn.setIconSize(QSize(total_w, _ICON_SZ))
+    btn.setIconSize(QSize(total_w, total_h))
     btn.setFixedSize(total_w + 12, _BTN_SQ)
     if tooltip:
         btn.setToolTip(tooltip)
@@ -360,13 +246,9 @@ def _dual_btn(left: QPixmap, right: QPixmap, tooltip: str = "") -> QPushButton:
 def _xy_btn(
     pm_or_name: str | QPixmap,
     tooltip: str = "",
-    *,
-    tint: QColor | None = None,
 ) -> QPushButton:
     """Create larger, high-contrast buttons for the XY pane."""
     pm = _load_pm(pm_or_name) if isinstance(pm_or_name, str) else pm_or_name
-    if tint is not None:
-        pm = _tint_pm(pm, tint)
 
     btn = QPushButton()
     btn.setIcon(QIcon(pm))
@@ -667,7 +549,7 @@ class CameraTile(QFrame):
         self._camera_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._camera_menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._camera_menu_btn.setAutoRaise(True)
-        self._camera_menu_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        self._camera_menu_btn.setIcon(QIcon(_load_pm("camera")))
         self._camera_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._camera_menu_btn.setStyleSheet(
             "QToolButton {"
@@ -917,23 +799,23 @@ class CameraTile(QFrame):
 class NozzleCard(QFrame):
     action_requested = Signal(str, str, float)
 
-    _nozzle_pm: QPixmap | None = None
-    _cam_top_pm: QPixmap | None = None
-    _cam_bottom_pm: QPixmap | None = None
-    _cal_pm: QPixmap | None = None
+    _nozzle_icon: str | None = None
+    _cam_top_icon: str | None = None
+    _cam_bottom_icon: str | None = None
+    _cal_icon: str | None = None
 
     _Z_STEPS: list[float] = [10.0, 5.0, 2.5, 1.0, 0.1]
     _R_STEPS: list[float] = [45.0, 15.0, 5.0, 1.0, 0.1]
 
     @classmethod
     def _init_pms(cls) -> None:
-        if cls._nozzle_pm is not None:
+        if cls._nozzle_icon is not None:
             return
 
-        cls._nozzle_pm = _tint_pm(_load_pm("nozzle_change"), _COLOR_RED)
-        cls._cam_top_pm = _make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)
-        cls._cam_bottom_pm = _make_camera_pm(body_color=_COLOR_RED, lens_color=_COLOR_BLUE)
-        cls._cal_pm = _tint_pm(_load_pm("calibration_spot"), _COLOR_BLUE)
+        cls._nozzle_icon = "nozzle_change_red"
+        cls._cam_top_icon = "camera"
+        cls._cam_bottom_icon = "camera_bottom"
+        cls._cal_icon = "calibration_spot_blue"
 
     def __init__(self, nozzle_name: str) -> None:
         super().__init__()
@@ -1067,10 +949,10 @@ class NozzleCard(QFrame):
         btn_grid = QGridLayout()
         btn_grid.setSpacing(2)
 
-        b_align = _dual_btn(self._nozzle_pm, self._cam_top_pm, "Align nozzle to top camera")
-        b_cam = _dual_btn(self._cam_top_pm, self._nozzle_pm, "Move top camera to nozzle")
-        b_bottom = _dual_btn(self._nozzle_pm, self._cam_bottom_pm, "Move nozzle above bottom camera")
-        b_cal = _sq_btn(self._cal_pm, "Calculate nozzle offset at fiducial")
+        b_align = _dual_btn("nozzle_to_camera_top", "Align nozzle to top camera")
+        b_cam = _dual_btn("camera_to_nozzle", "Move top camera to nozzle")
+        b_bottom = _dual_btn("nozzle_to_camera_bottom", "Move nozzle above bottom camera")
+        b_cal = _sq_btn(self._cal_icon or "calibration_spot_blue", "Calculate nozzle offset at fiducial")
 
         btn_grid.addWidget(b_align, 0, 0)
         btn_grid.addWidget(b_cam, 0, 1)
@@ -1527,8 +1409,8 @@ class TrayFeederEditor(QWidget):
         btn_row_bottom = QHBoxLayout()
         self._btn_move_base = QPushButton()
         self._btn_move_current = QPushButton()
-        self._btn_move_base.setIcon(QIcon(_compose_pm(_make_camera_pm(), _make_target_marker_pm("B", color=_COLOR_BLUE))))
-        self._btn_move_current.setIcon(QIcon(_compose_pm(_make_camera_pm(), _make_target_marker_pm("C", color=_COLOR_RED))))
+        self._btn_move_base.setIcon(QIcon(_load_pm_raw("camera_to_target_b")))
+        self._btn_move_current.setIcon(QIcon(_load_pm_raw("camera_to_target_c")))
         self._btn_move_base.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
         self._btn_move_current.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
         self._btn_move_base.setFixedHeight(_BTN_SQ)
@@ -1544,16 +1426,16 @@ class TrayFeederEditor(QWidget):
         self._status = QLabel("")
         self._status.setStyleSheet("color:#5f6b80;")
 
-        pick_pm = _compose_pm(_make_camera_pm(), _make_target_marker_pm("P", color=_COLOR_BLUE))
+        pick_pm = _load_pm_raw("camera_to_target_p")
         self._btn_pick_from_camera.setIcon(QIcon(pick_pm))
         self._btn_pick_from_camera.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
 
-        adv_pm = _compose_pm(_make_target_marker_pm("C", color=_COLOR_RED), _make_target_marker_pm("N", color=_COLOR_BLUE))
+        adv_pm = _load_pm_raw("target_c_to_target_n")
         self._btn_advance.setIcon(QIcon(adv_pm))
         self._btn_advance.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
         self._btn_advance.setToolTip("Advance to next tray pick position")
 
-        reset_pm = _compose_pm(_make_target_marker_pm("N", color=_COLOR_BLUE), _make_target_marker_pm("0", color=_COLOR_RED))
+        reset_pm = _load_pm_raw("target_n_to_target_0")
         self._btn_reset.setIcon(QIcon(reset_pm))
         self._btn_reset.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
         self._btn_reset.setToolTip("Reset picked count and indices")
@@ -1718,7 +1600,7 @@ class TrayFeederEditor(QWidget):
         last_row_l.addWidget(QLabel("Y"))
         last_row_l.addWidget(self._last_y)
         self._btn_last_from_camera = QPushButton()
-        self._btn_last_from_camera.setIcon(QIcon(_compose_pm(_make_camera_pm(), _make_target_marker_pm("L", color=_COLOR_RED))))
+        self._btn_last_from_camera.setIcon(QIcon(_load_pm_raw("camera_to_target_l")))
         self._btn_last_from_camera.setIconSize(QSize(_ICON_SZ * 2 + _ARROW_W + 4, _ICON_SZ))
         self._btn_last_from_camera.setFixedHeight(_BTN_SQ)
         self._btn_last_from_camera.setToolTip("Set last-pick position from current top-camera XY")
@@ -3169,7 +3051,7 @@ class ControlWindow(QMainWindow):
         self._single_pcb_capture_board_btn = QToolButton()
         self._single_pcb_capture_board_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._single_pcb_capture_board_btn.setAutoRaise(True)
-        self._single_pcb_capture_board_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        self._single_pcb_capture_board_btn.setIcon(QIcon(_load_pm("camera")))
         self._single_pcb_capture_board_btn.setToolTip("Use current camera XY as the board XY position")
         self._single_pcb_capture_board_btn.clicked.connect(self._on_single_pcb_capture_board_xy)
         self._single_pcb_new_btn = QPushButton("New")
@@ -3239,13 +3121,13 @@ class ControlWindow(QMainWindow):
         self._single_pcb_capture_item_btn = QToolButton()
         self._single_pcb_capture_item_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._single_pcb_capture_item_btn.setAutoRaise(True)
-        self._single_pcb_capture_item_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_RED, lens_color=_COLOR_BLUE)))
+        self._single_pcb_capture_item_btn.setIcon(QIcon(_load_pm("camera_bottom")))
         self._single_pcb_capture_item_btn.setToolTip("Use current camera XY as the selected part PCB-relative XY")
         self._single_pcb_capture_item_btn.clicked.connect(self._on_single_pcb_capture_selected_item_xy)
         self._single_pcb_move_camera_item_btn = QToolButton()
         self._single_pcb_move_camera_item_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._single_pcb_move_camera_item_btn.setAutoRaise(True)
-        self._single_pcb_move_camera_item_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        self._single_pcb_move_camera_item_btn.setIcon(QIcon(_load_pm("camera")))
         self._single_pcb_move_camera_item_btn.setToolTip("Move camera to the selected part position on the PCB")
         self._single_pcb_move_camera_item_btn.clicked.connect(self._on_single_pcb_move_camera_to_selected_item)
         self._single_pcb_add_item_btn.clicked.connect(self._on_single_pcb_add_item)
@@ -3574,7 +3456,7 @@ class ControlWindow(QMainWindow):
         self._add_feeder_btn.setText("Add Feeder")
         self._add_feeder_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._add_feeder_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._add_feeder_btn.setIcon(QIcon(_make_camera_pm(body_color=_COLOR_BLUE, lens_color=_COLOR_RED)))
+        self._add_feeder_btn.setIcon(QIcon(_load_pm("camera")))
         add_menu = QMenu(self._add_feeder_btn)
         for feeder_type, title in _FEEDER_TYPE_TITLES:
             label = title[:-1] if title.endswith("s") else title
@@ -3687,10 +3569,10 @@ class ControlWindow(QMainWindow):
         jog_grid = QGridLayout()
         jog_grid.setSpacing(3)
 
-        b_l = _xy_btn("move_left", "Jog left", tint=_COLOR_BLUE)
-        b_r = _xy_btn("move_right", "Jog right", tint=_COLOR_BLUE)
-        b_u = _xy_btn("move_up", "Jog up (Y+)", tint=_COLOR_BLUE)
-        b_d = _xy_btn("move_down", "Jog down (Y-)", tint=_COLOR_BLUE)
+        b_l = _xy_btn("move_left_blue", "Jog left")
+        b_r = _xy_btn("move_right_blue", "Jog right")
+        b_u = _xy_btn("move_up_blue", "Jog up (Y+)")
+        b_d = _xy_btn("move_down_blue", "Jog down (Y-)")
 
         jog_grid.addWidget(b_u, 0, 1)
         jog_grid.addWidget(b_l, 1, 0)
@@ -3701,13 +3583,13 @@ class ControlWindow(QMainWindow):
         special_grid = QGridLayout()
         special_grid.setSpacing(3)
 
-        b_home_all = _xy_btn("home_all", "Home all axes", tint=_COLOR_RED)
-        b_home_xy = _xy_btn("home_xy", "Home XY axes", tint=_COLOR_BLUE)
-        b_fid_main = _xy_btn("fiducial_main", "Move to homing fiducial main", tint=_COLOR_RED)
-        b_fid_sec = _xy_btn("fiducial_secondary", "Move to secondary fiducial", tint=_COLOR_BLUE)
-        b_park = _xy_btn("park_zero", "Move to park", tint=_COLOR_RED)
-        b_dispose = _xy_btn("dispose", "Move to dispose", tint=_COLOR_BLUE)
-        b_nozchg = _xy_btn("nozzle_change", "Move to nozzle change", tint=_COLOR_RED)
+        b_home_all = _xy_btn("home_all_red", "Home all axes")
+        b_home_xy = _xy_btn("home_xy_blue", "Home XY axes")
+        b_fid_main = _xy_btn("fiducial_main_red", "Move to homing fiducial main")
+        b_fid_sec = _xy_btn("fiducial_secondary_blue", "Move to secondary fiducial")
+        b_park = _xy_btn("park_zero_red", "Move to park")
+        b_dispose = _xy_btn("dispose_blue", "Move to dispose")
+        b_nozchg = _xy_btn("nozzle_change_red", "Move to nozzle change")
 
         special_grid.addWidget(b_home_all, 0, 0)
         special_grid.addWidget(b_home_xy, 0, 1)
