@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -7154,14 +7153,20 @@ def run_qt_control(
     splash.show()
     app.processEvents()
 
-    init_started = time.monotonic()
-    win = ControlWindow(host=host, port=port)
-    windows = win.show_panel_windows()
-    elapsed = time.monotonic() - init_started
-    remaining = max(0.0, max(5.0, float(splash_min_seconds)) - elapsed)
+    state: dict[str, Any] = {
+        "win": None,
+        "windows": [],
+        "init_done": False,
+        "min_delay_done": False,
+    }
 
-    def _close_splash() -> None:
-        if windows:
+    def _show_app_if_ready() -> None:
+        if not state["init_done"] or not state["min_delay_done"]:
+            return
+
+        windows = state["windows"]
+        win = state["win"]
+        if windows and win is not None:
             win._layout_panel_windows(windows)
             for window in windows:
                 window.show()
@@ -7169,5 +7174,19 @@ def run_qt_control(
         else:
             splash.close()
 
-    QTimer.singleShot(int(remaining * 1000), _close_splash)
+    def _complete_min_delay() -> None:
+        state["min_delay_done"] = True
+        _show_app_if_ready()
+
+    def _initialize_app() -> None:
+        win = ControlWindow(host=host, port=port)
+        windows = win.show_panel_windows()
+        state["win"] = win
+        state["windows"] = windows
+        state["init_done"] = True
+        _show_app_if_ready()
+
+    min_delay_ms = int(max(5.0, float(splash_min_seconds)) * 1000)
+    QTimer.singleShot(0, _initialize_app)
+    QTimer.singleShot(min_delay_ms, _complete_min_delay)
     app.exec()
