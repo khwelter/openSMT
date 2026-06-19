@@ -41,8 +41,8 @@
         "resolution_dpcm_x": 238.0,
         "resolution_dpcm_y": 238.0,
         "flip_horizontal": false,
-        "flip_vertical": true,
-        "rotation_deg": 90.0,
+        "flip_vertical": false,
+        "rotation_deg": 270.0,
         "lights": {
           "standard": {
             "board": "AB",

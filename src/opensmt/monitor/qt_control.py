@@ -2866,6 +2866,7 @@ class ControlWindow(QMainWindow):
         self._camera_tiles: dict[str, CameraTile] = {}
         self._camera_order: list[str] = []
         self._camera_status_by_name: dict[str, bool] = {}
+        self._camera_missing_polls: dict[str, int] = {}
         self._active_camera_name: str = ""
         self._shown_camera_name: str = ""
         self._camera_view_mode: str = "both_h"
@@ -3857,9 +3858,10 @@ class ControlWindow(QMainWindow):
         camera_h = min(max(sizes["camera"].height(), 480), half_h)
         general_w = min(max(sizes["general"].width(), 700), half_w)
         general_h = min(max(sizes["general"].height(), 420), half_h)
-        xy_w = min(max(sizes["xy"].width(), 460), half_w)
+        xy_w = min(max(sizes["xy"].width(), 420), half_w)
         xy_h = min(max(sizes["xy"].height(), 340), half_h)
-        nozzle_w = min(max(sizes["nozzle"].width(), 980), area.width() - margin * 2)
+        nozzle_content_w = max(sizes["nozzle"].width(), self._nozzle_container.minimumWidth() + 56)
+        nozzle_w = min(max(nozzle_content_w, 980), area.width() - margin * 2)
         nozzle_h = min(max(sizes["nozzle"].height(), 340), half_h)
 
         positions = [
@@ -4130,14 +4132,18 @@ class ControlWindow(QMainWindow):
         previous_shown = self._shown_camera_name
         known = set(self._camera_tiles.keys())
         incoming: set[str] = set()
-        status_by_name: dict[str, bool] = {}
+        incoming_order: list[str] = []
+        status_by_name: dict[str, bool] = dict(self._camera_status_by_name)
 
         for camera in cameras:
-            name = str(camera.get("name", "")).upper()
+            name = str(camera.get("name", "")).strip().upper()
             if not name:
                 continue
+            if name not in incoming:
+                incoming_order.append(name)
             incoming.add(name)
             status_by_name[name] = bool(camera.get("online", False))
+            self._camera_missing_polls[name] = 0
 
             tile = self._camera_tiles.get(name)
             if tile is None:
@@ -4160,7 +4166,15 @@ class ControlWindow(QMainWindow):
             tile.sync_lights(camera.get("lights") if isinstance(camera.get("lights"), dict) else {})
 
         for name in known - incoming:
+            misses = int(self._camera_missing_polls.get(name, 0)) + 1
+            self._camera_missing_polls[name] = misses
+            # During camera reconfiguration, /api/status can briefly omit one camera.
+            # Keep existing tiles through short gaps to avoid vanishing entries.
+            if misses < 5:
+                continue
             tile = self._camera_tiles.pop(name)
+            self._camera_missing_polls.pop(name, None)
+            status_by_name.pop(name, None)
             tile.setParent(None)
             tile.deleteLater()
         if not self._camera_tiles:
@@ -4169,7 +4183,20 @@ class ControlWindow(QMainWindow):
             self._show_selected_camera()
             return
 
-        ordered = sorted(self._camera_tiles.keys())
+        ordered: list[str] = []
+        for preferred in ("TOP", "BOTTOM"):
+            if preferred in self._camera_tiles:
+                ordered.append(preferred)
+        for name in incoming_order:
+            if name in self._camera_tiles and name not in ordered:
+                ordered.append(name)
+        for name in self._camera_order:
+            if name in self._camera_tiles and name not in ordered:
+                ordered.append(name)
+        for name in sorted(self._camera_tiles.keys()):
+            if name not in ordered:
+                ordered.append(name)
+
         self._camera_order = ordered
         self._camera_status_by_name = status_by_name
         if self._active_camera_name not in self._camera_tiles:
