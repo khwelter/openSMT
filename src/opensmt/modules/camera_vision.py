@@ -1210,6 +1210,7 @@ class CameraVisionModule:
         app.router.add_post("/api/nozzle/{name}/move-camera-here", self._api_nozzle_move_camera_here)
         app.router.add_post("/api/nozzle/{name}/calculate-offset-top", self._api_nozzle_calculate_offset_top)
         app.router.add_post("/api/camera/{name}/light", self._api_camera_light)
+        app.router.add_post("/api/cameras/swap-top-bottom", self._api_cameras_swap_top_bottom)
         app.router.add_post("/api/camera/{name}/settings", self._api_camera_settings)
         app.router.add_post("/api/camera/{name}/calibrate-resolution", self._api_camera_calibrate_resolution)
         app.router.add_post("/api/camera/{name}/capture-diagnostic", self._api_camera_capture_diagnostic)
@@ -2053,6 +2054,7 @@ class CameraVisionModule:
             flip_vertical = bool(body.get("flip_vertical", False))
             x_raw = body.get("x")
             y_raw = body.get("y")
+            persist = bool(body.get("persist", True))
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             return web.json_response({"error": "invalid_body"}, status=400)
 
@@ -2109,7 +2111,7 @@ class CameraVisionModule:
         if pos_x is not None and pos_y is not None:
             self._set_camera_xy(cam_name, pos_x, pos_y)
 
-        persist_error = self._persist_camera_resolutions()
+        persist_error = self._persist_camera_resolutions() if persist else "runtime_only"
 
         if reopen_required:
             await self._close_camera(state)
@@ -2130,7 +2132,55 @@ class CameraVisionModule:
                 "y": pos_y,
                 "reopened": reopen_required,
                 "persisted": persist_error is None,
-                "persist_error": persist_error,
+                "persist_error": (None if persist_error == "runtime_only" else persist_error),
+                "persist_path": str(self._camera_resolutions_persist_path) if self._camera_resolutions_persist_path else None,
+            }
+        )
+
+    async def _api_cameras_swap_top_bottom(self, request: web.Request) -> web.Response:
+        top_state = self._cameras.get("TOP")
+        bottom_state = self._cameras.get("BOTTOM")
+        if top_state is None or bottom_state is None:
+            return web.json_response({"error": "top_or_bottom_missing"}, status=404)
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        persist = bool(body.get("persist", False))
+
+        top_device = str(top_state.config.device).strip()
+        bottom_device = str(bottom_state.config.device).strip()
+        if not top_device or not bottom_device:
+            return web.json_response({"error": "invalid_camera_device"}, status=400)
+
+        await self._close_camera(top_state)
+        await self._close_camera(bottom_state)
+
+        top_state.config.device = bottom_device
+        bottom_state.config.device = top_device
+
+        for cam_cfg in self.config.get("cameras", []):
+            if not isinstance(cam_cfg, dict):
+                continue
+            cfg_name = str(cam_cfg.get("name", "")).strip().upper()
+            if cfg_name == "TOP":
+                cam_cfg["device"] = bottom_device
+            elif cfg_name == "BOTTOM":
+                cam_cfg["device"] = top_device
+
+        persist_error = self._persist_camera_resolutions() if persist else "runtime_only"
+
+        await self._open_camera(top_state)
+        await self._open_camera(bottom_state)
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "top_device": str(top_state.config.device),
+                "bottom_device": str(bottom_state.config.device),
+                "persisted": persist_error is None,
+                "persist_error": (None if persist_error == "runtime_only" else persist_error),
                 "persist_path": str(self._camera_resolutions_persist_path) if self._camera_resolutions_persist_path else None,
             }
         )

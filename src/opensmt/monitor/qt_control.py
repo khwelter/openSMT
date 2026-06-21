@@ -567,7 +567,7 @@ class CameraTile(QFrame):
         )
         self._camera_actions: dict[str, QAction] = {}
         self._camera_menu_btn.setMenu(self._camera_menu)
-        self._camera_menu_btn.setParent(self)
+        self._camera_menu_btn.hide()
 
         self._light_dot_buttons: list[QToolButton] = []
         for _ in range(3):
@@ -629,9 +629,7 @@ class CameraTile(QFrame):
         self._cal_info.setStyleSheet("color:#8ba3cf;")
         controls.addWidget(self._cal_info)
 
-        footer.addWidget(self._name)
         footer.addStretch(1)
-        footer.addWidget(self._camera_menu_btn)
         footer.addWidget(self._state)
         footer.addSpacing(8)
         footer.addLayout(controls)
@@ -2766,6 +2764,9 @@ class ControlWindow(QMainWindow):
         self._jobs_by_name: dict[str, dict[str, Any]] = {}
         self._setup_cameras: list[dict[str, Any]] = []
         self._setup_cameras_saved: list[dict[str, Any]] = []
+        self._setup_camera_save_pending: set[str] = set()
+        self._setup_camera_save_target: list[dict[str, Any]] = []
+        self._setup_camera_save_failed = False
         self._setup_camera_current_row = -1
         self._setup_positions: list[dict[str, Any]] = []
         self._setup_position_current_row = -1
@@ -2850,12 +2851,11 @@ class ControlWindow(QMainWindow):
         cam_controls.setSpacing(4)
         cam_controls.addWidget(QLabel("View"))
         self._camera_view_combo = QComboBox()
-        self._camera_view_combo.addItem("Selected Only", "selected")
         self._camera_view_combo.addItem("Top Only", "top")
         self._camera_view_combo.addItem("Bottom Only", "bottom")
         self._camera_view_combo.addItem("Both Side By Side", "both_h")
         self._camera_view_combo.addItem("Both Top And Bottom", "both_v")
-        self._camera_view_combo.setCurrentIndex(3)
+        self._camera_view_combo.setCurrentIndex(2)
         self._camera_view_combo.currentIndexChanged.connect(self._on_camera_view_mode_changed)
         cam_controls.addWidget(self._camera_view_combo)
         self._camera_swap_btn = QPushButton("Swap TOP/BOTTOM")
@@ -4204,9 +4204,9 @@ class ControlWindow(QMainWindow):
 
     def _on_camera_view_mode_changed(self, _idx: int) -> None:
         value = self._camera_view_combo.currentData()
-        mode = str(value).strip().lower() if value is not None else "selected"
-        if mode not in {"selected", "top", "bottom", "both_h", "both_v"}:
-            mode = "selected"
+        mode = str(value).strip().lower() if value is not None else "both_h"
+        if mode not in {"top", "bottom", "both_h", "both_v"}:
+            mode = "both_h"
         self._camera_view_mode = mode
         self._show_selected_camera()
 
@@ -4682,7 +4682,6 @@ class ControlWindow(QMainWindow):
 
     def _on_setup_camera_swap_top_bottom(self) -> None:
         self._store_current_setup_camera_editor()
-
         top_idx = -1
         bottom_idx = -1
         for idx, cam in enumerate(self._setup_cameras):
@@ -4707,9 +4706,11 @@ class ControlWindow(QMainWindow):
         self._load_setup_camera_editor(top_idx)
         self._log_line("OK: swapped TOP/BOTTOM camera devices in setup")
 
-        # Apply immediately at runtime; persist only when Save Cameras is pressed.
-        self._apply_setup_camera_runtime(self._setup_cameras[top_idx])
-        self._apply_setup_camera_runtime(self._setup_cameras[bottom_idx])
+        self._api.post_json(
+            "/api/cameras/swap-top-bottom",
+            {"persist": False},
+            self._on_setup_camera_swap_runtime_applied,
+        )
         self._update_setup_camera_save_button_state()
 
     def _on_setup_camera_save(self) -> None:
@@ -4730,12 +4731,17 @@ class ControlWindow(QMainWindow):
 
         self._refresh_setup_camera_table()
         self._log_line("OK: camera setup save requested on backend")
+        self._setup_camera_save_target = self._snapshot_setup_cameras(self._setup_cameras)
+        self._setup_camera_save_pending = {
+            str(camera.get("name", "")).strip().upper()
+            for camera in self._setup_cameras
+            if str(camera.get("name", "")).strip()
+        }
+        self._setup_camera_save_failed = False
         for camera in self._setup_cameras:
-            self._apply_setup_camera_runtime(camera)
-        self._setup_cameras_saved = self._snapshot_setup_cameras(self._setup_cameras)
-        self._update_setup_camera_save_button_state()
+            self._apply_setup_camera_runtime(camera, persist=True)
 
-    def _apply_setup_camera_runtime(self, camera: dict[str, Any]) -> None:
+    def _apply_setup_camera_runtime(self, camera: dict[str, Any], *, persist: bool = False) -> None:
         name = str(camera.get("name", "")).strip().upper()
         if not name:
             return
@@ -4748,12 +4754,22 @@ class ControlWindow(QMainWindow):
             "flip_horizontal": bool(camera.get("flip_horizontal", False)),
             "flip_vertical": bool(camera.get("flip_vertical", False)),
             "rotation_deg": float(camera.get("rotation_deg", 0.0) or 0.0),
+            "persist": bool(persist),
         }
         self._api.post_json(
             f"/api/camera/{name}/settings",
             payload,
             lambda ok, status, data, cam=name, applied=payload: self._on_setup_camera_runtime_applied(cam, applied, ok, status, data),
         )
+
+    def _on_setup_camera_swap_runtime_applied(self, ok: bool, status: int, data: dict[str, Any]) -> None:
+        if not ok:
+            self._log_line(f"ERR {status}: camera swap failed: {data.get('error', 'request_failed')}")
+            return
+        self._log_line(
+            f"OK: live camera swap applied (TOP={data.get('top_device', '?')}, BOTTOM={data.get('bottom_device', '?')})"
+        )
+        self._poll_status()
 
     def _on_setup_camera_runtime_applied(
         self,
@@ -4777,14 +4793,26 @@ class ControlWindow(QMainWindow):
             )
         reopened = bool(data.get("reopened", False))
         persisted = bool(data.get("persisted", True))
+        persist_requested = bool(payload.get("persist", False))
         if reopened:
             self._log_line(f"OK: {camera_name} runtime camera settings applied and device reopened")
         else:
             self._log_line(f"OK: {camera_name} runtime camera settings applied")
         if not persisted:
-            self._log_line(
-                f"WARN: {camera_name} camera settings applied in runtime only: {data.get('persist_error', 'persistence_not_configured')}"
-            )
+            if persist_requested:
+                self._log_line(
+                    f"WARN: {camera_name} camera settings were not persisted: {data.get('persist_error', 'persistence_not_configured')}"
+                )
+                self._setup_camera_save_failed = True
+            else:
+                self._log_line(f"OK: {camera_name} camera settings applied in runtime only")
+
+        if persist_requested:
+            self._setup_camera_save_pending.discard(camera_name.upper())
+            if not self._setup_camera_save_pending:
+                if not self._setup_camera_save_failed:
+                    self._setup_cameras_saved = self._snapshot_setup_cameras(self._setup_camera_save_target)
+                self._update_setup_camera_save_button_state()
         self._poll_status()
 
     def _refresh_package_table(self) -> None:
