@@ -546,9 +546,8 @@ class CameraTile(QFrame):
 
         self._camera_menu_btn = QToolButton(self._preview)
         self._camera_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._camera_menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._camera_menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self._camera_menu_btn.setAutoRaise(True)
-        self._camera_menu_btn.setIcon(QIcon(_load_pm("camera")))
         self._camera_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._camera_menu_btn.setStyleSheet(
             "QToolButton {"
@@ -2766,6 +2765,7 @@ class ControlWindow(QMainWindow):
         self._panels_by_name: dict[str, dict[str, Any]] = {}
         self._jobs_by_name: dict[str, dict[str, Any]] = {}
         self._setup_cameras: list[dict[str, Any]] = []
+        self._setup_cameras_saved: list[dict[str, Any]] = []
         self._setup_camera_current_row = -1
         self._setup_positions: list[dict[str, Any]] = []
         self._setup_position_current_row = -1
@@ -2937,6 +2937,14 @@ class ControlWindow(QMainWindow):
         self._setup_cam_rotation = QDoubleSpinBox()
         self._setup_cam_rotation.setRange(-360.0, 360.0)
         self._setup_cam_rotation.setDecimals(3)
+        self._setup_cam_name.textChanged.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_device.textChanged.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_fps.valueChanged.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_res_x.valueChanged.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_res_y.valueChanged.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_flip_h.toggled.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_flip_v.toggled.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_rotation.valueChanged.connect(self._update_setup_camera_save_button_state)
 
         setup_cam_grid.addWidget(QLabel("Name"), 0, 0)
         setup_cam_grid.addWidget(self._setup_cam_name, 0, 1)
@@ -4304,6 +4312,9 @@ class ControlWindow(QMainWindow):
             self._setup_camera_current_row = -1
             self._clear_setup_camera_editor()
 
+        self._setup_cameras_saved = self._snapshot_setup_cameras(self._setup_cameras)
+        self._update_setup_camera_save_button_state()
+
         # Camera XY (BOTTOM) is shown in setup positions; refresh positions once
         # the backend camera list is available.
         self._load_setup_positions_from_config()
@@ -4613,6 +4624,34 @@ class ControlWindow(QMainWindow):
         self._setup_cam_flip_v.setChecked(False)
         self._setup_cam_rotation.setValue(0.0)
 
+    @staticmethod
+    def _snapshot_setup_cameras(cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [dict(item) for item in cameras if isinstance(item, dict)]
+
+    def _setup_cameras_with_editor_applied(self) -> list[dict[str, Any]]:
+        working = self._snapshot_setup_cameras(self._setup_cameras)
+        row = self._setup_camera_current_row
+        if row < 0 or row >= len(working):
+            return working
+
+        row_item = dict(working[row])
+        row_item["name"] = self._setup_cam_name.text().strip().upper()
+        row_item["device"] = self._setup_cam_device.text().strip()
+        row_item["fps"] = float(self._setup_cam_fps.value())
+        row_item["resolution_dpcm_x"] = float(self._setup_cam_res_x.value())
+        row_item["resolution_dpcm_y"] = float(self._setup_cam_res_y.value())
+        row_item["flip_horizontal"] = bool(self._setup_cam_flip_h.isChecked())
+        row_item["flip_vertical"] = bool(self._setup_cam_flip_v.isChecked())
+        row_item["rotation_deg"] = float(self._setup_cam_rotation.value())
+        working[row] = row_item
+        return working
+
+    def _update_setup_camera_save_button_state(self, *_args: Any) -> None:
+        if not hasattr(self, "_setup_camera_save_btn"):
+            return
+        pending = self._setup_cameras_with_editor_applied()
+        self._setup_camera_save_btn.setEnabled(pending != self._setup_cameras_saved)
+
     def _on_setup_camera_add(self) -> None:
         self._store_current_setup_camera_editor()
         idx = len(self._setup_cameras) + 1
@@ -4657,17 +4696,21 @@ class ControlWindow(QMainWindow):
             self._log_line("ERR: swap failed: both TOP and BOTTOM cameras must exist")
             return
 
-        self._setup_cameras[top_idx]["name"] = "BOTTOM"
-        self._setup_cameras[bottom_idx]["name"] = "TOP"
+        top_device = str(self._setup_cameras[top_idx].get("device", "")).strip()
+        bottom_device = str(self._setup_cameras[bottom_idx].get("device", "")).strip()
+        self._setup_cameras[top_idx]["device"] = bottom_device
+        self._setup_cameras[bottom_idx]["device"] = top_device
 
         self._refresh_setup_camera_table()
         self._setup_camera_current_row = int(top_idx)
         self._setup_camera_table.selectRow(top_idx)
         self._load_setup_camera_editor(top_idx)
-        self._log_line("OK: swapped TOP/BOTTOM camera roles in setup")
+        self._log_line("OK: swapped TOP/BOTTOM camera devices in setup")
 
-        # Apply immediately so the operator can recover from USB camera order flips in one click.
-        self._on_setup_camera_save()
+        # Apply immediately at runtime; persist only when Save Cameras is pressed.
+        self._apply_setup_camera_runtime(self._setup_cameras[top_idx])
+        self._apply_setup_camera_runtime(self._setup_cameras[bottom_idx])
+        self._update_setup_camera_save_button_state()
 
     def _on_setup_camera_save(self) -> None:
         self._store_current_setup_camera_editor()
@@ -4680,10 +4723,17 @@ class ControlWindow(QMainWindow):
             self._log_line("ERR: camera save failed: duplicate camera names")
             return
 
+        if self._setup_cameras_with_editor_applied() == self._setup_cameras_saved:
+            self._log_line("OK: no pending camera setup changes")
+            self._setup_camera_save_btn.setEnabled(False)
+            return
+
         self._refresh_setup_camera_table()
         self._log_line("OK: camera setup save requested on backend")
         for camera in self._setup_cameras:
             self._apply_setup_camera_runtime(camera)
+        self._setup_cameras_saved = self._snapshot_setup_cameras(self._setup_cameras)
+        self._update_setup_camera_save_button_state()
 
     def _apply_setup_camera_runtime(self, camera: dict[str, Any]) -> None:
         name = str(camera.get("name", "")).strip().upper()
