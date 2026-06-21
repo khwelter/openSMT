@@ -2858,6 +2858,9 @@ class ControlWindow(QMainWindow):
         self._camera_view_combo.setCurrentIndex(3)
         self._camera_view_combo.currentIndexChanged.connect(self._on_camera_view_mode_changed)
         cam_controls.addWidget(self._camera_view_combo)
+        self._camera_swap_btn = QPushButton("Swap TOP/BOTTOM")
+        self._camera_swap_btn.clicked.connect(self._on_setup_camera_swap_top_bottom)
+        cam_controls.addWidget(self._camera_swap_btn)
         cam_controls.addStretch(1)
         cam_group_layout.addLayout(cam_controls)
         cam_group_layout.addWidget(self._camera_host, 1)
@@ -2883,12 +2886,9 @@ class ControlWindow(QMainWindow):
         setup_cam_actions.setSpacing(4)
         self._setup_camera_add_btn = QPushButton("Add Camera")
         self._setup_camera_add_btn.clicked.connect(self._on_setup_camera_add)
-        self._setup_camera_swap_btn = QPushButton("Swap TOP/BOTTOM")
-        self._setup_camera_swap_btn.clicked.connect(self._on_setup_camera_swap_top_bottom)
         self._setup_camera_save_btn = QPushButton("Save Cameras")
         self._setup_camera_save_btn.clicked.connect(self._on_setup_camera_save)
         setup_cam_actions.addWidget(self._setup_camera_add_btn)
-        setup_cam_actions.addWidget(self._setup_camera_swap_btn)
         setup_cam_actions.addWidget(self._setup_camera_save_btn)
         setup_cam_actions.addStretch(1)
         setup_cameras_layout.addLayout(setup_cam_actions)
@@ -4302,6 +4302,7 @@ class ControlWindow(QMainWindow):
             self._on_setup_camera_row_selected(0, 0)
         else:
             self._setup_camera_current_row = -1
+            self._clear_setup_camera_editor()
 
         # Camera XY (BOTTOM) is shown in setup positions; refresh positions once
         # the backend camera list is available.
@@ -4582,6 +4583,14 @@ class ControlWindow(QMainWindow):
         self._refresh_setup_camera_table()
         self._setup_camera_current_row = int(row)
         if row < 0 or row >= len(self._setup_cameras):
+            self._setup_camera_current_row = -1
+            self._clear_setup_camera_editor()
+            return
+        self._load_setup_camera_editor(int(row))
+
+    def _load_setup_camera_editor(self, row: int) -> None:
+        if row < 0 or row >= len(self._setup_cameras):
+            self._clear_setup_camera_editor()
             return
 
         cam = self._setup_cameras[row]
@@ -4593,6 +4602,16 @@ class ControlWindow(QMainWindow):
         self._setup_cam_flip_h.setChecked(bool(cam.get("flip_horizontal", False)))
         self._setup_cam_flip_v.setChecked(bool(cam.get("flip_vertical", False)))
         self._setup_cam_rotation.setValue(float(cam.get("rotation_deg", 0.0) or 0.0))
+
+    def _clear_setup_camera_editor(self) -> None:
+        self._setup_cam_name.clear()
+        self._setup_cam_device.clear()
+        self._setup_cam_fps.setValue(10.0)
+        self._setup_cam_res_x.setValue(0.0)
+        self._setup_cam_res_y.setValue(0.0)
+        self._setup_cam_flip_h.setChecked(False)
+        self._setup_cam_flip_v.setChecked(False)
+        self._setup_cam_rotation.setValue(0.0)
 
     def _on_setup_camera_add(self) -> None:
         self._store_current_setup_camera_editor()
@@ -4642,8 +4661,9 @@ class ControlWindow(QMainWindow):
         self._setup_cameras[bottom_idx]["name"] = "TOP"
 
         self._refresh_setup_camera_table()
+        self._setup_camera_current_row = int(top_idx)
         self._setup_camera_table.selectRow(top_idx)
-        self._on_setup_camera_row_selected(top_idx, 0)
+        self._load_setup_camera_editor(top_idx)
         self._log_line("OK: swapped TOP/BOTTOM camera roles in setup")
 
         # Apply immediately so the operator can recover from USB camera order flips in one click.
