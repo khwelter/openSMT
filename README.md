@@ -171,10 +171,6 @@ Primary entrypoint:
 - `config/examples/broker.json`
   - Legacy SCPI broker host/port (`broker.host`, `broker.port`)
 
-- `config/examples/serial_ports_main.json`
-  - Legacy serial-port mapping format
-  - Contains `serial_ports[]` with serial settings, axis lists, and `axis_map`
-
 - `config/examples/playback.txt`
   - Legacy monitor playback script with command lines and `SLEEP` statements
 

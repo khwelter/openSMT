@@ -1,7 +1,7 @@
 {
   "boards": {
     "XY": {
-      "device": "/dev/marlinXY",
+      "device": "/dev/ttyACM11",
       "baudrate": 250000,
       "bytesize": 8,
       "parity": "N",
@@ -11,7 +11,7 @@
       "dsrdtr": false
     },
     "AB": {
-      "device": "/dev/marlinAB",
+      "device": "/dev/ttyACM12",
       "baudrate": 250000,
       "bytesize": 8,
       "parity": "N",
@@ -21,7 +21,7 @@
       "dsrdtr": false
     },
     "CD": {
-      "device": "/dev/marlinCD",
+      "device": "/dev/ttyACM13",
       "baudrate": 250000,
       "bytesize": 8,
       "parity": "N",
