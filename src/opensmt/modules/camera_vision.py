@@ -2361,12 +2361,7 @@ class CameraVisionModule:
                 return web.json_response({"error": "invalid_location_coordinates", "name": name}, status=400)
             parsed[name] = {"X": x, "Y": y}
 
-        existing = set(self._location_store.names())
-        incoming = set(parsed.keys())
-        for name in sorted(existing - incoming):
-            self._location_store.delete(name)
-        for name, coords in parsed.items():
-            self._location_store.set(name, coords)
+        self._location_store.replace_all(parsed)
 
         return web.json_response(
             {
