@@ -2768,6 +2768,12 @@ class ControlWindow(QMainWindow):
         self._setup_camera_save_target: list[dict[str, Any]] = []
         self._setup_camera_save_failed = False
         self._setup_camera_current_row = -1
+        self._setup_camera_runtime_target_name: str = ""
+        self._setup_camera_editor_loading = False
+        self._setup_camera_apply_timer = QTimer(self)
+        self._setup_camera_apply_timer.setSingleShot(True)
+        self._setup_camera_apply_timer.setInterval(250)
+        self._setup_camera_apply_timer.timeout.connect(self._apply_setup_camera_editor_runtime_now)
         self._setup_positions: list[dict[str, Any]] = []
         self._setup_position_current_row = -1
         self._current_x: float | None = None
@@ -2915,6 +2921,7 @@ class ControlWindow(QMainWindow):
         sch.resizeSection(3, 160)
         sch.resizeSection(4, 110)
         self._setup_camera_table.cellClicked.connect(self._on_setup_camera_row_selected)
+        self._setup_camera_table.itemSelectionChanged.connect(self._on_setup_camera_selection_changed)
         setup_cameras_layout.addWidget(self._setup_camera_table)
         self._set_table_visible_rows(self._setup_camera_table, 4)
 
@@ -2937,14 +2944,14 @@ class ControlWindow(QMainWindow):
         self._setup_cam_rotation = QDoubleSpinBox()
         self._setup_cam_rotation.setRange(-360.0, 360.0)
         self._setup_cam_rotation.setDecimals(3)
-        self._setup_cam_name.textChanged.connect(self._update_setup_camera_save_button_state)
-        self._setup_cam_device.textChanged.connect(self._update_setup_camera_save_button_state)
-        self._setup_cam_fps.valueChanged.connect(self._update_setup_camera_save_button_state)
-        self._setup_cam_res_x.valueChanged.connect(self._update_setup_camera_save_button_state)
-        self._setup_cam_res_y.valueChanged.connect(self._update_setup_camera_save_button_state)
-        self._setup_cam_flip_h.toggled.connect(self._update_setup_camera_save_button_state)
-        self._setup_cam_flip_v.toggled.connect(self._update_setup_camera_save_button_state)
-        self._setup_cam_rotation.valueChanged.connect(self._update_setup_camera_save_button_state)
+        self._setup_cam_name.textChanged.connect(self._on_setup_camera_editor_changed)
+        self._setup_cam_device.textChanged.connect(self._on_setup_camera_editor_changed)
+        self._setup_cam_fps.valueChanged.connect(self._on_setup_camera_editor_changed)
+        self._setup_cam_res_x.valueChanged.connect(self._on_setup_camera_editor_changed)
+        self._setup_cam_res_y.valueChanged.connect(self._on_setup_camera_editor_changed)
+        self._setup_cam_flip_h.toggled.connect(self._on_setup_camera_editor_changed)
+        self._setup_cam_flip_v.toggled.connect(self._on_setup_camera_editor_changed)
+        self._setup_cam_rotation.valueChanged.connect(self._on_setup_camera_editor_changed)
 
         setup_cam_grid.addWidget(QLabel("Name"), 0, 0)
         setup_cam_grid.addWidget(self._setup_cam_name, 0, 1)
@@ -4590,6 +4597,7 @@ class ControlWindow(QMainWindow):
         target["rotation_deg"] = float(self._setup_cam_rotation.value())
 
     def _on_setup_camera_row_selected(self, row: int, _col: int) -> None:
+        self._setup_camera_apply_timer.stop()
         self._store_current_setup_camera_editor()
         self._refresh_setup_camera_table()
         self._setup_camera_current_row = int(row)
@@ -4599,22 +4607,34 @@ class ControlWindow(QMainWindow):
             return
         self._load_setup_camera_editor(int(row))
 
+    def _on_setup_camera_selection_changed(self) -> None:
+        row = int(self._setup_camera_table.currentRow())
+        if row < 0 or row == self._setup_camera_current_row:
+            return
+        self._on_setup_camera_row_selected(row, 0)
+
     def _load_setup_camera_editor(self, row: int) -> None:
         if row < 0 or row >= len(self._setup_cameras):
             self._clear_setup_camera_editor()
             return
 
         cam = self._setup_cameras[row]
-        self._setup_cam_name.setText(str(cam.get("name", "")).strip().upper())
-        self._setup_cam_device.setText(str(cam.get("device", "")).strip())
-        self._setup_cam_fps.setValue(float(cam.get("fps", 10.0) or 10.0))
-        self._setup_cam_res_x.setValue(float(cam.get("resolution_dpcm_x", 0.0) or 0.0))
-        self._setup_cam_res_y.setValue(float(cam.get("resolution_dpcm_y", 0.0) or 0.0))
-        self._setup_cam_flip_h.setChecked(bool(cam.get("flip_horizontal", False)))
-        self._setup_cam_flip_v.setChecked(bool(cam.get("flip_vertical", False)))
-        self._setup_cam_rotation.setValue(float(cam.get("rotation_deg", 0.0) or 0.0))
+        self._setup_camera_editor_loading = True
+        try:
+            self._setup_cam_name.setText(str(cam.get("name", "")).strip().upper())
+            self._setup_cam_device.setText(str(cam.get("device", "")).strip())
+            self._setup_cam_fps.setValue(float(cam.get("fps", 10.0) or 10.0))
+            self._setup_cam_res_x.setValue(float(cam.get("resolution_dpcm_x", 0.0) or 0.0))
+            self._setup_cam_res_y.setValue(float(cam.get("resolution_dpcm_y", 0.0) or 0.0))
+            self._setup_cam_flip_h.setChecked(bool(cam.get("flip_horizontal", False)))
+            self._setup_cam_flip_v.setChecked(bool(cam.get("flip_vertical", False)))
+            self._setup_cam_rotation.setValue(float(cam.get("rotation_deg", 0.0) or 0.0))
+        finally:
+            self._setup_camera_editor_loading = False
+        self._setup_camera_runtime_target_name = str(cam.get("name", "")).strip().upper()
 
     def _clear_setup_camera_editor(self) -> None:
+        self._setup_camera_editor_loading = True
         self._setup_cam_name.clear()
         self._setup_cam_device.clear()
         self._setup_cam_fps.setValue(10.0)
@@ -4623,6 +4643,8 @@ class ControlWindow(QMainWindow):
         self._setup_cam_flip_h.setChecked(False)
         self._setup_cam_flip_v.setChecked(False)
         self._setup_cam_rotation.setValue(0.0)
+        self._setup_camera_editor_loading = False
+        self._setup_camera_runtime_target_name = ""
 
     @staticmethod
     def _snapshot_setup_cameras(cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4645,6 +4667,34 @@ class ControlWindow(QMainWindow):
         row_item["rotation_deg"] = float(self._setup_cam_rotation.value())
         working[row] = row_item
         return working
+
+    def _on_setup_camera_editor_changed(self, *_args: Any) -> None:
+        self._update_setup_camera_save_button_state()
+        if self._setup_camera_editor_loading:
+            return
+        self._schedule_setup_camera_runtime_apply()
+
+    def _schedule_setup_camera_runtime_apply(self) -> None:
+        row = self._setup_camera_current_row
+        if row < 0 or row >= len(self._setup_cameras):
+            return
+        if not self._setup_camera_runtime_target_name:
+            return
+        self._setup_camera_apply_timer.start()
+
+    def _apply_setup_camera_editor_runtime_now(self) -> None:
+        row = self._setup_camera_current_row
+        if row < 0 or row >= len(self._setup_cameras):
+            return
+        target_name = self._setup_camera_runtime_target_name.strip().upper()
+        if not target_name:
+            return
+        pending = self._setup_cameras_with_editor_applied()
+        if row < 0 or row >= len(pending):
+            return
+        camera = dict(pending[row])
+        self._setup_cameras[row] = camera
+        self._apply_setup_camera_runtime(camera, persist=False, camera_name_override=target_name)
 
     def _update_setup_camera_save_button_state(self, *_args: Any) -> None:
         if not hasattr(self, "_setup_camera_save_btn"):
@@ -4741,8 +4791,14 @@ class ControlWindow(QMainWindow):
         for camera in self._setup_cameras:
             self._apply_setup_camera_runtime(camera, persist=True)
 
-    def _apply_setup_camera_runtime(self, camera: dict[str, Any], *, persist: bool = False) -> None:
-        name = str(camera.get("name", "")).strip().upper()
+    def _apply_setup_camera_runtime(
+        self,
+        camera: dict[str, Any],
+        *,
+        persist: bool = False,
+        camera_name_override: str | None = None,
+    ) -> None:
+        name = str(camera_name_override or camera.get("name", "")).strip().upper()
         if not name:
             return
 
