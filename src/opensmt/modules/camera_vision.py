@@ -1132,6 +1132,7 @@ class CameraVisionModule:
         ) -> web.StreamResponse:
             if request.path.startswith("/api/"):
                 print(f"[API RX] {request.method} {request.path}")
+                self._reload_runtime_config_from_persistence()
             try:
                 response = await handler(request)
                 if request.path.startswith("/api/"):
@@ -1846,6 +1847,7 @@ class CameraVisionModule:
         )
 
     def _get_bottom_camera_xy(self) -> tuple[float, float] | None:
+        self._reload_camera_config_from_persist()
         for cam_cfg in self.config.get("cameras", []):
             if str(cam_cfg.get("name", "")).upper() != "BOTTOM":
                 continue
@@ -1860,6 +1862,7 @@ class CameraVisionModule:
         return None
 
     def _set_camera_xy(self, camera_name: str, x: float, y: float) -> bool:
+        self._reload_camera_config_from_persist()
         for cam_cfg in self.config.get("cameras", []):
             if str(cam_cfg.get("name", "")).upper() != str(camera_name).upper():
                 continue
@@ -1867,6 +1870,197 @@ class CameraVisionModule:
             cam_cfg["y"] = float(y)
             return True
         return False
+
+    def _reload_runtime_config_from_persistence(self) -> None:
+        """Refresh config-backed runtime state from persisted sources."""
+        self._reload_camera_config_from_persist()
+        self._reload_nozzle_config_from_persist()
+        self._reload_feeder_config_from_persist()
+
+    def _reload_camera_config_from_persist(self) -> None:
+        path = self._camera_resolutions_persist_path
+        if path is None or not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        camera_obj = payload.get("camera")
+        if not isinstance(camera_obj, dict):
+            return
+        cameras_list = camera_obj.get("cameras")
+        if not isinstance(cameras_list, list):
+            return
+
+        normalized: list[dict[str, Any]] = []
+        for item in cameras_list:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip().upper()
+            if not name:
+                continue
+            cfg_item = dict(item)
+            cfg_item["name"] = name
+            normalized.append(cfg_item)
+
+            state = self._cameras.get(name)
+            if state is None:
+                continue
+            state.config.device = str(cfg_item.get("device", state.config.device)).strip() or state.config.device
+            try:
+                state.config.fps = float(cfg_item.get("fps", state.config.fps))
+            except Exception:
+                pass
+            try:
+                state.config.resolution_dpcm_x = float(cfg_item.get("resolution_dpcm_x", state.config.resolution_dpcm_x))
+                state.config.resolution_dpcm_y = float(cfg_item.get("resolution_dpcm_y", state.config.resolution_dpcm_y))
+            except Exception:
+                pass
+            state.config.flip_horizontal = bool(cfg_item.get("flip_horizontal", state.config.flip_horizontal))
+            state.config.flip_vertical = bool(cfg_item.get("flip_vertical", state.config.flip_vertical))
+            try:
+                state.config.rotation_deg = float(cfg_item.get("rotation_deg", state.config.rotation_deg))
+                state.current_rotation_deg = state.config.rotation_deg
+            except Exception:
+                pass
+
+        if normalized:
+            self.config["cameras"] = normalized
+
+    def _reload_nozzle_config_from_persist(self) -> None:
+        if self._nozzle_config_store is None:
+            return
+        path = self._nozzle_offsets_persist_path
+        if path is None or not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+
+        camera_obj = payload.get("camera")
+        if not isinstance(camera_obj, dict):
+            return
+
+        tips_raw = camera_obj.get("nozzle_tips")
+        if isinstance(tips_raw, list):
+            tips: dict[str, dict[str, Any]] = {}
+            for item in tips_raw:
+                if not isinstance(item, dict):
+                    continue
+                tip_id = str(item.get("id", "")).strip()
+                if not tip_id:
+                    continue
+                tips[tip_id] = {
+                    "id": tip_id,
+                    "suction_hole_diameter_mm": item.get("suction_hole_diameter_mm"),
+                    "component_min_mm": item.get("component_min_mm"),
+                    "component_max_mm": item.get("component_max_mm"),
+                }
+            self._nozzle_tips = tips
+            self.config["nozzle_tips"] = [dict(v) for v in tips.values()]
+
+        nozzles_raw = camera_obj.get("nozzles")
+        if not isinstance(nozzles_raw, list):
+            return
+
+        normalized_nozzles: list[dict[str, Any]] = []
+        for item in nozzles_raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip().upper()
+            z_axis = str(item.get("z_axis", "")).strip().upper()
+            if not name or not z_axis:
+                continue
+
+            vacuum_raw = item.get("vacuum_valve") if isinstance(item.get("vacuum_valve"), dict) else {}
+            try:
+                vacuum_valve = ValveConfig(
+                    board=str(vacuum_raw.get("board", "AB")).strip().upper(),
+                    io_type=str(vacuum_raw.get("io_type", "gpio")).strip().lower(),
+                    pin=int(vacuum_raw.get("pin", 0)),
+                )
+            except Exception:
+                continue
+
+            air_valve = None
+            air_raw = item.get("air_valve")
+            if isinstance(air_raw, dict):
+                try:
+                    air_valve = ValveConfig(
+                        board=str(air_raw.get("board", "AB")).strip().upper(),
+                        io_type=str(air_raw.get("io_type", "gpio")).strip().lower(),
+                        pin=int(air_raw.get("pin", 0)),
+                    )
+                except Exception:
+                    air_valve = None
+
+            try:
+                cfg = NozzleConfig(
+                    name=name,
+                    z_axis=z_axis,
+                    min_z=float(item.get("min_z", -50.0) or -50.0),
+                    max_z=float(item.get("max_z", 0.0) or 0.0),
+                    offset_x=float(item.get("offset_x", 0.0) or 0.0),
+                    offset_y=float(item.get("offset_y", 0.0) or 0.0),
+                    vacuum_valve=vacuum_valve,
+                    tip_id=(str(item.get("tip_id")).strip() if item.get("tip_id") is not None and str(item.get("tip_id")).strip() else None),
+                    standard_down_z=(float(item.get("standard_down_z")) if item.get("standard_down_z") is not None else None),
+                    safe_zone_z=(float(item.get("safe_zone_z")) if item.get("safe_zone_z") is not None else -10.0),
+                    air_valve=air_valve,
+                )
+            except Exception:
+                continue
+
+            self._nozzle_config_store.upsert(cfg)
+            r_axis = f"R{z_axis[1:]}" if z_axis.startswith("Z") and len(z_axis) > 1 else "R1"
+            self._nozzles[name] = RuntimeNozzleConfig(
+                name=name,
+                z_axis=z_axis,
+                r_axis=r_axis,
+                min_z=float(cfg.min_z),
+                max_z=float(cfg.max_z),
+            )
+            normalized_nozzles.append(dict(item))
+
+        if normalized_nozzles:
+            self.config["nozzles"] = normalized_nozzles
+
+    def _reload_feeder_config_from_persist(self) -> None:
+        if self._feeder_config_store is None:
+            return
+
+        payloads: list[dict[str, Any]] = []
+        if self._catalog_db is not None:
+            try:
+                payloads = [dict(item) for item in self._catalog_db.load_feeders() if isinstance(item, dict)]
+            except Exception:
+                payloads = []
+        elif self._feeders_persist_dir is not None and self._feeders_persist_dir.is_dir():
+            for path in sorted(self._feeders_persist_dir.glob("*.json")):
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if isinstance(raw, dict):
+                    payloads.append(raw)
+
+        if not payloads:
+            return
+
+        parsed = []
+        for item in payloads:
+            try:
+                parsed.append(feeder_from_dict(item))
+            except Exception:
+                continue
+        if not parsed:
+            return
+        self._feeder_config_store = FeederConfigStore(parsed)
 
     def _persist_nozzle_offsets(self) -> str | None:
         """Persist current nozzle offset/tip values into nozzle config chunk file."""
